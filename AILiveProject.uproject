@@ -3,6 +3,21 @@
 	"EngineAssociation": "5.7",
 	"Category": "Samples",
 	"Description": "",
+	"Modules": [
+		{
+			"Name": "AILiveProject",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"Engine",
+				"HTTP",
+				"Json",
+				"JsonUtilities",
+				"ACERuntime",
+				"ACECore"
+			]
+		}
+	],
 	"Plugins": [
 		{
 			"Name": "ModelingToolsEditorMode",
