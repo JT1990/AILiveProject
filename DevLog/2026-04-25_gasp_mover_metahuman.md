@@ -24,11 +24,11 @@ UE是你不擅长的领域，不要凭感觉猜测，先学习，后思考规划
 
 **交付物**：
 
-| 类型 | 路径 | 改动 |
-| --- | --- | --- |
-| 角色 BP | `Content/MetaHumans/MH_Character_1/BP_MH_Character_1.uasset` | 改 Body 3 属性 + 扩展 BeginPlay 链（10 节点）|
-| GameMode | `Content/Blueprints/GM_Sandbox.uasset` | VisualOverrides 追加 `BP_MH_Character_1_C`（索引 6）|
-| 引擎配置 | `Config/DefaultEngine.ini` | 加 `GlobalDefaultGameMode=/Game/Blueprints/GM_Sandbox.GM_Sandbox_C` |
+| 类型     | 路径                                                         | 改动                                                                |
+| -------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| 角色 BP  | `Content/MetaHumans/MH_Character_1/BP_MH_Character_1.uasset` | 改 Body 3 属性 + 扩展 BeginPlay 链（10 节点）                       |
+| GameMode | `Content/Blueprints/GM_Sandbox.uasset`                       | VisualOverrides 追加 `BP_MH_Character_1_C`（索引 6）                |
+| 引擎配置 | `Config/DefaultEngine.ini`                                   | 加 `GlobalDefaultGameMode=/Game/Blueprints/GM_Sandbox.GM_Sandbox_C` |
 
 **未新建资产**。
 
@@ -46,20 +46,20 @@ UE是你不擅长的领域，不要凭感觉猜测，先学习，后思考规划
 
 用 Monolith MCP 查 `BP_MH_Character_1` / `GM_Sandbox` / `Level_AILive` 的当前状态，发现很多东西已经就位：
 
-| 检查项 | 预检结果 | 后续动作 |
-| --- | --- | --- |
-| `Face.AnimClass` | 已是 `Face_Archetype_Skeleton_AnimBP_C` | 不改 |
-| `ACEAudioCurveSource` 组件 | 已存在，挂 Face 下 | 不改 |
-| T 键触发链 | `InputKey T → GetMinimaxApiKeyFromProjectEnv → TriggerMinimaxSpeech` 已连 | 不改 |
-| BeginPlay 已有节点 | `Enable Input → Prewarm A2F → Get Available A2FProviders` | 末尾继续接 |
-| `A2FProvider Name` 变量 | `LocalA2F-Claire`（女声模型） | 确认无误 |
-| `GM_Sandbox.DefaultPawnClass` | `SandboxCharacter_Mover_C` | 已是正确值 |
-| `GM_Sandbox.VisualOverrides` | 6 项（索引 0-5） | 末尾追加索引 6 |
-| `Body.AnimClass` | `None` | 改 |
-| `Body.ComponentTags` | `[]` | 加 `RTG_UEFN_to_Metahuman_nrw` |
-| `Body.VisibilityBasedAnimTickOption` | `OnlyTickPoseWhenRendered` | 改 `AlwaysTickPoseAndRefreshBones` |
-| `Level_AILive` 的 GameMode Override | `None`（用默认 GameMode） | 改 INI 全局 GameMode |
-| `BeginPlay` 的 AddTickPrerequisite 链 | 不存在 | 新增 10 节点 |
+| 检查项                                | 预检结果                                                                  | 后续动作                           |
+| ------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------- |
+| `Face.AnimClass`                      | 已是 `Face_Archetype_Skeleton_AnimBP_C`                                   | 不改                               |
+| `ACEAudioCurveSource` 组件            | 已存在，挂 Face 下                                                        | 不改                               |
+| T 键触发链                            | `InputKey T → GetMinimaxApiKeyFromProjectEnv → TriggerMinimaxSpeech` 已连 | 不改                               |
+| BeginPlay 已有节点                    | `Enable Input → Prewarm A2F → Get Available A2FProviders`                 | 末尾继续接                         |
+| `A2FProvider Name` 变量               | `LocalA2F-Claire`（女声模型）                                             | 确认无误                           |
+| `GM_Sandbox.DefaultPawnClass`         | `SandboxCharacter_Mover_C`                                                | 已是正确值                         |
+| `GM_Sandbox.VisualOverrides`          | 6 项（索引 0-5）                                                          | 末尾追加索引 6                     |
+| `Body.AnimClass`                      | `None`                                                                    | 改                                 |
+| `Body.ComponentTags`                  | `[]`                                                                      | 加 `RTG_UEFN_to_Metahuman_nrw`     |
+| `Body.VisibilityBasedAnimTickOption`  | `OnlyTickPoseWhenRendered`                                                | 改 `AlwaysTickPoseAndRefreshBones` |
+| `Level_AILive` 的 GameMode Override   | `None`（用默认 GameMode）                                                 | 改 INI 全局 GameMode               |
+| `BeginPlay` 的 AddTickPrerequisite 链 | 不存在                                                                    | 新增 10 节点                       |
 
 **预检的价值**：把原计划里"13 节点"的 BeginPlay 新增量压到 10 节点（`Event BeginPlay / EnableInput / PrewarmA2F` 3 个已有），不做无用功。
 
@@ -71,6 +71,7 @@ UE是你不擅长的领域，不要凭感觉猜测，先学习，后思考规划
    - `VisibilityBasedAnimTickOption` → `AlwaysTickPoseAndRefreshBones`
 
 2. **`GM_Sandbox.VisualOverrides` 末尾追加**（`set_cdo_property`）：
+
    ```
    [0] BP_Echo_C
    [1] BP_Twinblast_C
@@ -82,12 +83,14 @@ UE是你不擅长的领域，不要凭感觉猜测，先学习，后思考规划
    ```
 
 3. **`Config/DefaultEngine.ini` 加 GameMode 全局默认**：
+
    ```ini
    [/Script/EngineSettings.GameMapsSettings]
    EditorStartupMap=/Game/MyAssets/Level_AILive.Level_AILive
    GameDefaultMap=/Game/MyAssets/Level_AILive.Level_AILive
    GlobalDefaultGameMode=/Game/Blueprints/GM_Sandbox.GM_Sandbox_C
    ```
+
    **注意**：改完要重启编辑器才生效。原因：`DefaultEngine.ini` 在编辑器启动阶段读一次。
 
 4. **BeginPlay 链扩展 10 节点**（`build_blueprint_from_spec` 一次性完成）：
@@ -140,7 +143,7 @@ PIE + 控制台输入 `DDCvar.VisualOverride 6` → WASD 身体跑动 ✓ → �
 2. **`IsValid` 有多个同名函数**。直接 `resolve_node("CallFunction", "IsValid")` 解析到 `SubobjectDataBlueprintFunctionLibrary.IsValid`（输入是 `FSubobjectData`），不是我们要的 Object 版。必须显式指定 `target_class: "KismetSystemLibrary"`
 3. **`set_actor_properties` 不支持 `DefaultGameMode`**。Monolith MCP 的 `mesh_query.set_actor_properties` 只接受 mobility/simulate_physics/collision_preset/cast_shadow/tags/mass_kg 6 个字段。改 WorldSettings 的 GameModeOverride 走不通 —— 退而求其次用 `DefaultEngine.ini` 全局 GameMode
 4. **INI 改完不生效**。`DefaultEngine.ini` 在编辑器启动时读一次，运行中改了要**重启编辑器**才生效
-5. **参数名 `value` vs `property_value`**。第一次调 `set_component_property` 传 `property_value` 失败，实际参数名是 `value`（不加 property_ 前缀）
+5. **参数名 `value` vs `property_value`**。第一次调 `set_component_property` 传 `property_value` 失败，实际参数名是 `value`（不加 property\_ 前缀）
 
 ### 值得沿用的模式
 
