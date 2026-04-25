@@ -1,0 +1,1 @@
+#include "Mind/MindMockResponseTable.h"
