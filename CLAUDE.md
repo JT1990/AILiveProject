@@ -1,29 +1,12 @@
-# CLAUDE.md
-
-本文件为 Claude Code (claude.ai/code) 在本仓库工作时提供指引。
-
 ## 项目概览
 
-**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。场景中存在 8 个 AI 驱动的 MetaHuman NPC；玩家以不可见的 DefaultPawn 飞行摄像头运行。默认关卡：`Content/MyAssets/Level_AILive.umap`。主模块：`Source/AILiveProject/`（HTTP + ACE C++ API 的薄 glue 层）。**当前主线工作是 AI 心智决策系统**（见下方专节，27 张任务卡 M-1~M5）。
+The AI Live 是一个多智能体社会博弈系统。将多个来自不同模型厂商的 AI agent 投放到同一封闭环境中，赋予明确规则、有限信息、长期记忆、关系约束与生存风险，让它们围绕合作、结盟、欺骗、背叛与自我延续展开持续博弈。
 
-## 快速开始
-
-1. **`<ProjectDir>/.env`** 必须包含（已 gitignore；通用读取用 `GetEnvValueFromProjectEnv(key)`，`minimax=` 是历史遗留保留）：
-   - `minimax=sk-api-...` — MiniMax TTS
-   - `DEEPSEEK_API_BASE=https://api.deepseek.com/v1` + `DEEPSEEK_API_KEY=...` — LLM 主厂商
-   - `EMBEDDING_API_BASE=http://localhost:11434/v1` + `EMBEDDING_MODEL_NAME=qwen3-embedding:8b` — **ollama OpenAI-compat**（路径 `/v1/embeddings`，不是原生 `/api/embeddings`）
-   - `NEO4J_URI=bolt://localhost:7687` + `NEO4J_USER=neo4j` + `NEO4J_PASSWORD=...` — 记忆系统
-   新 key 用 `XXX_API_KEY` / `XXX_API_BASE` 风格命名。
-2. 用 UE 5.7 打开 `AILiveProject.uproject`。
-3. **Memory Service**（M0 起需要）：`cd Tools/MemoryService && uvicorn app:app --port 8765`。Neo4j + ollama 必须先起。
-4. 烟测：PIE → 在任一 `BP_NPC_MH_Character_*` 上按 **T** 键。预期听到中文语音并看到 `LocalA2F-James` 驱动的同步口型。观察 Output Log 中的 MiniMax trace ID 和 `LogACE` 日志。首次调用会有 TRT 编译延迟，除非 BeginPlay 里已调用 `PrewarmA2F`。
+**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`（HTTP + ACE C++ API 的薄 glue 层）。**当前主线工作是 AI 心智决策系统**（见下方专节，27 张任务卡 M-1~M5）。
 
 ## 关键规则 (Critical rules)
 
-- **IMPORTANT —— ACE provider 名必须严格匹配**。本地只注册了 `LocalA2F-James`、`LocalA2F-Mark`、`LocalA2F-Claire` 三个 provider。传 `"Default"` 会**静默退回 `RemoteA2F`**（走网络，看起来成功实际上本地什么都没做）。
-- **IMPORTANT —— MiniMax endpoint 由 key 前缀决定**。`sk-api-` 前缀 key → `https://api.minimaxi.com/v1/t2a_v2`。`api.minimax.io` 是 JWT 格式 key 的国际版 endpoint，不要混用。响应 audio 是 hex 编码，由 `MinimaxSpeechClient` 解码成 PCM16 16 kHz mono（ACE 唯一接受的格式）。
-- **YOU MUST 在改 BP 前做预检**。用 Monolith MCP 的 `get_components` / `get_graph_summary` / `get_variables` / `get_cdo_properties` / `get_execution_flow` 读当前真实状态，再对照计划做差量。DevLog 里的大多数步骤在本仓库里**已经就位**——机械地照搬会造成重复组件、断裂图。
-- **改完任何 `Config/Default*.ini` 必须重启编辑器**。UE 运行时不会 hot-reload INI。
+- DevLog 里的大多数步骤在本仓库里**已经就位**——机械地照搬会造成重复组件、断裂图。
 - **不要把 `bTickPhysicsAsync` 翻成 True**（在 `DefaultEngine.ini`），会破坏 Animation Warping。
 - **不要修改 `Source/*.Target.cs` 里的 `DefaultBuildSettings = V6`**，降级会破坏 Installed-Engine + Live Coding 的兼容性。
 
@@ -35,7 +18,7 @@ UBT 构建 Editor target：
 <Engine>/Build/BatchFiles/Build.bat AILiveProjectEditor Win64 Development -Project="D:/Project/Unreal/AILiveProject/AILiveProject.uproject"
 ```
 
-对 `AILiveProject` 模块的迭代由 Live Coding / Hot Reload 处理。只有改动 `.Build.cs`、`.Target.cs` 或 `uproject` 的 plugin 列表时才需要全量重建。没有自动测试套件；烟测是上面 PIE + T 键的流程。
+改 .Build.cs / .Target.cs / uproject plugin 列表才需要全量重建（命令见上），其余 .cpp/.h 改动走 Live Coding。没有自动测试套件；唯一验证路径是 PIE + T 键的烟测。
 
 ## AI 心智决策系统（M-1 ~ M5 主线）
 
@@ -44,22 +27,36 @@ UBT 构建 Editor target：
 ### 架构层
 
 ```
-LLM (DeepSeek/GLM/Mock)  ──→  ActionJSON
-        │
-        ▼
-UMindComponent ──── ActionRegistry ──── UMindAction_*  (Speak / PlayCards / Vote / MoveTo …)
-        │                                   │
-        │                                   ├─ 通用动作：Mind 模块
-        │                                   └─ 游戏专属动作：GameMaster 阶段动态注册
-        ▼
-AMindGameMaster_*   (LiarsBar / MinorityRule)
-        │            阶段机 + Validate/Apply
-        ▼
-Memory Service (Tools/MemoryService/, Python FastAPI) ←→ Neo4j + ollama embedding
-        ▲
-        │
-   AI Perception + EQS + SmartObjects   ←  执行层桥梁（"LLM 抽象动作 → UE 具体执行"）
+   GameMaster 阶段切换(主导)  ┐                  ┌  AI Perception 节流5s(补充)
+                              ▼                  ▼
+                       UMindComponent::RequestDecision
+                              │
+                              ▼
+                LLM Provider (DeepSeek / GLM / Mock)  ──→  ActionJSON
+                              │
+                              ▼
+                       UMindComponent::DispatchAction        (中央调度)
+                              │
+   ① GM.Validate (只读) ─────┤──→  AMindGameMaster_*  (LiarsBar / MinorityRule)
+                              │       阶段机；只在 Validate / Apply 改 state
+   ② Action.Execute  ────────┤──→  UMindAction_*    (Speak / PlayCards / Vote / MoveTo …)
+                              │       ├─ 通用：Mind 模块
+                              │       └─ 游戏专属：GM 阶段动态注册
+                              │       └─→ EQS / SmartObjects   (执行层桥梁：
+                              │                                 "LLM 抽象动作 → UE 具体执行")
+   ③ GM.Apply  ──────────────┤──→  AMindGameMaster_*   (Action 成功 Done 后才改 state)
+                              │
+   ④ Memory.Write  ──────────┤──→  Memory Service (Tools/MemoryService/, Python FastAPI)
+                              │           ↕
+                              │     Neo4j  +  ollama embedding (qwen3-embedding:8b)
+   ⑤ State = Idle             │
+                              ▼
+                       GM.OnAgentActionFinished (子类决定切阶段)
 ```
+
+- **触发上行**：GameMaster 阶段唤醒（主导）/ AI Perception（补充，T07 后才打开 `bPerceptionCanTriggerDecision`）→ `RequestDecision`。
+- **中央调度**：`DispatchAction` 是 P0-A 流程的实际持有者，五步顺序固定；GM 只负责 ①Validate / ③Apply，Action 只负责 ②Execute（fire-and-forget）。
+- **Memory 写入路径**：`MindComponent::HandleActionDone` 内调（不是 GM 下游）；私聊另有 `GM.RecordSpeechEvent` 经 `Perception.CanSenseActor(Hearing)` 过滤后写入旁观 NPC（T22）。
 
 ### P0 强约束（违反就塌）
 
@@ -84,6 +81,8 @@ Memory Service (Tools/MemoryService/, Python FastAPI) ←→ Neo4j + ollama embe
 - **BeginPlay 时序固定**：`Super → PrewarmA2F → SetFixedAndApply → MindComponent.Initialize`。
 
 ## Unreal 资产操作（Monolith MCP）
+
+**YOU MUST** 在操作 UE 前做两件准备工作：1. 扫描查阅是否有可用的skill，避免猜测走弯路；2.用 Monolith MCP 的 `tools` 读当前真实状态，再对照计划做差量。
 
 Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json` 配置，proxy 在 `Plugins/Monolith/Binaries/monolith_proxy.exe`）。不要让用户手点编辑器，除非 MCP 确实做不到——那时再明确说明走 fallback。
 
@@ -127,11 +126,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 ### 关卡
 
-`Content/MyAssets/Level_AILive.umap`：玩家 Pawn 是引擎默认的 `DefaultPawn`（飞行、不可见——`DefaultEngine.ini` **没有** `GlobalDefaultGameMode` 覆盖，所以 engine default 生效）。spawn 了 8 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_8_C`。目前 8 个 NPC 共用同一个 **T** 键（per-NPC input 路由尚未实现）。AI 心智系统主线会按里程碑新增 `Level_LiarsBar` / `Level_MinorityRule`。
-
-### 飞行摄像头输入
-
-`Config/DefaultInput.ini`（EnhancedInput）：WASD + Space/Alt → `FlyCam_MoveFB/LR/UD`，Mouse → `FlyCam_LookUD/LR`。
+`Content/MyAssets/Level_AILive.umap`：玩家 Pawn 是引擎默认的 `DefaultPawn`（飞行、不可见——`DefaultEngine.ini` **没有** `GlobalDefaultGameMode` 覆盖，所以 engine default 生效）。spawn 了 8 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_8_C`。
 
 ## 参考 (References)
 
@@ -139,7 +134,6 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 - `@DevLog/2026-04-24_minimax_speech_a2f_metahuman.md` —— 首次接入 TTS + A2F，记录 hex 解码坑、provider 名坑、PIE input focus 问题。
 - `@DevLog/2026-04-25_gasp_mover_metahuman.md` —— GASP Mover 2.0 应用到 MetaHuman 身体。
 - `@DevLog/2026-04-25_npc_visual_override_fixed.md` —— NPC 固定 override 模式 + DefaultPawn 飞行摄像头。
-- `Docs/Lucy_GASP_A2F_Manual.md` 在 DevLog 里被引用但**当前缺失**，不要假设它存在。
 
 每个里程碑新增一份 `DevLog/YYYY-MM-DD_<topic>.md`。
 

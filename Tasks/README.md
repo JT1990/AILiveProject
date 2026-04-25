@@ -2,6 +2,7 @@
 
 来源：`Docs/PRD.md` 第 70-76 行 "AI 心智决策系统"
 关联 plan：`C:\Users\13641\.claude\plans\docs-prd-md-ai-whimsical-tulip.md`
+**单任务执行**：[Tasks-Prompt.md](Tasks-Prompt.md) — 在新对话窗口里独立做一张任务卡时的启动咒语
 
 ## 工作范式
 
@@ -11,24 +12,26 @@
 
 ## 里程碑
 
-| 里程碑 | 主题 | 任务卡 | 验收 |
-|---|---|---|---|
-| **M-1** | 环境前置 | T00 | 1-7 + 9-11 必过；含 Monolith / speech actor / AIController baseline |
-| **M0** | 完整地基（编译 + 执行层桥梁） | T01-T04 + T18 + T19.5 + T19.7 | Build.bat 通过 + Memory Service `/health` OK + Perception/EQS/SO 手工 BP 调用通过 |
-| **M1A** | Mock Speak 闭环 | T02 → T05.5 → T06 → T07（用 Mock） | NPC 用 mock LLM 输出 speak action，验证 actor 解析 / 口型 / cooldown |
-| **M1B** | DeepSeek Speak 闭环 | T05 → T07 切真 LLM | 按 T → NPC 用真 LLM 即兴语音回应 |
-| **M2** | 骗子酒馆 minimal | T08-T13 + **T13.5** + T14 + T14.5 | 4 NPC `Level_LiarsBar` 跑通（先 T13.5 跑通规则机，再 T14 接真 LLM） |
-| **M3** | 骗子酒馆 polish | T16 → T17A → T15 → T17B（社会人格优先于动画） | 5 局 + 跨局指控 + 多 persona |
-| **M4A** | 少数决 minimal（单厂商） | T19-T23（仅 DeepSeek） | 8 NPC 跑通；Vote 走 EQS+SO；私聊基于 hearing 物理过滤 |
-| **M4B** | 多厂商混搭 | T18.5 | 4 DeepSeek + 4 GLM 跑一次 |
-| **M5** | 少数决完整 | T24-T26 | 多轮 + 联盟 + 背叛涌现 + 跨游戏会话 |
+| 里程碑  | 主题                          | 任务卡                                        | 验收                                                                              |
+| ------- | ----------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------- |
+| **M-1** | 环境前置                      | T00                                           | 1-7 + 9-11 必过；含 Monolith / speech actor / AIController baseline               |
+| **M0**  | 完整地基（编译 + 执行层桥梁） | T01-T04 + T18 + T19.5 + T19.7                 | Build.bat 通过 + Memory Service `/health` OK + Perception/EQS/SO 手工 BP 调用通过 |
+| **M1A** | Mock Speak 闭环               | T02 → T05.5 → T06 → T07（用 Mock）            | NPC 用 mock LLM 输出 speak action，验证 actor 解析 / 口型 / cooldown              |
+| **M1B** | DeepSeek Speak 闭环           | T05 → T07 切真 LLM                            | 按 T → NPC 用真 LLM 即兴语音回应                                                  |
+| **M2**  | 骗子酒馆 minimal              | T08-T13 + **T13.5** + T14 + T14.5             | 4 NPC `Level_LiarsBar` 跑通（先 T13.5 跑通规则机，再 T14 接真 LLM）               |
+| **M3**  | 骗子酒馆 polish               | T16 → T17A → T15 → T17B（社会人格优先于动画） | 5 局 + 跨局指控 + 多 persona                                                      |
+| **M4A** | 少数决 minimal（单厂商）      | T19-T23（仅 DeepSeek）                        | 8 NPC 跑通；Vote 走 EQS+SO；私聊基于 hearing 物理过滤                             |
+| **M4B** | 多厂商混搭                    | T18.5                                         | 4 DeepSeek + 4 GLM 跑一次                                                         |
+| **M5**  | 少数决完整                    | T24-T26                                       | 多轮 + 联盟 + 背叛涌现 + 跨游戏会话                                               |
 
 ## 任务卡完整列表
 
 ### M-1 环境前置
+
 - [T00](task_00_environment_preflight.md) — 环境前置确认（Neo4j / embedding / DeepSeek / NPC 类型 / `.env` 安全）
 
 ### M0 地基
+
 - [T01](task_01_build_cs_env.md) — Build.cs 模块依赖 + `.env` 通用读取（cache + safety check + key mask）
 - [T02](task_02_mind_skeletons.md) — Mind 层 C++ 类骨架（含 `AgentIdStable` 字段）
 - [T03](task_03_gamemaster_skeletons.md) — GameMaster 层 C++ 类骨架
@@ -38,12 +41,14 @@
 - [T19.5](task_19_5_eqs_queries.md) — EQS 查询集合（4 个 query + helpers）
 
 ### M1 LLM + Speak dry-run（M1A Mock 优先 / M1B 真 LLM 后置）
+
 - [T05.5](task_05_5_mock_provider.md) — Mock LLM Provider（前置 T02，不依赖 T05；M1A 默认用）
 - [T06](task_06_speak_action.md) — `UMindAction_Speak` + ResolveSpeechActor + 中文 prompt + injection 防御 + RecallChainDepth
 - [T07](task_07_npc1_integration.md) — `BP_NPC_MH_Character_1` 接入（M1A 用 Mock；M1B 切 DeepSeek）
 - [T05](task_05_deepseek_provider.md) — DeepSeek Provider + TestPing + ratelimit 实测（M1B）
 
 ### M2 骗子酒馆 minimal
+
 - [T08](task_08_memory_write_recall.md) — Memory Service `/memory/write` + `/memory/recall` + `/memory/by_tag`（提前到本卡）
 - [T09](task_09_memory_client_integration.md) — `UMindMemoryClient` Write/Recall/ByTag + injection wrapping
 - [T10](task_10_level_liarsbar.md) — `Level_LiarsBar.umap` blockout + NavMesh（直接 spawn `BP_PokerSeat_SmartObject`）
@@ -55,11 +60,13 @@
 - [T14.5](task_14_5_perf_baseline.md) — M2 性能基线测量
 
 ### M3 骗子酒馆 polish（社会人格优先 → 动画后置）
+
 - [T16](task_16_liarsbar_crosssession.md) — 跨局记忆 + 多 persona + 跨游戏关系 prompt 模板（用 ByTag）
 - [T17](task_17_liarsbar_validation.md) — 5 局压测 + 策略观察 + DevLog（含 JSON 计数指标）
 - [T15](task_15_liarsbar_montage.md) — 出牌 / 拿枪 Montage + IMindPerformableInterface（接口化调 BP function）
 
 ### M4A 少数决 minimal（单厂商）
+
 - [T19](task_19_general_actions.md) — 通用动作扩展（消费 M0 的 EQS/SO/Perception；recall inline）
 - [T20](task_20_level_minorityrule.md) — `Level_MinorityRule.umap`（直接 spawn SO actor）
 - [T21](task_21_gamemaster_minorityrule.md) — `AMindGameMaster_MinorityRule` 阶段机 + 全局 LLM budget
@@ -67,9 +74,11 @@
 - [T23](task_23_minorityrule_e2e.md) — HUD（用 MCP）+ 分级验收 A/B + Initialize ownership
 
 ### M4B 多厂商
+
 - [T18.5](task_18_5_multi_provider.md) — 接入 GLM（候选 endpoint/model 实施日重新核实）
 
 ### M5 少数决完整
+
 - [T24](task_24_multiround_loop.md) — 多轮淘汰循环 + 承诺/投票对比（消费 T08 已实现的 by_tag）+ 持久化范围明确
 - [T25](task_25_alliance_hud.md) — 联盟可视化 Debug HUD（用 MCP）
 - [T26](task_26_m5_validation.md) — 多轮验证 + 跨游戏会话 + DevLog + 同步 CLAUDE.md / AGENTS.md
@@ -105,10 +114,12 @@ T01 ─┬─→ T02 ─┬─→ T03 ─┬─→ T18 (Perception, M0; OnPercep
 ```
 
 **M0 内部依赖**：
+
 - T19.7（继承 GASP `BP_SmartObject_Base` + 创建 BP_VoteBox/Chair/PokerSeat）→ T19.5（EQS Generator 用 ActorsOfClass(SO)）
 - T18 与 T19.5 / T19.7 并行（都依赖 T01 + T02/T03 骨架）
 
 **并行点**：
+
 - M0：T01 → (T02, T03, T04) 并行 → T19.7 → (T18, T19.5) 并行
 - M1：T05.5 与 T05 并行（Mock 不依赖真 DeepSeek）
 - M3：T16 后再 T15（社会人格优先）
@@ -119,6 +130,7 @@ T01 ─┬─→ T02 ─┬─→ T03 ─┬─→ T18 (Perception, M0; OnPercep
 
 **A. Validate / Apply 必须拆分**
 GM 不能在 Action 异步执行前先改状态。流程：
+
 ```
 Dispatch(env)
   ├─ GM.Validate(agent, env, err)           # 只读，不改状态
@@ -129,6 +141,7 @@ Dispatch(env)
        ├─ State = Idle
        └─ GM.OnAgentActionFinished
 ```
+
 落到 T11 / T12 / T13 / T22。**所有 Action 不直接改 GM state**，只解析参数 + 触发外显动作 + Done。
 
 **B. NPC 必须是 Pawn 子类**
@@ -145,13 +158,13 @@ NPC 是壳 Pawn，可见 mesh 在 `AC_VisualOverrideManager` spawn 的 `ChildAct
 **D. EQS / AI Perception / SmartObjects 是项目地基**
 不是 polish 不是按需启用。它们是"LLM 抽象动作 → UE 具体执行"的核心桥梁：
 
-| LLM 输出 | 执行层 |
-|---|---|
-| `Vote(yes)` | EQS 找投票箱 → SO ApproachAndUse |
-| `MoveTo(npc_3)` | EQS_FindFacingPoint 选最优可达点 |
-| `SitDown` | EQS_FindAvailableSeat → SO ApproachAndUse(Sit) |
+| LLM 输出           | 执行层                                          |
+| ------------------ | ----------------------------------------------- |
+| `Vote(yes)`        | EQS 找投票箱 → SO ApproachAndUse                |
+| `MoveTo(npc_3)`    | EQS_FindFacingPoint 选最优可达点                |
+| `SitDown`          | EQS_FindAvailableSeat → SO ApproachAndUse(Sit)  |
 | `Speak(private:X)` | Perception hearing 距离判定记忆写谁 + eavesdrop |
-| BuildAgentView | Perception 提供视野/听觉数据，"信息不对称"落地 |
+| BuildAgentView     | Perception 提供视野/听觉数据，"信息不对称"落地  |
 
 T18 / T19.5 / T19.7 在 M0 完成（API + 资产 + helpers）；业务集成在 T07/T12/T19/T22。
 
@@ -172,6 +185,7 @@ T05 验收阶段跑 batched ping，记录到 `Tasks/T05_RATELIMIT_BASELINE.md`�
 NPC 跨骗子酒馆 → 少数决要带"对每个具体同伴的认知"。BuildSystemPrompt 时对每个 peer 做 ByTag 检索（`speaker=peer_id` top_3）拼到 system 段。落到 T16 / T26。
 
 **J. 验证顺序：骗子酒馆 → 少数决**
+
 - 骗子酒馆（4 人）→ 验证私有状态 / 声明与真实分离 / 严格回合制 / RNG 裁判
 - 少数决 8 人版 → 验证大规模并发 / 多阶段机 / 自由谈判 / 联盟 / 跨轮记忆与背叛追溯
 
@@ -199,28 +213,29 @@ NPC 跨骗子酒馆 → 少数决要带"对每个具体同伴的认知"。BuildS
 ## LLM 调用并发（M4 起）
 
 8 NPC 同时打 LLM（Negotiate 阶段）：
+
 - `Engine.ini` 把 `[HTTP]` 连接池调到 16
 - 账号 QPS 限制在 T05 / T18.5 验证时实测
 - Cooldown=2s + GM 每 ~10s 主动唤醒 1 NPC，整体 QPS ≤ 4
 
 ## 关键决策（环境与选型）
 
-| 项 | 选定 |
-|---|---|
-| 验证游戏 | 骗子酒馆（4 人） + 少数决（8 人版） |
-| 关卡组织 | 每游戏独立关卡（`Level_LiarsBar` / `Level_MinorityRule`） |
-| 决策架构 | LLM 输出 ActionJSON → `UMindComponent` 派发；不引入 BehaviorTree / StateTree |
-| 记忆系统对接 | 本地 HTTP REST（Python FastAPI） |
-| 记忆服务部署 | 独立 Python 进程，开发时 `uvicorn` 手动起 |
-| Memory Service 代码归属 | 仓库内 `Tools/MemoryService/` |
-| LLM Provider | DeepSeek（主）+ GLM `glm-5.1`（M4B 验证抽象多家；实施日重新核实 model id） |
-| Embedding | ollama OpenAI-compat：`http://localhost:11434/v1/embeddings` + `qwen3-embedding:8b` |
-| Neo4j | `bolt://localhost:7687` / `neo4j` / `storynext123` |
-| Memory 向量检索 | Python 端 cosine fallback（默认）；Neo4j native vector index（如 5.x 可用则升级） |
-| `.env` key 命名 | `XXX_API_KEY` / `XXX_API_BASE` 风格 |
-| 动作空间 | 通用（Mind 模块）+ 游戏专属（GameMaster 阶段动态注册） |
-| SmartObject 路径 | 完全复用 GASP（继承 `BP_SmartObject_Base`，不自造低层 Claim） |
-| 持久化范围 | 同 Memory Service 进程内跨关卡跨局；不要求重启 Neo4j 后恢复 |
+| 项                      | 选定                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------- |
+| 验证游戏                | 骗子酒馆（4 人） + 少数决（8 人版）                                                 |
+| 关卡组织                | 每游戏独立关卡（`Level_LiarsBar` / `Level_MinorityRule`）                           |
+| 决策架构                | LLM 输出 ActionJSON → `UMindComponent` 派发；不引入 BehaviorTree / StateTree        |
+| 记忆系统对接            | 本地 HTTP REST（Python FastAPI）                                                    |
+| 记忆服务部署            | 独立 Python 进程，开发时 `uvicorn` 手动起                                           |
+| Memory Service 代码归属 | 仓库内 `Tools/MemoryService/`                                                       |
+| LLM Provider            | DeepSeek（主）+ GLM `glm-5.1`（M4B 验证抽象多家；实施日重新核实 model id）          |
+| Embedding               | ollama OpenAI-compat：`http://localhost:11434/v1/embeddings` + `qwen3-embedding:8b` |
+| Neo4j                   | `bolt://localhost:7687` / `neo4j` / `storynext123`                                  |
+| Memory 向量检索         | Python 端 cosine fallback（默认）；Neo4j native vector index（如 5.x 可用则升级）   |
+| `.env` key 命名         | `XXX_API_KEY` / `XXX_API_BASE` 风格                                                 |
+| 动作空间                | 通用（Mind 模块）+ 游戏专属（GameMaster 阶段动态注册）                              |
+| SmartObject 路径        | 完全复用 GASP（继承 `BP_SmartObject_Base`，不自造低层 Claim）                       |
+| 持久化范围              | 同 Memory Service 进程内跨关卡跨局；不要求重启 Neo4j 后恢复                         |
 
 ## 不在 MVP 范围
 
@@ -237,26 +252,34 @@ NPC 跨骗子酒馆 → 少数决要带"对每个具体同伴的认知"。BuildS
 # T<NN> — <标题>
 
 ## 目标
+
 一句话
 
 ## 前置
+
 T<XX>, T<YY>
 
 ## DoD
+
 - [ ] ...
 
 ## 关键文件
+
 新建/修改 列表
 
 ## 关键 API / 伪代码
+
 极简签名
 
 ## 验收信号
+
 "运行 X 后看到 Y" 的具体可观测断言。M2/M4 用 A/B 分级验收
 
 ## 不在范围
+
 明确不做什么
 
 ## 风险
+
 1-2 项
 ```
