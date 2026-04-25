@@ -1,0 +1,21 @@
+agent:
+  agent_id: string # 稳定唯一 ID；同一角色跨局沿用
+  persona_version: integer # 身份档案版本；人格重大变化时递增
+  model_provider: string # 运行该 agent 的模型供应商
+  model_name: string # 实际调用的模型名；每次录制前校验
+  status: # enum: active | deleted | archived
+    type: string
+    enum: [active, deleted, archived]
+  created_at: string # ISO 8601
+  deleted_at: string # nullable；仅 status=deleted 时写入
+
+identity:
+  # 赋予 AI 的"外部可识别符号"——AI 的外壳，不是人类身份。
+  # AI 不扮演人类：不预置职业 / 教育 / 年龄 / 地域背景。
+  full_name: string # AI 化命名
+  nickname: string # 昵称
+  gender: # enum: male | female —— 表征声线与形象的性别呈现，非人类生理
+    type: string
+    enum: [male, female]
+  voice: string # 声线描述（音高 / 音色 / 语速 / 吐字风格），TTS 可映射
+  appearance: string # 类人虚拟形象（发色发型、瞳色、肤色、着装），MetaHuman preset 可映射
