@@ -24,9 +24,11 @@
 ## 命令 (Commands)
 
 UBT 构建 Editor target：
+
 ```
 <Engine>/Build/BatchFiles/Build.bat AILiveProjectEditor Win64 Development -Project="D:/Project/Unreal/AILiveProject/AILiveProject.uproject"
 ```
+
 对 `AILiveProject` 模块的迭代由 Live Coding / Hot Reload 处理。只有改动 `.Build.cs`、`.Target.cs` 或 `uproject` 的 plugin 列表时才需要全量重建。没有自动测试套件；烟测是上面 PIE + T 键的流程。
 
 ## Unreal 资产操作（Monolith MCP）
@@ -34,6 +36,7 @@ UBT 构建 Editor target：
 Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json` 配置，proxy 在 `Plugins/Monolith/Binaries/monolith_proxy.exe`）。不要让用户手点编辑器，除非 MCP 确实做不到——那时再明确说明走 fallback。
 
 工作流：
+
 1. `mcp__monolith__monolith_status` —— 确认编辑器在线。
 2. 预检目标 BP（见关键规则）。
 3. 用 `build_blueprint_from_spec` + `connect_pins` + `compile_blueprint` 一次批量改图，比多轮 `add_node` 往返高效。
@@ -63,6 +66,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 ### A2F 角色契约
 
 每个 A2F 驱动的角色**两样都必须有**：
+
 1. 可见 skeletal mesh actor 上有 `UACEAudioCurveSourceComponent`（`TriggerMinimaxSpeech` 会自动挂）。
 2. **Face AnimBP 里有 `ApplyACEAnimation` 节点**，从该组件读 curve。
 
@@ -98,3 +102,4 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 - 用户用中文交流——回复也用中文。
 - 当 DevLog / 手册与实际资产状态冲突时，**以资产状态为准**并更新 DevLog。不要为了贴合过时文档去改动资产。
+- 编程语言选择 C++
