@@ -2,7 +2,7 @@
 
 来源：`Docs/PRD.md` 第 70-76 行 "AI 心智决策系统"
 关联 plan：`C:\Users\13641\.claude\plans\docs-prd-md-ai-whimsical-tulip.md`
-**单任务执行**：[Tasks-Prompt.md](Tasks-Prompt.md) — 在新对话窗口里独立做一张任务卡时的启动咒语
+**单任务执行**：[Tasks-Prompt.md](Tasks-Prompt.md) — 在新对话窗口里独立做一张任务卡时的启动指令
 
 ## 工作范式
 
