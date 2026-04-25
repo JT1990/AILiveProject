@@ -1,25 +1,28 @@
 # T19 — 通用动作扩展（MoveTo / LookAt / Wait / Observe / Think / Decision / Remember / Recall）
 
 ## 目标
+
 实现剩余 8 个通用动作，让少数决（M4）有充足的动作空间表达"走到投票箱前"、"私下示意盟友"、"先想一想再说"等行为。
 
 ## 前置
+
 T09（`UMindMemoryClient` 含 Write/Recall/ByTag）+ T11（GM 基类，含 Validate/Apply 拆分）—— T18 / T19.5 / T19.7 已在 M0 完成，本卡只消费它们
 
 ## DoD
+
 - [ ] 实现 9 个 Action 子类（在 `Public/Mind/Actions/` 下，骨架 T03 已建；`sit_down` 为新增）：
 
-| Action | Params | 行为 |
-|---|---|---|
-| `move_to` | `{target_actor_id?, named_location?}` | 调 EQS_FindFacingPoint(target) 选落点 → AIController.MoveToLocation。target 不可见时（CanSenseActor 返回 false）允许，因为 MoveTo 本身可以走盲区 |
-| `sit_down` | `{}` | **新增**：调 EQS_FindAvailableSeat → ApproachAndUse(Sit slot, T19.7) |
-| `look_at` | `{target_actor_id}` | 平滑转向；**先用 `MindComponent.CanSenseActor(target, Sight)` 检查能否看见**，看不见则 Done(false, "out of sight") |
-| `wait` | `{seconds: float}` | 计时器，到点 Done(true) |
-| `observe` | `{}` | 主动让 PerceptionComponent 强刷一次（`ForceRebuildPerceptionPriorityList`），将最新感知合并进下次 AgentView |
-| `think` | `{thought: string}` | 写记忆 tag={"type":"thought","channel":"private"}，不发声不动作 |
-| `decision` | `{intent: string, target?, justification?}` | 写记忆 tag={"type":"intent"}；同时存到 NPC 上的 `CurrentIntent` 字段，下轮 prompt 自动带上 |
-| `remember` | `{content: string, tags?: dict}` | 显式 Write |
-| `recall` | `{query: string, top_k?: int=5}` | Recall + 把结果回灌为下一轮 prompt 的 context |
+| Action     | Params                                      | 行为                                                                                                                                             |
+| ---------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `move_to`  | `{target_actor_id?, named_location?}`       | 调 EQS_FindFacingPoint(target) 选落点 → AIController.MoveToLocation。target 不可见时（CanSenseActor 返回 false）允许，因为 MoveTo 本身可以走盲区 |
+| `sit_down` | `{}`                                        | **新增**：调 EQS_FindAvailableSeat → ApproachAndUse(Sit slot, T19.7)                                                                             |
+| `look_at`  | `{target_actor_id}`                         | 平滑转向；**先用 `MindComponent.CanSenseActor(target, Sight)` 检查能否看见**，看不见则 Done(false, "out of sight")                               |
+| `wait`     | `{seconds: float}`                          | 计时器，到点 Done(true)                                                                                                                          |
+| `observe`  | `{}`                                        | 主动让 PerceptionComponent 强刷一次（`ForceRebuildPerceptionPriorityList`），将最新感知合并进下次 AgentView                                      |
+| `think`    | `{thought: string}`                         | 写记忆 tag={"type":"thought","channel":"private"}，不发声不动作                                                                                  |
+| `decision` | `{intent: string, target?, justification?}` | 写记忆 tag={"type":"intent"}；同时存到 NPC 上的 `CurrentIntent` 字段，下轮 prompt 自动带上                                                       |
+| `remember` | `{content: string, tags?: dict}`            | 显式 Write                                                                                                                                       |
+| `recall`   | `{query: string, top_k?: int=5}`            | Recall + 把结果回灌为下一轮 prompt 的 context                                                                                                    |
 
 - [ ] `UMindComponent` 加 `CurrentIntent` 字段，`BuildSystemPrompt` 里把它拼到 system 段
 - [ ] 通用动作在 `MindComponent::Initialize` 中默认全部注册
@@ -30,6 +33,7 @@ T09（`UMindMemoryClient` 含 Write/Recall/ByTag）+ T11（GM 基类，含 Valid
   - 这样不进 `OnActionDone` → 不更新 `LastDecisionAt` → 不与 cooldown 冲突
 
 ## 关键文件
+
 - 实现 `Public/Mind/Actions/MindAction_MoveTo.cpp` 等 8 个文件
 
 ## 关键 API / 伪代码
@@ -120,7 +124,7 @@ void UMindAction_Recall::Execute(UMindComponent* Owner, const FString& ParamsJso
 
 ## 验收信号
 
-在 `Level_AILive` sandbox 测试（M4 关卡 T20 还没建）：
+在 `L_prison` sandbox 测试（M4 关卡 T20 还没建）：
 
 - 让 NPC_1 用一个测试 BP 节点强制 RequestDecision("test_walk_to_player")，prompt 鼓励它选 move_to
 - 看 NPC_1 走到玩家面前 + look_at + speak 一句话
@@ -129,11 +133,13 @@ void UMindAction_Recall::Execute(UMindComponent* Owner, const FString& ParamsJso
 - 测试 `recall` 动作：触发后 LLM 第二次决策的 prompt 里有刚 recall 出的内容
 
 ## 不在范围
+
 - Vote / Propose Alliance / AcceptAlliance / AskQuestion 这些游戏专属动作（T22）
 - Speak 加 channel 参数（T22）
 - AI Controller 完整接管 NPC（保持只在需要时临时使用）
 
 ## 风险
+
 - **NPC 类型分支**（已由 T00 解决）：
   - Pawn 子类 → 用 `AAIController::MoveTo`，本卡按伪代码实施
   - Actor 子类 → 必须先把 BP 父类升 Pawn（更大改动）；本卡前置 T00 确保已升级

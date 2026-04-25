@@ -15,10 +15,10 @@ Content/Levels/DefaultLevel.umap 关卡中的 PlayerStart，
 
 **交付物**：
 
-| 类型 | 路径 | 改动 |
-| --- | --- | --- |
-| 关卡（改） | `Content/MyAssets/Levels/L_prison.umap` | spawn `PlayerStart_Prison` at (0,0,0) |
-| 引擎配置（改） | `Config/DefaultEngine.ini` | `[/Script/EngineSettings.GameMapsSettings]` 加 `+GameModeMapPrefixes=(Name="L_prison",GameMode="/Game/Blueprints/GM_Sandbox.GM_Sandbox_C")` |
+| 类型           | 路径                                    | 改动                                                                                                                                        |
+| -------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| 关卡（改）     | `Content/MyAssets/Levels/L_prison.umap` | spawn `PlayerStart_Prison` at (0,0,0)                                                                                                       |
+| 引擎配置（改） | `Config/DefaultEngine.ini`              | `[/Script/EngineSettings.GameMapsSettings]` 加 `+GameModeMapPrefixes=(Name="L_prison",GameMode="/Game/Blueprints/GM_Sandbox.GM_Sandbox_C")` |
 
 ---
 
@@ -27,16 +27,18 @@ Content/Levels/DefaultLevel.umap 关卡中的 PlayerStart，
 ### 预检发现
 
 DefaultLevel 用的是 `GM_Sandbox`：
+
 - `DefaultPawnClass` = `/Game/Blueprints/SandboxCharacter_Mover`（GASP Mover 2.0 的第三人称角色）
 - `PlayerControllerClass` = `/Game/Blueprints/PC_Sandbox`
 - DefaultLevel 的 `PlayerStart` 在 `(-800, 0, 95.53)`
 
-`DefaultEngine.ini.[/Script/EngineSettings.GameMapsSettings]` 当前**没有** `GlobalDefaultGameMode`——这是上一轮 NPC 改动留下的状态：玩家 Pawn 在 `Level_AILive` 里走引擎默认 GameMode（DefaultPawn 飞行摄像头）。**不能直接加 `GlobalDefaultGameMode`**，会破坏 `Level_AILive` 的飞行摄像头玩家。
+`DefaultEngine.ini.[/Script/EngineSettings.GameMapsSettings]` 当前**没有** `GlobalDefaultGameMode`——这是上一轮 NPC 改动留下的状态：玩家 Pawn 在 `L_prison` 里走引擎默认 GameMode（DefaultPawn 飞行摄像头）。**不能直接加 `GlobalDefaultGameMode`**，会破坏 `L_prison` 的飞行摄像头玩家。
 
 ### 方案决策：按关卡名前缀绑定 GameMode
 
 UE 内建 `+GameModeMapPrefixes` 机制——按关卡名前缀匹配 GameMode override。比起 `GlobalDefaultGameMode`：
-- 不影响 `DefaultLevel` / `Level_AILive`
+
+- 不影响 `DefaultLevel` / `L_prison`
 - 不需要在 .umap 的 WorldSettings 里手点 `GameModeOverride`（MCP 的 `set_actor_properties` 只接受 6 个固定字段，写不了 `DefaultGameMode`，否则只能用户手点）
 - 改动可控、可逆
 
@@ -68,7 +70,7 @@ PC_Sandbox 占用 → IMC_Sandbox 输入挂上 → WASD/Space/Shift 可用
 ### 做对的事
 
 - **预检 GameMode CDO 再决策**。`get_cdo_properties("GM_Sandbox")` 一次就拿到 DefaultPawnClass / PlayerControllerClass，确认 `SandboxCharacter_Mover` 就是要找的 GASP Mover 角色——不需要新建任何 BP
-- **拒绝 `GlobalDefaultGameMode` 的诱惑**。最简单的"全局指一个 GameMode"会回退到 NPC 改造前的状态，破坏 `Level_AILive` 的玩家飞行摄像头。`+GameModeMapPrefixes` 按关卡前缀匹配，作用域精确
+- **拒绝 `GlobalDefaultGameMode` 的诱惑**。最简单的"全局指一个 GameMode"会回退到 NPC 改造前的状态，破坏 `L_prison` 的玩家飞行摄像头。`+GameModeMapPrefixes` 按关卡前缀匹配，作用域精确
 - **承认 MCP 的边界**。`set_actor_properties` 6 字段限制让 WorldSettings.GameModeOverride 写不动，没有硬试，直接走 INI 路由方案
 
 ### 踩过的坑
@@ -80,7 +82,7 @@ PC_Sandbox 占用 → IMC_Sandbox 输入挂上 → WASD/Space/Shift 可用
 
 ### 值得沿用的模式
 
-- **"按关卡名前缀绑 GameMode"**：项目里 `Level_AILive`（NPC 场景，飞行玩家）和 `L_prison`（跑图，第三人称）需要不同 GameMode，`+GameModeMapPrefixes` 按前缀路由是首选——比 `GlobalDefaultGameMode` 精确，比每个 .umap 手点 GameModeOverride 自动化
+- **"按关卡名前缀绑 GameMode"**：项目里 `L_prison`（NPC 场景，飞行玩家）和 `L_prison`（跑图，第三人称）需要不同 GameMode，`+GameModeMapPrefixes` 按前缀路由是首选——比 `GlobalDefaultGameMode` 精确，比每个 .umap 手点 GameModeOverride 自动化
 - **"MCP 写不了的字段走 INI"**：UE 很多 per-map 配置在 INI 里有等价机制（GameModeMapPrefixes / DefaultMaps / MapsToCookFor 等），MCP 在 set_actor_properties / set_cdo_property 卡壳时，先翻一下 EngineSettings 有没有等价 INI key
 
 ### 后续改进（未做）

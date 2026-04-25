@@ -126,7 +126,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 ### 关卡
 
-`Content/MyAssets/Level_AILive.umap`：玩家 Pawn 是引擎默认的 `DefaultPawn`（飞行、不可见——`DefaultEngine.ini` **没有** `GlobalDefaultGameMode` 覆盖，所以 engine default 生效）。spawn 了 8 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_8_C`。
+`Content/MyAssets/L_prison.umap`：玩家 Pawn 是引擎默认的 `DefaultPawn`（飞行、不可见——`DefaultEngine.ini` **没有** `GlobalDefaultGameMode` 覆盖，所以 engine default 生效）。spawn 了 8 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_8_C`。
 
 ## 参考 (References)
 

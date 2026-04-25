@@ -14,12 +14,12 @@
 
 **交付物**：
 
-| 类型 | 数量 | 说明 |
-| --- | ---: | --- |
-| 修改 BP | 7 | `BP_MH_Character_2~8`：Body 3 属性 + Face.AnimClass + 加 ACEAudioCurveSource + BeginPlay 10 节点链 |
-| 新建 BP | 7 | `BP_NPC_MH_Character_2~8`：`SandboxCharacter_Mover` 子类，`FixedVisualOverrideClass` 指向对应 `BP_MH_Character_N_C` |
-| 关卡 | 7 | 删 `BP_MH_Character_N_C_1` NPC、原位 spawn `BP_NPC_MH_Character_N`（label `NPC_MH_Character_N`） |
-| GM_Sandbox | 1 | 删 `VisualOverrides[6] = BP_MH_Character_1_C`（玩家不走 GASP 路径，冗余） |
+| 类型       | 数量 | 说明                                                                                                                |
+| ---------- | ---: | ------------------------------------------------------------------------------------------------------------------- |
+| 修改 BP    |    7 | `BP_MH_Character_2~8`：Body 3 属性 + Face.AnimClass + 加 ACEAudioCurveSource + BeginPlay 10 节点链                  |
+| 新建 BP    |    7 | `BP_NPC_MH_Character_2~8`：`SandboxCharacter_Mover` 子类，`FixedVisualOverrideClass` 指向对应 `BP_MH_Character_N_C` |
+| 关卡       |    7 | 删 `BP_MH_Character_N_C_1` NPC、原位 spawn `BP_NPC_MH_Character_N`（label `NPC_MH_Character_N`）                    |
+| GM_Sandbox |    1 | 删 `VisualOverrides[6] = BP_MH_Character_1_C`（玩家不走 GASP 路径，冗余）                                           |
 
 ---
 
@@ -30,6 +30,7 @@
 预检发现 `BP_MH_Character_2~8` **本来就没有 T 键触发链**（EventGraph 里只有 LiveLinkSetup 相关节点，`K2Node_InputKey` 不存在）。A2F/TTS 集成只在 `BP_MH_Character_1` 做过。
 
 所以场景里按 T 时：
+
 - `NPC_MH_Character_1` 的 VisualOverride ChildActor = `BP_MH_Character_1`（有 T 键链 + `EnableInput`）→ 响应 T → `TriggerMinimaxSpeech`
 - `NPC_MH_Character_2~8` 的 VisualOverride ChildActor = `BP_MH_Character_2~8`（无 T 键链）→ 不响应
 
@@ -38,6 +39,7 @@
 ### 批量改造模式
 
 对每个 `BP_MH_Character_N` (N=2..8)，4 步：
+
 1. **Body 3 属性**：
    - `AnimClass` = `ABP_GenericRetarget_C`
    - `ComponentTags` += `RTG_UEFN_to_Metahuman_nrw`
@@ -54,6 +56,7 @@
    ```
 
 对每个 `BP_NPC_MH_Character_N` (N=2..8)，5 步：
+
 1. `create_blueprint` 继承 `SandboxCharacter_Mover_C`
 2. `add_variable FixedVisualOverrideClass : class:Actor (instance_editable, category="NPC")`
 3. `set_variable_defaults` → `/Game/MetaHumans/MH_Character_N/BP_MH_Character_N.BP_MH_Character_N_C`
@@ -65,6 +68,7 @@
 ### 批量策略
 
 所有 7 个 BP 的操作完全同构，利用 MCP 并行调用：
+
 - **Phase 1**（24 并行）：7 个 BP 的 4 个 `set_component_property`
 - **Phase 2**（6 并行）：7 个 `add_component` (MH_Character_2 上一步就做了)
 - **Phase 3**（6 并行）：7 个 `build_blueprint_from_spec`（10 节点 + 12 连线 + 1 pin default）
@@ -84,6 +88,7 @@
 ### 清理 GM_Sandbox
 
 玩家回退 DefaultPawn 飞行摄像头后，`GM_Sandbox.VisualOverrides` 数组不再被消费（NPC 的 AC_VisualOverrideManager 走 `FixedVisualOverride` 前置分支，不读 GM.VisualOverrides）。把上一轮加的 `BP_MH_Character_1_C` 从数组删掉，恢复原始 6 项：
+
 - [0] BP_Echo_C
 - [1] BP_Twinblast_C
 - [2] BP_Kellan_C
@@ -95,7 +100,7 @@
 
 ## 验证
 
-PIE Level_AILive → 所有 8 个 MetaHuman NPC Idle 站立，无 T-Pose → 按 T 仅 `NPC_MH_Character_1` 响应（说话 + 口型）→ 其他 7 个 NPC 保持 Idle 不说话。测试通过 ✓
+PIE L_prison → 所有 8 个 MetaHuman NPC Idle 站立，无 T-Pose → 按 T 仅 `NPC_MH_Character_1` 响应（说话 + 口型）→ 其他 7 个 NPC 保持 Idle 不说话。测试通过 ✓
 
 ---
 

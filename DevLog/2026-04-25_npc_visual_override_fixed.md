@@ -16,6 +16,7 @@
 ## 功能描述
 
 把前一轮做的"玩家 VisualOverride 走 GASP"的能力，搬到**场景 NPC 实例**上。具体：
+
 - 玩家 Pawn 回到 **DefaultPawn（飞行摄像头，不可见）**
 - 场景里原来的 `BP_MH_Character_1_C_1` 实例换成 `BP_NPC_MH_Character_1`（`SandboxCharacter_Mover` 子类），固定 VisualOverride = `BP_MH_Character_1_C`
 - NPC 现在是**可被代码驱动的 Pawn + MetaHuman 视觉**，具备完整 GASP Mover 能力 + A2F + MiniMax TTS
@@ -23,12 +24,12 @@
 
 **交付物**：
 
-| 类型 | 路径 | 改动 |
-| --- | --- | --- |
-| 组件 BP（改） | `Content/Blueprints/AC_VisualOverrideManager.uasset` | 加变量 `FixedVisualOverride` + 改 `FindAndApplyVisualOverride` 前置分支 + 加公共函数 `SetFixedAndApply` |
+| 类型            | 路径                                                   | 改动                                                                                                                                                                        |
+| --------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 组件 BP（改）   | `Content/Blueprints/AC_VisualOverrideManager.uasset`   | 加变量 `FixedVisualOverride` + 改 `FindAndApplyVisualOverride` 前置分支 + 加公共函数 `SetFixedAndApply`                                                                     |
 | 角色 BP（新建） | `Content/Blueprints/NPCs/BP_NPC_MH_Character_1.uasset` | 继承 `SandboxCharacter_Mover`；加 `FixedVisualOverrideClass` 默认 `BP_MH_Character_1_C`；BeginPlay 调 `AC_VisualOverrideManager.SetFixedAndApply(FixedVisualOverrideClass)` |
-| 关卡（改） | `Content/MyAssets/Level_AILive.umap` | 删 `BP_MH_Character_1_C_1`，原位 (-13,378,3) spawn `BP_NPC_MH_Character_1`（label=`NPC_MH_Character_1`）|
-| 引擎配置（改） | `Config/DefaultEngine.ini` | 删 `GlobalDefaultGameMode` 行，回退默认 GameMode |
+| 关卡（改）      | `Content/MyAssets/L_prison.umap`                       | 删 `BP_MH_Character_1_C_1`，原位 (-13,378,3) spawn `BP_NPC_MH_Character_1`（label=`NPC_MH_Character_1`）                                                                    |
+| 引擎配置（改）  | `Config/DefaultEngine.ini`                             | 删 `GlobalDefaultGameMode` 行，回退默认 GameMode                                                                                                                            |
 
 ---
 
@@ -53,6 +54,7 @@ BeginPlay
 ```
 
 **核心障碍**：
+
 - 即使把 NPC 实例上 `VisualOverride` ChildActorComponent 的 `ChildActorClass` 直接设为 `BP_MH_Character_1_C`，`ApplyVisualOverride` 会在 BeginPlay 被 CVar=-1 覆写回 None
 - AC_VisualOverrideManager 的 `VisualOverride` 变量虽然 `instance_editable=true`，但同样会被 BeginPlay 覆盖
 - **所以要么改 AC_VisualOverrideManager 的逻辑，要么禁用它**
@@ -60,6 +62,7 @@ BeginPlay
 ### 方案决策：加 per-instance fallback 变量
 
 选方案：在 `AC_VisualOverrideManager` 加一个新变量 `FixedVisualOverride`（instance_editable），让 `FindAndApplyVisualOverride` 头部优先走这条路径。好处：
+
 - 玩家 Pawn 实例的 `FixedVisualOverride = None`（默认），走原 CVar + GM_Sandbox 逻辑 —— 行为不变
 - NPC 实例设 `FixedVisualOverride = BP_MH_Character_1_C`，固定视觉，不受 CVar 污染
 - 不破坏原有机制
@@ -79,6 +82,7 @@ BeginPlay
 ### 为什么不在子类 CDO 层直接设 AC_VisualOverrideManager.FixedVisualOverride
 
 试过几条路：
+
 - `set_component_property` on subclass BP → 报 "Component not found"（MCP 不显示继承组件）
 - `set_cdo_property("AC_VisualOverrideManager.FixedVisualOverride", ...)` → 报 "Property not found"（点路径不支持）
 
@@ -98,7 +102,7 @@ BeginPlay
 
 ### Level + INI 改动
 
-- `Level_AILive`：删原 `BP_MH_Character_1_C_1`，原位 (-13,378,3) 放 `BP_NPC_MH_Character_1` label=`NPC_MH_Character_1`
+- `L_prison`：删原 `BP_MH_Character_1_C_1`，原位 (-13,378,3) 放 `BP_NPC_MH_Character_1` label=`NPC_MH_Character_1`
 - `DefaultEngine.ini`：删 `GlobalDefaultGameMode=...` 行。GameMode 回到引擎默认（`AGameMode` 或 `AGameModeBase`），`DefaultPawnClass=UDefaultPawn`（飞行摄像头）
 
 ### 运行时数据流
@@ -130,6 +134,7 @@ NPC 的 SandboxCharacter_Mover.BeginPlay:
 ### 为什么 GM_Sandbox 不是 GameMode 也能用
 
 上一轮我担心 `FindAndApplyVisualOverride` Cast GM_Sandbox 失败会 early return 导致整个流程挂掉。实测没事：
+
 - 默认 GameMode 下 Cast 失败，确实 early return —— 但那是在 true 分支跳过后（FixedVisualOverride 有效时根本不走 Cast）
 - 所以子类 BeginPlay 调 SetFixedAndApply 内部的 FindAndApplyVisualOverride 会走 true 分支，不会碰到 Cast 失败的问题
 - 子类 BeginPlay 之前，Super 跑时的 FindAndApplyVisualOverride Cast 失败了 —— 但也没关系，反正子类 BeginPlay 马上覆盖

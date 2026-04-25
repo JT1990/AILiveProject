@@ -6,20 +6,20 @@
 
 ## DoD 总览
 
-| # | 项 | 状态 | 备注 |
-| - | - | --- | ---- |
-| 1 | Neo4j 实例 | ✅ | 5.26.22 community（Docker 容器 `story-next-neo4j`）→ T08 走 **native vector index** |
-| 2 | qwen3-embedding 服务 | ✅ | ollama 0.18.0 / `/v1/models` 含 `qwen3-embedding:8b` / 单次 embedding HTTP 200 / **dim = 4096** / 首次 cold latency 3436 ms |
-| 3 | DeepSeek 账号 | ✅ | HTTP 200 / latency 571 ms / model alias `deepseek-chat` → `deepseek-v4-flash` / 9 tokens 用量 / 账户余额充足 |
-| 3b | GLM 账号 | 🟡 keys 在场 | `.env` 含 `GLM_API_BASE` + `GLM_API_KEY`；T18.5 才使用，本卡不发请求 |
-| 4 | NPC Pawn / Actor | ✅ | `BP_NPC_MH_Character_*` → `SandboxCharacter_Mover` → `APawn`，无需升级父类 |
-| 5 | `.env` 文件健康 | ✅ | 所有必需 key 在场；`.gitignore:79` 命中；`git ls-files .env` 空 |
-| 6 | 8 NPC 配置盘点 | ✅ | 详见 `DevLog/2026-04-26_npc_baseline_inventory.md` |
-| 7 | UE 项目 baseline 烟测 | ✅ | Build.bat 通过（6.54 s，"Result: Succeeded"）；PIE T 键 TTS+A2F 烟测 OK |
-| 8 | 录屏工具（弱前置） | ✅ | OBS（T17 / T26 验收用） |
-| 9 | Monolith MCP 可用性 | ✅ | v0.12.0 / port 9316 / UE 5.7.51494982 / 988 actions |
-| 10 | NPC speech actor baseline | ✅ | VisualOverride child = `BP_MH_Character_*`；`Face_Archetype_Skeleton_AnimBP` 含 `AnimGraphNode_ApplyACEAnimation` |
-| 11 | AIController / AutoPossessAI | ✅ | `AIControllerClass` = 默认 `AAIController`；`AutoPossessAI` = `PlacedInWorld` |
+| #   | 项                           | 状态         | 备注                                                                                                                        |
+| --- | ---------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Neo4j 实例                   | ✅           | 5.26.22 community（Docker 容器 `story-next-neo4j`）→ T08 走 **native vector index**                                         |
+| 2   | qwen3-embedding 服务         | ✅           | ollama 0.18.0 / `/v1/models` 含 `qwen3-embedding:8b` / 单次 embedding HTTP 200 / **dim = 4096** / 首次 cold latency 3436 ms |
+| 3   | DeepSeek 账号                | ✅           | HTTP 200 / latency 571 ms / model alias `deepseek-chat` → `deepseek-v4-flash` / 9 tokens 用量 / 账户余额充足                |
+| 3b  | GLM 账号                     | 🟡 keys 在场 | `.env` 含 `GLM_API_BASE` + `GLM_API_KEY`；T18.5 才使用，本卡不发请求                                                        |
+| 4   | NPC Pawn / Actor             | ✅           | `BP_NPC_MH_Character_*` → `SandboxCharacter_Mover` → `APawn`，无需升级父类                                                  |
+| 5   | `.env` 文件健康              | ✅           | 所有必需 key 在场；`.gitignore:79` 命中；`git ls-files .env` 空                                                             |
+| 6   | 8 NPC 配置盘点               | ✅           | 详见 `DevLog/2026-04-26_npc_baseline_inventory.md`                                                                          |
+| 7   | UE 项目 baseline 烟测        | ✅           | Build.bat 通过（6.54 s，"Result: Succeeded"）；PIE T 键 TTS+A2F 烟测 OK                                                     |
+| 8   | 录屏工具（弱前置）           | ✅           | OBS（T17 / T26 验收用）                                                                                                     |
+| 9   | Monolith MCP 可用性          | ✅           | v0.12.0 / port 9316 / UE 5.7.51494982 / 988 actions                                                                         |
+| 10  | NPC speech actor baseline    | ✅           | VisualOverride child = `BP_MH_Character_*`；`Face_Archetype_Skeleton_AnimBP` 含 `AnimGraphNode_ApplyACEAnimation`           |
+| 11  | AIController / AutoPossessAI | ✅           | `AIControllerClass` = 默认 `AAIController`；`AutoPossessAI` = `PlacedInWorld`                                               |
 
 ## 1. Neo4j（DoD #1） ✅
 
@@ -120,18 +120,18 @@ BP_NPC_MH_Character_1..8 → SandboxCharacter_Mover → APawn
 
 ## 5. `.env` 健康（DoD #5） ✅
 
-| Key | 状态 | mask |
-| --- | --- | --- |
-| `minimax` | ✅ | `sk-ap...SCVs (len=126)` |
-| `DEEPSEEK_API_BASE` | ✅ | `https://api.deepseek.com/v1` |
-| `DEEPSEEK_API_KEY` | ✅ | `sk-71...3e3e (len=35)` |
-| `GLM_API_BASE` | ✅ | `https://open.bigmodel.cn/api/paas/v4` |
-| `GLM_API_KEY` | ✅ | `78673...zkDi (len=49)` |
-| `EMBEDDING_API_BASE` | ✅ | `http://localhost:11434/v1` |
-| `EMBEDDING_MODEL_NAME` | ✅ | `qwen3-embedding:8b` |
-| `NEO4J_URI` | ✅ | `bolt://localhost:7687` |
-| `NEO4J_USER` | ✅ | `neo4j` |
-| `NEO4J_PASSWORD` | ✅ | `story...t123 (len=12)` |
+| Key                    | 状态 | mask                                   |
+| ---------------------- | ---- | -------------------------------------- |
+| `minimax`              | ✅   | `sk-ap...SCVs (len=126)`               |
+| `DEEPSEEK_API_BASE`    | ✅   | `https://api.deepseek.com/v1`          |
+| `DEEPSEEK_API_KEY`     | ✅   | `sk-71...3e3e (len=35)`                |
+| `GLM_API_BASE`         | ✅   | `https://open.bigmodel.cn/api/paas/v4` |
+| `GLM_API_KEY`          | ✅   | `78673...zkDi (len=49)`                |
+| `EMBEDDING_API_BASE`   | ✅   | `http://localhost:11434/v1`            |
+| `EMBEDDING_MODEL_NAME` | ✅   | `qwen3-embedding:8b`                   |
+| `NEO4J_URI`            | ✅   | `bolt://localhost:7687`                |
+| `NEO4J_USER`           | ✅   | `neo4j`                                |
+| `NEO4J_PASSWORD`       | ✅   | `story...t123 (len=12)`                |
 
 `.gitignore` 检查：
 
@@ -162,13 +162,14 @@ git check-ignore -v .env → .gitignore:79 命中
 结果：`Result: Succeeded` / Total execution time 6.54 s / "Target is up to date"
 
 警告（非阻塞）：
+
 - `Plugin 'Monolith' depends on plugin 'StructUtils' which was deprecated in 5.5` —— Monolith 插件链路，本项目不动
 - 同警告对 `AILiveProjectEditor` —— 同上
 - "Invalidating makefile for AILiveProjectEditor (DefaultEngine.ini modified)" —— 之前编辑器内的 Project Settings 改动，无 cpp 重编
 
 ### 7b. PIE T 键 TTS 烟测 ✅
 
-用户手点：PIE `Level_AILive.umap` → 按 T → TTS+A2F 链路 OK（`MinimaxSpeechClient` → `MinimaxACELibrary::TriggerMinimaxSpeech` → `ACEAudioCurveSource` → `ApplyACEAnimation`）。
+用户手点：PIE `L_prison.umap` → 按 T → TTS+A2F 链路 OK（`MinimaxSpeechClient` → `MinimaxACELibrary::TriggerMinimaxSpeech` → `ACEAudioCurveSource` → `ApplyACEAnimation`）。
 
 ## 8. 录屏工具（DoD #8，弱前置） ✅
 

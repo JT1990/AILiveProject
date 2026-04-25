@@ -1,12 +1,15 @@
 # T07 — `BP_NPC_MH_Character_1` 接入 + DataAsset
 
 ## 目标
+
 把 1 号 NPC 接入 Mind 系统，T 键改成"通过 Mind 决策说话"而不是硬编码 TriggerMinimaxSpeech。**M1 验收点**——这张卡过了 = 单 NPC 完整闭环跑通。
 
 ## 前置
+
 T00（已确认 NPC Pawn/Actor 类型 + BeginPlay 现状）+ T06（Speak action 闭环）
 
 ## DoD
+
 - [ ] 创建 `Content/MyAssets/MindConfigs/DA_AgentConfig_NPC1.uasset`：
   - **`AgentIdStable: "npc_1"`**（稳定 agent 标识符，跨关卡 / PIE 重启不变；记忆系统的 agent_id 派生自此字段，不用 GetName）
   - DisplayName: "1号"
@@ -33,6 +36,7 @@ T00（已确认 NPC Pawn/Actor 类型 + BeginPlay 现状）+ T06（Speak action 
 - [ ] **必须用 Monolith MCP 改 BP**（CLAUDE.md 强约束），不要让用户手点
 
 ## 关键文件
+
 - 新建 `Content/MyAssets/MindConfigs/DA_AgentConfig_NPC1.uasset`（用 MCP 创建）
 - 修改 `Content/Blueprints/NPCs/BP_NPC_MH_Character_1.uasset`（用 MCP 改图）
 
@@ -51,6 +55,7 @@ T00（已确认 NPC Pawn/Actor 类型 + BeginPlay 现状）+ T06（Speak action 
 ```
 
 DataAsset 创建：
+
 ```
 build_asset(class=UMindAgentConfig, path=/Game/MyAssets/MindConfigs/DA_AgentConfig_NPC1)
 set_cdo_property(...) 设各字段
@@ -58,7 +63,7 @@ set_cdo_property(...) 设各字段
 
 ## 验收信号（M1 总验收）
 
-1. PIE 加载 `Level_AILive.umap`
+1. PIE 加载 `L_prison.umap`
 2. 飞到 NPC_1 旁边按 T
 3. 等 2-4s
 4. **NPC_1 用 LLM 即兴生成的话回应**（不是写死的"你好"）+ 口型同步
@@ -72,11 +77,13 @@ set_cdo_property(...) 设各字段
 7. 间隔 > 3s 再按 T：能正常触发新决策
 
 ## 不在范围
+
 - 其他 7 个 NPC（保持原硬编码 TTS，等 M2/M4 批量改）
 - 记忆系统（T08+）
 - GameMaster（T11+）
 
 ## 风险
+
 - 继承组件不能用 `set_cdo_property` 改默认值（CLAUDE.md 已记录）——MindComponent 是新加的，不在此风险下；但 `Config` 指向 DataAsset 的引用如果加在父类需绕 setter
 - T 键当前 8 个 NPC 共用（CLAUDE.md），M1 阶段只改 NPC_1，避免影响其他 NPC 的回归测试
 - MCP `resolve_node` 可能选错重载，参考 CLAUDE.md "踩坑"段落显式传 target_class
