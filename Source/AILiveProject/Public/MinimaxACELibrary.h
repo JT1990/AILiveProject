@@ -41,4 +41,26 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Minimax|ACE")
 	static FString GetMinimaxApiKeyFromProjectEnv();
+
+	/**
+	 * 从项目根目录的 .env 文件读取任意 key 的 value。key 大小写不敏感。
+	 * 进程内 cache，首次调用扫一次，后续直接 map 查。注释（#）/ 空行 / 引号 已处理。
+	 * 找不到或读不到返回空字符串。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AI Live|Env")
+	static FString GetEnvValueFromProjectEnv(const FString& KeyName);
+
+	/**
+	 * 启动时安全自检：验证 `.env` 在 `.gitignore` 里，避免误提交泄露 API key。
+	 * 失败会以 UE_LOG(Error) 报警；返回 true/false 供 BP 二次校验。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AI Live|Env")
+	static bool VerifyEnvSafety();
+
+	/**
+	 * 日志 mask helper：只保留前 4 + 后 4 字符，中间用 `...` 替代。
+	 * 短于 12 字符直接返回 `****`。所有打印 API key 的地方统一走它。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AI Live|Env")
+	static FString MaskKey(const FString& Key);
 };
