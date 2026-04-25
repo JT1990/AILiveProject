@@ -100,7 +100,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 ### C++ glue 层
 
-模块只是薄 glue 层。gameplay 逻辑都在 Blueprint 里；C++ 存在仅因为 ACE 插件对"运行时生成的音频"强制要求走 C++ API（Sound Wave / WAV 资产无法承载 TTS 输出）。
+模块原本是薄 glue 层（ACE/TTS C++ API 必须——Sound Wave / WAV 资产无法承载运行时生成的音频）。M0 起新加的 Mind / GameMaster / Action 系统改 **C++ 主导**（见「约定」首选 C++ 规则）；GASP / Mover / Visual-override / Animation 等既有 BP 链路保持原样不重写。
 
 - `UMinimaxACELibrary::TriggerMinimaxSpeech(WorldCtx, Character, Text, ApiKey, VoiceId, Endpoint, A2FProviderName)` —— 唯一 BP 入口。在 `EAsyncExecution::ThreadPool` 上跑 `MinimaxSpeech::RequestBlocking`，用 `TWeakObjectPtr` 守 `AActor*`，回到游戏线程后：找/挂 `UACEAudioCurveSourceComponent`，调 `FACERuntimeModule::AnimateFromAudioSamples` 喂 PCM，通过组件播放音频。典型延迟 1–4 s。
 - `UMinimaxACELibrary::PrewarmA2F` —— BeginPlay 里调一次，避免首次调用时的 TRT 编译延迟。
@@ -140,6 +140,6 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 ## 约定
 
 - 用户用中文交流——回复也用中文。
-- 编程语言选 C++（gameplay 逻辑在 BP 里，但新加 C++ 类是默认）。
+- **新加 Mind / GameMaster / Action / 状态判定逻辑默认 C++**；GASP / Mover / Visual-override / SmartObject / NPC 父类等既有 BP 链路沿用，不重写。蓝图限于配置资产（DataAsset / Curve）、UMG / AnimBP / 关卡蓝图、必须继承既有 BP 父类的场景。
 - 当 DevLog / 手册与实际资产状态冲突时，**以资产状态为准**并更新 DevLog。不要为了贴合过时文档去改动资产。
 - 文档要"扁平化"——只写当前确定的结论。**不保留** v1/v2/v3 / 原版 vs 修订 / 修复历史 等迭代痕迹。审查/讨论的过程产物，结论合并进正文后即删。
