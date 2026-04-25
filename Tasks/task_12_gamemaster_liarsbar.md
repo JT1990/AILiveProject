@@ -81,25 +81,45 @@ void AMindGameMaster_LiarsBar::Phase_PlayerTurn() {
     AwakeAgent(Cur, FString::Printf(TEXT("your_turn round=%d"), State.RoundNumber));
 }
 
-bool AMindGameMaster_LiarsBar::ValidateAndApply(AActor* Agent, const FMindActionEnvelope& Env, FString& OutError) {
+// === Validate (只读) ===
+bool AMindGameMaster_LiarsBar::Validate(AActor* Agent, const FMindActionEnvelope& Env, FString& OutError) const {
     if (CurrentPhase == "PlayerTurn") {
         if (Env.ActionName != "play_cards" && Env.ActionName != "pass_turn") {
-            OutError = TEXT("only play_cards/pass_turn allowed");
-            return false;
+            OutError = TEXT("only play_cards/pass_turn allowed in PlayerTurn"); return false;
         }
         if (Env.ActionName == "play_cards") {
-            // 解析 ParamsJson: actual_indices, claim_rank, claim_count
-            // 验证 indices 在该玩家 hand 范围、count 一致
-            // 通过则修改 State.Players[i].Hand / claim 字段
-            // 完成后 TransitionToPhase("ChallengeWindow");
+            // 解析 ParamsJson 验证 indices 在 hand 范围、count == indices.size
+            // 但不修改任何 state
         }
         return true;
     }
     if (CurrentPhase == "ChallengeWindow") {
-        // 第一个 challenge 触发 Reveal；其他 drop
+        if (Env.ActionName != "challenge") {
+            OutError = TEXT("only challenge allowed in ChallengeWindow"); return false;
+        }
+        return true;
     }
     OutError = FString::Printf(TEXT("phase %s does not accept %s"), *CurrentPhase.ToString(), *Env.ActionName);
     return false;
+}
+
+// === Apply (在 Action.Execute 成功 OnDone 之后调) ===
+void AMindGameMaster_LiarsBar::Apply(AActor* Agent, const FMindActionEnvelope& Env) {
+    if (Env.ActionName == "play_cards") {
+        // 真正从 hand 移除 actual_indices 的牌、记 claim 到 State
+    } else if (Env.ActionName == "challenge") {
+        // 记录 challenger ID
+    }
+}
+
+// === OnAgentActionFinished (Apply 之后调，决定是否切阶段) ===
+void AMindGameMaster_LiarsBar::OnAgentActionFinished(AActor* Agent, const FMindActionEnvelope& Env, bool bOk) {
+    if (!bOk) return;
+    if (CurrentPhase == "PlayerTurn" && Env.ActionName == "play_cards") {
+        TransitionToPhase("ChallengeWindow");
+    } else if (CurrentPhase == "ChallengeWindow" && Env.ActionName == "challenge") {
+        TransitionToPhase("Reveal");
+    }
 }
 
 FMindAgentView AMindGameMaster_LiarsBar::BuildViewFor(AActor* Agent) {
@@ -133,7 +153,7 @@ FMindAgentView AMindGameMaster_LiarsBar::BuildViewFor(AActor* Agent) {
 - 表演动画（T15）
 
 ## 风险
-- `ChallengeWindow` 的并发：3 NPC 同时 RequestDecision，第一个 Challenge 通过后其他在途的 LLM 调用可能晚到——`ValidateAndApply` 用 `CurrentPhase != "ChallengeWindow"` 拒绝即可
+- `ChallengeWindow` 的并发：3 NPC 同时 RequestDecision，第一个 Challenge 通过后其他在途的 LLM 调用可能晚到——`Validate` 用 `CurrentPhase != "ChallengeWindow"` 拒绝即可
 - 牌堆数量：4 人 × 5 张 = 20 张，32 张牌堆充足
 - Roulette 概率公式确认：每输一次 chamber-=1，命中 1/chamber；初始 chamber=6 → 第 1 次 1/6，第 2 次 1/5，... 直到 1/1 必死
 - 决策 cooldown=2s 与 ChallengeWindow 时间窗的相互作用：ChallengeWindow 没有显式时长，靠先到先得；如果所有 NPC 都不挑战需要 timeout（暂时简化为：每个 NPC 调用一次后若都没挑战则 auto-reveal）

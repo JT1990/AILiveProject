@@ -4,7 +4,7 @@
 新建骗子酒馆关卡：极简场景（吧台 + 中央扑克桌 + 4 把高凳），配 NavMesh，预放 4 个 NPC spawn 点 + 1 个 GameMaster Actor。**不做美术**——blockout 用 cube/cylinder，重点是空间布局和导航可达性。
 
 ## 前置
-T01（NavigationSystem 模块就位）
+T01（NavigationSystem 模块就位）+ T19.7（`BP_PokerSeat_SmartObject` 已就位）
 
 ## DoD
 - [ ] `Content/MyAssets/Level_LiarsBar.umap` 新建

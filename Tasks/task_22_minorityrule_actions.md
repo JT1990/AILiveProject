@@ -7,15 +7,16 @@
 T21（GM 阶段机）+ T19（通用动作骨架）+ T11（GM 基类含 Validate/Apply 拆分）—— T19.5 / T19.7 / T18 已在 M0 完成，本卡直接消费它们
 
 ## DoD
-- [ ] `UMindAction_AskQuestion`：解析 `{question_text}` → 写入 `GM.State.CurrentQuestion` → 通过 GM 广播 → Speak 配音说出问题
+- [ ] `UMindAction_AskQuestion`：解析 `{question_text}` → Speak 配音说出问题 → Done(true) → **GM.Apply 写入 `GM.State.CurrentQuestion` 并广播 OnGameEvent**（Action 不直接改 state）
 - [ ] `UMindAction_Vote`：解析 `{choice: "yes"|"no", reasoning?: string}` →
   - **EQS_FindNearestVoteBox(choice)**（T19.5）→ 选 SlotActor
   - **ApproachAndUse(VoteBox slot, "Cast")**（T19.7）→ 走过去 + 触发投票交互
   - 完成后 Speak 掩护台词"我做出选择了" → Done(true)
   - **GM.Apply 写入 `GM.State.Players[i].CurrentVote`（私密，Tally 才公开）**
   - 失败（无可达 / Move 失败）→ Done(false) → GM 视为漏投
-- [ ] `UMindAction_ProposeAlliance`：解析 `{target_agent_id, terms?: string}` → Speak 私聊"我想和你结盟" → Done(true) → **GM.Apply 创建"待接受邀请"列表**
-- [ ] `UMindAction_AcceptAlliance`：解析 `{from_agent_id}` → Speak 私聊"我接受" → Done(true) → **GM.Apply 标记双方互为盟友 + 写双方私有记忆 "with X formed alliance"**
+- [ ] `UMindAction_ProposeAlliance`：解析 `{target_agent_id, terms?: string}` → Speak 私聊"我想和你结盟" → Done(true) → GM.Apply 创建"待接受邀请"列表（Action 不直接改 state）
+- [ ] `UMindAction_AcceptAlliance`：解析 `{from_agent_id}` → Speak 私聊"我接受" → Done(true) → GM.Apply 标记双方互为盟友 + 写双方私有记忆 "with X formed alliance"
+- [ ] **私聊术语澄清**：MVP 不做 TTS 空间衰减（"表演层声音"全场可听）；区分发生在"信息层"——`RecordSpeechEvent` 通过 Perception hearing 距离过滤记忆写入。验收要检查 Memory Service 中谁收到了私聊记忆，不只靠人耳听
 - [ ] `UMindAction_Speak` 改造：加 `channel` 参数
   - `"public"`（默认）：原行为，TriggerMinimaxSpeech 全场可听
   - `"private:<agent_id>"`：TTS 仍发声（**MVP 不做空间衰减**），但**记忆写入由 AI Perception 的 hearing 距离决定**（T18）：
@@ -52,7 +53,7 @@ void UMindAction_Vote::Execute(UMindComponent* Owner, const FString& ParamsJson,
                     if (!ok2) { Done.ExecuteIfBound(false, Reason); return; }
                     // 成功后掩护台词（GM.Apply 在 OnActionDone 之后由 MindComponent 调用）
                     UMinimaxACELibrary::TriggerMinimaxSpeech(Owner, Owner->GetOwner(),
-                        FText::FromString(TEXT("我做出选择了")), /*...*/);
+                        TEXT("我做出选择了"), /*FString，不是 FText*/ /*...*/);
                     Done.ExecuteIfBound(true, FString::Printf(TEXT("voted (secret) at %s box"), *Choice));
                 }));
         }));
@@ -70,7 +71,7 @@ void UMindAction_Speak::Execute(UMindComponent* Owner, const FString& ParamsJson
         TargetId = Channel.Mid(8);
         // 1) TTS 仍发声但调小 attenuation（M4 简化：不调 attenuation，只标记记忆 channel）
     }
-    UMinimaxACELibrary::TriggerMinimaxSpeech(Owner, Speaker, FText::FromString(Text), ...);
+    UMinimaxACELibrary::TriggerMinimaxSpeech(Owner, Speaker, Text /*FString*/, ...);
 
     // 私聊记忆 → GM 决定写给谁
     auto* GM = Owner->GetGameMaster();
@@ -81,7 +82,8 @@ void UMindAction_Speak::Execute(UMindComponent* Owner, const FString& ParamsJson
 ```
 
 ```cpp
-// MindGameMaster_MinorityRule.cpp（基于 T18 Perception 实现物理性私聊）
+// MindGameMaster_MinorityRule.cpp（基于 T18 Perception 实现"信息层私聊"——
+// 表演层 TTS 仍全场可听，但记忆写入按 hearing 距离过滤）
 void AMindGameMaster_MinorityRule::RecordSpeechEvent(AActor* SpeakerActor, const FString& Text, const FString& Channel) {
     auto* Mem = GetGameInstance()->GetSubsystem<UMindMemoryClient>();
     auto* SpeakerMC = SpeakerActor->FindComponentByClass<UMindComponent>();

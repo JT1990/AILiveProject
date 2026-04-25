@@ -1,7 +1,7 @@
-# T24 — 多轮淘汰循环 + `/memory/by_tag`
+# T24 — 多轮淘汰循环 + 承诺/投票对比
 
 ## 目标
-把少数决从单轮扩展为多轮（淘汰到剩 1-2 人），并在 Memory Service 加 `/memory/by_tag` 端点用于精确检索"承诺 vs 实际投票"对比。
+把少数决从单轮扩展为多轮（淘汰到剩 1-2 人）；用已有的 `/memory/by_tag`（T08 已实现）实现"承诺 vs 实际投票"对比段落。**不再新增端点**。
 
 ## 前置
 T23（M4 单轮通过）
@@ -11,11 +11,7 @@ T23（M4 单轮通过）
   - alive ≤ 2：TransitionToPhase("GameOver") + 公布最终赢家
   - alive ≥ 3：清空 RoundEnd 数据 → RoundNumber++ → TransitionToPhase("AskQuestion") 重新出题
 - [ ] 多轮间共享同一 GM 实例和同一 Memory Service connection；Participants 数组维持原 8 个，但 alive=false 的 NPC 跳过
-- [ ] Memory Service 加 `/memory/by_tag`：
-  - body: `{agent_id, tag_key, tag_value, top_n: int}`
-  - 返回精确匹配该 tag 的最近 N 条
-  - Cypher: `MATCH (a:Agent {id:$id})-[:REMEMBERS]->(m) WHERE m.tags[$key] = $val RETURN ... ORDER BY m.ts DESC LIMIT $n`
-- [ ] `UMindMemoryClient::ByTag` 实现
+- [ ] **`/memory/by_tag` 已在 T08 实现**；`UMindMemoryClient.ByTag` 已在 T09 就位——本卡直接消费
 - [ ] `UMindComponent::BuildPromptAndCallLLM` 在少数决投票阶段（Vote phase）额外注入"承诺 vs 实际投票"对比段：
   - ByTag(`type=intent`) 取最近 5 条该 agent 自己的意图声明
   - ByTag(`type=tally`) 取最近 5 条全局 tally 历史
@@ -93,7 +89,11 @@ void UMindComponent::BuildPromptAndCallLLM(const FString& Reason) {
 ## 不在范围
 - 联盟可视化 HUD（T25）
 - 钻石分配 / 终局奖励（M6+）
-- 跨 session 持久（重启游戏即清记忆是接受的）
+
+## 持久化范围（明确）
+- **MVP 验收**：同一 Memory Service 进程内跨关卡、跨局持久（M5 跨 LiarsBar/MinorityRule 验证）
+- **可选**：重启 PIE 后仍保留（自然支持，因为 Memory Service 进程不重启）
+- **不要求**：重启 Neo4j / 清库后的恢复
 
 ## 风险
 - 多轮记忆膨胀：每轮 ~50 条 / 每 NPC，跑到第 5 轮 = 250 条/NPC × 8 = 2000 节点。Neo4j 性能 OK，但 vector index 建议 T08 已建

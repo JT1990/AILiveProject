@@ -26,8 +26,8 @@ T00（**强依赖**：NPC 必须是 Pawn 子类；如是 Actor 需要先升级 P
 ### 2. 感知回调（M0 阶段先 stub，T07 接 Mind 后补真实调用）
 - [ ] `UMindComponent::OnPerceptionUpdated(AActor* Source, FAIStimulus Stim)`：
   - 节流：相同 Source 5s 内重复刺激不触发
-  - **M0 实现**：仅打 `LogMind: saw_X / heard_X` 日志
-  - **T07 完成后**回头加一行 `RequestDecision(Reason)` —— 该补丁本身不算新卡，是 T07 的实施细节
+  - **行为受 `bPerceptionCanTriggerDecision` flag 控制**（M0 默认 false → 仅 log；T07 完成后由 NPC.Initialize 显式打开）
+- [ ] `UMindComponent` 加 `bool bPerceptionCanTriggerDecision = false;` + setter `SetPerceptionCanTriggerDecision(bool)`
 
 ### 3. AgentView 数据源 API
 - [ ] `UMindComponent` 提供：
@@ -101,7 +101,12 @@ void UMindComponent::OnPerceptionUpdated(AActor* Source, FAIStimulus Stim) {
     else if (Stim.Type == UAISense::GetSenseID<UAISense_Hearing>())
         Reason = FString::Printf(TEXT("heard_%s"), *Source->GetName());
 
-    RequestDecision(Reason);  // 内部已节流（cooldown）+ async
+    UE_LOG(LogMind, Verbose, TEXT("Perception: %s"), *Reason);
+
+    // M0 阶段：仅 log，不触发决策。T07 / M1 完成后通过 SetPerceptionCanTriggerDecision(true) 打开
+    if (bPerceptionCanTriggerDecision) {
+        RequestDecision(Reason);  // 内部已节流（cooldown）+ async
+    }
 }
 ```
 

@@ -21,13 +21,14 @@ T14（M2 完整跑通）+ T09（记忆系统已可读写）
 - [ ] **跨游戏关系 prompt 模板**：`UMindComponent::BuildSystemPrompt` 增加段：
   ```
   == 你与在场同伴的过往（自动从记忆检索） ==
-  与 NPC_X：{recall_by_tags(speaker=X, top_3 by score)}
-  与 NPC_Y：{recall_by_tags(speaker=Y, top_3 by score)}
+  与 NPC_X：{ByTag(speaker=X, top_3)}
+  与 NPC_Y：{ByTag(speaker=Y, top_3)}
   ...
   ```
-  对当前 GM.Participants 中每个非自己的 agent 各做一次 ByTag 检索（speaker=peer_id）取 top_3。
-  - 在 M3（骗子酒馆 polish）就实现这个段落，但只能拿到本游戏的同伴交互；
-  - M4 少数决用同一阵容时，这段会自动包含"骗子酒馆里的过往"——这就是 PRD"具有连续性的社会人格"的落地点
+  对当前 GM.Participants 中每个非自己的 agent 各做一次 `MemoryClient.ByTag(agent_id=self, tag_key="speaker", tag_value=peer_id, top_n=3)`。
+  - **`/memory/by_tag` 已在 T08 实现**，本卡直接消费
+  - 在 M3 实现这个段落，本游戏内的同伴交互可见；
+  - M4 少数决用同一 NPC 阵容时，这段会自动包含"骗子酒馆里的过往"——PRD"连续性社会人格"的落地点
 
 ## 关键文件
 - 修改 `MindGameMaster_LiarsBar.cpp`（事件级记忆写入）

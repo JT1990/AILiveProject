@@ -77,10 +77,11 @@ DEEPSEEK_API_KEY=sk-...
 
 ### 5. `.env` 文件健康
 - [ ] `D:/Project/Unreal/AILiveProject/.env` 存在
-- [ ] 包含 `minimax=sk-...`（M0 之前已有）
-- [ ] 计划添加 `deepseek=sk-...`（T01 实施时）
-- [ ] **`.env` 在 `.gitignore` 中**（必须验证；如果不在就加）
-- [ ] `git status` 确认 `.env` 不在 staged/tracked
+- [ ] 包含全部所需 keys（已确认）：`minimax`、`DEEPSEEK_API_BASE`、`DEEPSEEK_API_KEY`、`EMBEDDING_API_BASE`、`EMBEDDING_MODEL_NAME`、`NEO4J_URI`、`NEO4J_USER`、`NEO4J_PASSWORD`
+- [ ] **`.env` 在 `.gitignore` 中**（用窄命令验证，避免 `git status` 在大 UE 项目慢）：
+  - `git ls-files .env` → 应输出空（未被 track）
+  - `git check-ignore -v .env` → 应输出对应 `.gitignore` 行号
+- [ ] 不要用 `git status` / `git status --short` 检查（在本仓库可能耗时过长）
 
 ### 6. 现有 8 NPC 配置盘点
 用 Monolith MCP 对 `BP_NPC_MH_Character_1..8` 各自跑：
@@ -98,6 +99,21 @@ DEEPSEEK_API_KEY=sk-...
 ### 8. 录屏工具（弱前置）
 - [ ] 你有什么录屏工具（OBS / 引擎自带 / ShareX / 其他）—— T17 / T26 验收要录像
 
+### 9. Monolith MCP 可用性（**强前置**）
+- [ ] `mcp__monolith__monolith_status` 返回在线
+- [ ] 如果离线，**所有 BP / UMG / 资产任务暂停**——CLAUDE.md 强约束"一律用 Monolith MCP"，离线时只能 fallback 到用户手点编辑器（成本极高）
+
+### 10. NPC speech actor baseline
+- [ ] 用 MCP 检查每个 `BP_NPC_MH_Character_1..8`：
+  - VisualOverride child actor（`AC_VisualOverrideManager`）当前 spawn 的子 actor 是什么类（应该是 `BP_MH_Character_*`）
+  - Face AnimBP 是否含 `ApplyACEAnimation` 节点（这是 A2F 角色契约必备）
+- [ ] 这些信息决定 `ResolveSpeechActor`（T06）的实现路径
+
+### 11. AIController / AutoPossessAI baseline
+- [ ] 检查 `BP_NPC_MH_Character_*` 的 `AIControllerClass` 配置（默认还是自定义）
+- [ ] 检查 `AutoPossessAI` 设置（决定 spawn 后是否自动 possess）
+- [ ] 如果不满足 `AAIController::MoveTo` 的前提，T18/T19/T19.7 全部需要调整或先做 NPC 父类升级
+
 ## 关键操作（Monolith MCP 调用清单）
 
 ```
@@ -112,7 +128,8 @@ get_execution_flow(BP_NPC_MH_Character.OnT)  # T 键事件
 
 ## 验收信号
 
-填一份 `Tasks/T00_PREFLIGHT_RESULT.md`，覆盖上面 1-7 各项，每项要么 ✅ 要么写明替代方案。8 项不强求。
+填一份 `Tasks/T00_PREFLIGHT_RESULT.md`：**1-7 + 9-11 必须 ✅ 或写明替代方案**；第 8 项录屏工具弱前置，记录即可。
+secrets（API key / Neo4j 密码）只记录 masked 值（前 4 + 后 4 + 中间 `...`），不要全文写入。
 
 ## 不在范围
 - 任何代码改动

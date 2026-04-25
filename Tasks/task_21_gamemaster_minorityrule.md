@@ -18,10 +18,18 @@ T19（通用动作完整）+ T11（GM 基类）+ T03（MinorityRuleState 骨架�
   - 60s 到期 → TransitionToPhase("Vote")
 - [ ] `Phase_Vote`：注入 `[Vote]` 给所有 alive；同时 Awake 全员；30s timeout（未投者自动废票，淘汰）
 - [ ] `Phase_Tally`：统计票数；多数派全部 elim；少数派全部存活；写公开记忆"Round X tally: yes=N, no=M, eliminated=[...]"
+
+## 全局 LLM 预算（防 Negotiate 阶段 QPS 失控）
+- [ ] `AMindGameMaster` 加 `int32 MaxConcurrentLLM = 4;` 字段，`int32 ActiveLLMCount` 计数
+- [ ] MindComponent 在 `Calling` 状态进入/退出时 +/- count；进入时若 `count >= max` 则 drop（带日志，不排队）
+- [ ] Negotiate 阶段 GM 主动唤醒间隔从 DataAsset 读 `NegotiateWakeIntervalSeconds`（基于 T14.5 实测填）
+- [ ] Negotiate 阶段对所有 alive NPC 调 `SetPerceptionCanTriggerDecision(false)`，避免感知触发与 GM 唤醒并发；阶段结束恢复
 - [ ] `Phase_Eliminate`：被淘汰的 NPC 切 alive=false；动画或表演（M5 polish），暂时只 Hidden=true
 - [ ] `Phase_RoundEnd`：本卡只做"切到 GameOver"，多轮循环留 T24
 - [ ] `BuildViewFor`：private = 自己当前投票意向（Vote 阶段才有；Negotiate 阶段空）+ 自己识别的盟友列表；public = 当前问题 / 历史轮次公开数据 / 所有 alive 玩家列表 / 自己的剩余钻石数
-- [ ] `ValidateAndApply`：按 phase 严格验证（AskQuestion 阶段只接 ask；Negotiate 接 Speak/Propose/Accept/Think/Decision；Vote 接 Vote）
+- [ ] **`Validate`（只读）**：按 phase 严格验证（AskQuestion 阶段只接 ask；Negotiate 接 Speak/Propose/Accept/Think/Decision；Vote 接 Vote）
+- [ ] **`Apply`（修改）**：在 Action.Execute OnDone 后才修改 GM 状态（写 question / vote / alliance）
+- [ ] **`OnAgentActionFinished`**：决定是否切阶段（如 AskQuestion → Negotiate）
 
 ## 关键文件
 - 实现 `Public/Mind/GameMaster/MindGameMaster_MinorityRule.h` + `.cpp`

@@ -4,14 +4,14 @@
 实现剩余 8 个通用动作，让少数决（M4）有充足的动作空间表达"走到投票箱前"、"私下示意盟友"、"先想一想再说"等行为。
 
 ## 前置
-T11（GM 基类，含 Validate/Apply 拆分）—— T18 / T19.5 / T19.7 已在 M0 完成，本卡只消费它们
+T09（`UMindMemoryClient` 含 Write/Recall/ByTag）+ T11（GM 基类，含 Validate/Apply 拆分）—— T18 / T19.5 / T19.7 已在 M0 完成，本卡只消费它们
 
 ## DoD
 - [ ] 实现 9 个 Action 子类（在 `Public/Mind/Actions/` 下，骨架 T03 已建；`sit_down` 为新增）：
 
 | Action | Params | 行为 |
 |---|---|---|
-| `move_to` | `{target_actor_id?, named_location?}` | **改造**：调 EQS_FindFacingPoint(target) 选落点 → AIController.MoveToLocation；不再硬编码 distance |
+| `move_to` | `{target_actor_id?, named_location?}` | 调 EQS_FindFacingPoint(target) 选落点 → AIController.MoveToLocation。target 不可见时（CanSenseActor 返回 false）允许，因为 MoveTo 本身可以走盲区 |
 | `sit_down` | `{}` | **新增**：调 EQS_FindAvailableSeat → ApproachAndUse(Sit slot, T19.7) |
 | `look_at` | `{target_actor_id}` | 平滑转向；**先用 `MindComponent.CanSenseActor(target, Sight)` 检查能否看见**，看不见则 Done(false, "out of sight") |
 | `wait` | `{seconds: float}` | 计时器，到点 Done(true) |
@@ -24,10 +24,10 @@ T11（GM 基类，含 Validate/Apply 拆分）—— T18 / T19.5 / T19.7 已在 
 - [ ] `UMindComponent` 加 `CurrentIntent` 字段，`BuildSystemPrompt` 里把它拼到 system 段
 - [ ] 通用动作在 `MindComponent::Initialize` 中默认全部注册
 - [ ] `recall` 动作的特殊处理：执行后立即触发一次 RequestDecision（带 query 结果作为 prompt 增量），不算正常 Done — 实现上：Done(true) 之后由 MindComponent 检查 `LastEnvelope.ActionName=="recall"` 立刻再次 RequestDecision
-- [ ] **`recall` 死循环防御**：MindComponent 在 OnActionDone 看到 recall 时检查 `RecallChainDepth`：
-  - `RecallChainDepth++`
-  - 若 ≥ `RecallChainMax(=2)`，临时把 recall 从 ActionRegistry 移除（记 backup），下一轮决策不暴露给 LLM
-  - 下次正常 RequestDecision 进入时（即 trigger 不是 post_recall）重置 `RecallChainDepth = 0` 并恢复 recall
+- [ ] **`recall` 改为同一次决策内 inline 完成**（推荐方案，避免与 cooldown 冲突）：
+  - LLM 输出 `recall` 时，MindComponent 不调 `OnActionDone` 收尾，而是 ByTag/Recall 后**把检索结果拼到 prompt 后立即重新调 LLM**（同一个 `RequestDecision` 上下文）
+  - `RecallChainDepth` 计数仍保留，超过 `RecallChainMax(=2)` 时移除 recall 并强制 LLM 选其他动作
+  - 这样不进 `OnActionDone` → 不更新 `LastDecisionAt` → 不与 cooldown 冲突
 
 ## 关键文件
 - 实现 `Public/Mind/Actions/MindAction_MoveTo.cpp` 等 8 个文件

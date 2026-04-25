@@ -10,7 +10,7 @@ T01（HTTP 模块依赖）+ T02（Provider 基类骨架）
 - [ ] `UMindLLMProvider_DeepSeek::RequestCompletion` 完整实现
 - [ ] 提供静态测试函数 `UMindLLMProvider_DeepSeek::TestPing(WorldCtx, Prompt, OnDone)`，BlueprintCallable
 - [ ] HTTP 调用走 `FHttpModule::Get().CreateRequest()` + `OnProcessRequestComplete` 异步回调（不阻塞游戏线程）
-- [ ] API key 通过 `UMinimaxACELibrary::GetEnvValueFromProjectEnv("deepseek")` 读取
+- [ ] API key 通过 `UMinimaxACELibrary::GetEnvValueFromProjectEnv(ApiKeyEnvName)` 读取（`ApiKeyEnvName` 默认 `"DEEPSEEK_API_KEY"`，由 Provider 子类字段配置；不要硬编码字符串）
 - [ ] 失败模式日志清晰：网络错误 / 401 / JSON 解析失败 各自有 `LogMind` 警告
 - [ ] 在编辑器测试关卡里，BP 调 `TestPing("你好")`，Output Log 看到 DeepSeek 返回的中文回答
 

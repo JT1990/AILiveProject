@@ -1,7 +1,7 @@
-# T08 — Memory Service `/memory/write` + `/memory/recall`
+# T08 — Memory Service `/memory/write` + `/memory/recall` + `/memory/by_tag`
 
 ## 目标
-在 Memory Service 上实现写入和向量检索两个端点，对接 Neo4j 存储 + qwen3-embedding 向量化。
+在 Memory Service 上实现 3 个核心端点：写入、向量检索、tag 精确检索。**`/memory/by_tag` 提前到本卡**（v1 设计在 T24 才加，导致 T16 跨游戏关系 prompt 时序倒挂）。对接 Neo4j 存储 + qwen3-embedding 向量化。
 
 ## 前置
 T04（health 端点 + Neo4j/embedding 探测就位）
@@ -15,12 +15,19 @@ T04（health 端点 + Neo4j/embedding 探测就位）
   - body: `{agent_id, query, top_k}`
   - 流程：query → embedding → Neo4j 内向量相似度（cosine）按 agent_id 过滤 → 返回 top_k
   - 返回 `[{id, content, score, ts, tags}]`
+- [ ] **新增 `POST /memory/by_tag`**：
+  - body: `{agent_id, tag_key, tag_value, top_n: int=5}`
+  - Cypher: `MATCH (a:Agent {id:$id})-[:REMEMBERS]->(m) WHERE m.tags[$key] = $val RETURN ... ORDER BY m.ts DESC LIMIT $n`
+  - 返回 `[{id, content, score=1.0, ts, tags}]`
 - [ ] Neo4j schema：
   - `(:Agent {id})` 节点
   - `(:Memory {id, content, embedding: list<float>, ts, tags: map})`
   - 关系 `(Agent)-[:REMEMBERS]->(Memory)`
-- [ ] 启动时自动建索引：`CREATE VECTOR INDEX agent_memory_vec ... ON :Memory(embedding) ...`（如 Neo4j 5.x 支持原生向量索引）
-- [ ] `pytest` 一个 smoke test（不是必需，但欢迎）：`write` 一条然后 `recall` 能回来
+- [ ] **vector 检索 MVP 路径收敛**：
+  - 默认实现：**Python 端 cosine fallback**——按 agent_id 拉取该 agent 的全部 Memory，numpy 计算 cosine 排序 top_k
+  - 如果 T00 确认 Neo4j 5.x 有 native vector index，再升级为 `db.index.vector.queryNodes`
+  - 不引入 `gds.similarity.cosine`（GDS 是企业版功能）
+- [ ] T08 验收时实测一次 embedding 长度（通常 4096），写到 `Tasks/T00_PREFLIGHT_RESULT.md` 的 embedding dim 字段
 
 ## 关键文件
 - 修改 `Tools/MemoryService/main.py`
@@ -116,7 +123,7 @@ async def recall(req: RecallReq):
   返回上一条记录，score > 0.5
 
 ## 不在范围
-- `/memory/recent`（按时间排）和 `/memory/by_tag`（精确 tag）— 留给 T24
+- `/memory/recent`（按时间排）— 留给 T24（by_tag 已能覆盖大部分场景）
 - 重要性衰减、记忆压缩、清理
 
 ## 风险

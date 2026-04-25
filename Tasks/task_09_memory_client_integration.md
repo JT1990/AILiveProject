@@ -1,14 +1,14 @@
 # T09 — `UMindMemoryClient` + 决策前后自动写/读
 
 ## 目标
-UE 端实现 `UMindMemoryClient`（GameInstanceSubsystem），并改造 `UMindComponent::BuildPromptAndCallLLM` 与 `OnActionDone`：决策前自动 Recall 注入 prompt，动作完成后自动 Write 记录。
+UE 端实现 `UMindMemoryClient`（GameInstanceSubsystem），并改造 `UMindComponent::BuildPromptAndCallLLM` 与 `OnActionDone`：决策前自动 Recall 注入 prompt，动作完成后自动 Write 记录。**含 ByTag 客户端**（端点已在 T08 提前实现）。
 
 ## 前置
 T08（Memory Service 端点就绪）+ T07（NPC_1 Mind 闭环跑通）
 
 ## DoD
-- [ ] `UMindMemoryClient` 实现 `Write` / `Recall` 两个异步函数（HTTP）
-- [ ] `BaseUrl` 可配置（默认 `http://127.0.0.1:8765`），从 GameInstance 配置或硬编码常量
+- [ ] `UMindMemoryClient` 实现 `Write` / `Recall` / **`ByTag`** 三个异步函数（HTTP）
+- [ ] `BaseUrl` 可配置（默认 `http://127.0.0.1:8765`），优先从 `.env` 读 `MEMORY_SERVICE_URL`，找不到才硬编码默认
 - [ ] `UMindComponent::BuildPromptAndCallLLM` 改造：进入 Calling 前先 `Recall(agent_id, query=Trigger, top_k=Config->MemoryRecallTopK)`，结果 5 条拼到 prompt 的 user 段
 - [ ] **每条记忆拼入 prompt 时用方括号 wrap（prompt injection 防御）**：`[memory ts={ts} from={agent_id_self}: {content}]`；如果记忆 content 来自其他 NPC 的发言，wrap 成 `[NPC_X said at ts={ts}: "{content}"]`
 - [ ] `UMindComponent::OnActionDone` 里自动 `Write(agent_id, content="<reason>: <action_summary>", tags={"trigger":Reason,"action":ActionName})`
@@ -42,6 +42,7 @@ public:
     DECLARE_DELEGATE_OneParam(FOnRecall, const TArray<FMindMemoryItem>&);
     void Write(FString AgentId, FString Content, TMap<FString,FString> Tags);
     void Recall(FString AgentId, FString Query, int32 TopK, FOnRecall Done);
+    void ByTag(FString AgentId, FString TagKey, FString TagValue, int32 TopN, FOnRecall Done);
 };
 ```
 

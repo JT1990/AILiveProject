@@ -6,14 +6,14 @@
 
 ## 前置
 
-T17（M3 完成，骗子酒馆稳定运行）
+T23 M4A（先用单 DeepSeek 跑通 8 NPC 少数决单轮）—— **本卡是 M4B/M5 前的增强项，不阻塞 M4 首轮验收**
 
 ## DoD
 
-- [ ] **接入 GLM**（用户已确认选 GLM）：
-  - endpoint: `https://open.bigmodel.cn/api/paas/v4` (OpenAI-compatible)
-  - model: `glm-5.1`
-  - `.env` 新增 `GLM_API_BASE=https://open.bigmodel.cn/api/paas/v4` 和 `GLM_API_KEY=...`
+- [ ] **接入 GLM**（候选 endpoint/model，**实施日重新核实 provider dashboard 当前可用值**，不把以下当不可变承诺）：
+  - 候选 endpoint: `https://open.bigmodel.cn/api/paas/v4` (OpenAI-compatible)
+  - 候选 model: `glm-5.1`（PRD 候选池写法；实施日确认是否仍可用）
+  - `.env` 新增 `GLM_API_BASE=...` 和 `GLM_API_KEY=...`
 - [ ] 创建 `UMindLLMProvider_GLM`，95% 代码复用 DeepSeek Provider（仅 endpoint / key 名 / model 不同）
 - [ ] 在 M4 关卡 `Level_MinorityRule` 给 8 NPC 分配 LLM Provider：
   - 4 NPC 用 DeepSeek

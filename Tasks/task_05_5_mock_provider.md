@@ -4,11 +4,11 @@
 做一个 `UMindLLMProvider_Mock`，从 DataAsset 读固定 ActionEnvelope 序列返回（或简单规则生成），开发期默认用它，验收前才切真 DeepSeek。**目的：把每张实施卡的迭代速度提升 5-10×**——免去每次改 prompt 都等 2-4s 真调用。
 
 ## 前置
-T05（DeepSeek Provider 已实现，证明抽象基类工作）
+T02（Provider 抽象基类骨架就位）—— **不依赖 T05**，本卡可在 T02 后立刻实现，让 T06/T07 用 Mock 跑通 Speak 闭环，T05 真 DeepSeek 并行/后置
 
 ## DoD
 - [ ] `UMindLLMProvider_Mock` 类（`Public/Mind/MindLLMProvider_Mock.h`）继承 `UMindLLMProvider`
-- [ ] 持有 `UMindMockResponseTable` DataAsset 引用
+- [ ] 持有 `UMindMockResponseTable` DataAsset 引用（从 `UMindAgentConfig.MockResponseTable` 字段拷过来，T02 已加该字段）
 - [ ] `RequestCompletion` 行为：
   - 模拟延迟（默认 100ms，可配）
   - 按 trigger reason / phase 匹配 mock 表里的预设响应
@@ -62,11 +62,18 @@ void UMindLLMProvider_Mock::RequestCompletion(
         ? Hits[FMath::RandRange(0, Hits.Num()-1)]->ResponseJson
         : Table->FallbackResponseJson;
 
-    // 模拟延迟
-    FTimerHandle H;
-    GEngine->GetTimerManager()->SetTimer(H, FTimerDelegate::CreateLambda([Done, Out]() {
-        Done.ExecuteIfBound(true, Out);
-    }), MockDelaySeconds, false);
+    // 模拟延迟（GEngine->GetTimerManager() 不存在；用 World 或 FTSTicker）
+    if (UWorld* W = GEngine->GetWorldFromContextObjectChecked(this)) {
+        FTimerHandle H;
+        W->GetTimerManager().SetTimer(H, FTimerDelegate::CreateLambda([Done, Out]() {
+            Done.ExecuteIfBound(true, Out);
+        }), MockDelaySeconds, false);
+    } else {
+        // 没有 world context（如 commandlet）走 FTSTicker
+        FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+            [Done, Out](float)->bool { Done.ExecuteIfBound(true, Out); return false; }),
+            MockDelaySeconds);
+    }
 }
 ```
 

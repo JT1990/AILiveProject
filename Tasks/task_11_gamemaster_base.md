@@ -44,7 +44,8 @@ DispatchAction(Env):
   })
 ```
 
-- [ ] `StartGame` 模板方法：抓 Participants 上的 MindComponent → Initialize（注入自身 GM 引用）→ 调 OnGameStart 子类 hook
+- [ ] `StartGame` 模板方法：抓 Participants 上的 MindComponent → Initialize（注入自身 GM 引用）→ 调 OnGameStart 子类 hook。**Initialize ownership**：游戏关卡里的 NPC 由 GM.StartGame 统一 Initialize；NPC BeginPlay 不再自己找 GM
+- [ ] **Validate/Apply 测试**（DoD 一项）：构造一个 mock action 让 `Action.Execute` 返回 false，验证 `GM.Apply` 没被调用 + State 没变化（联动 T13.5）
 
 ## 关键文件
 - 重写 `Public/Mind/GameMaster/MindGameMaster.h` + `.cpp`
@@ -77,8 +78,15 @@ public:
     // OnAgentActionFinished：Apply 之后调，子类决定 Phase 切换
     virtual void OnAgentActionFinished(AActor* Agent, const FMindActionEnvelope& Env, bool bExecuteOk) {}
 
-    DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPhaseChanged, FName, FName);
-    FOnPhaseChanged OnPhaseChanged;
+    // Dynamic multicast 让 BP/UMG 能 BlueprintAssignable 订阅
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMindPhaseChangedDynamic, FName, OldPhase, FName, NewPhase);
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMindGameEventDynamic, const FString&, EventDesc);
+
+    UPROPERTY(BlueprintAssignable, Category="AI Live|GM")
+    FOnMindPhaseChangedDynamic OnPhaseChanged;
+
+    UPROPERTY(BlueprintAssignable, Category="AI Live|GM")
+    FOnMindGameEventDynamic OnGameEvent;
 
 protected:
     void TransitionToPhase(FName NewPhase);

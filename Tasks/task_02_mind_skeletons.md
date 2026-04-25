@@ -41,12 +41,13 @@ public:
     UPROPERTY(EditAnywhere, meta=(MultiLine=true)) FText Goals;
     UPROPERTY(EditAnywhere) TSubclassOf<class UMindLLMProvider> ProviderClass;
     UPROPERTY(EditAnywhere) FString ModelId;
-    UPROPERTY(EditAnywhere) FString ApiEndpoint;
-    UPROPERTY(EditAnywhere) FString ApiKeyEnvName;       // 例 "deepseek"
+    UPROPERTY(EditAnywhere) FString ApiBaseEnvName;      // 例 "DEEPSEEK_API_BASE"
+    UPROPERTY(EditAnywhere) FString ApiKeyEnvName;       // 例 "DEEPSEEK_API_KEY"
     UPROPERTY(EditAnywhere) FString MinimaxVoiceId;
-    UPROPERTY(EditAnywhere) FString A2FProviderName;     // "LocalA2F-James"
+    UPROPERTY(EditAnywhere) FName A2FProviderName = FName(TEXT("LocalA2F-James"));  // FName，与 TriggerMinimaxSpeech 签名一致
     UPROPERTY(EditAnywhere) float DecisionCooldownSeconds = 2.0f;
     UPROPERTY(EditAnywhere) int32 MemoryRecallTopK = 5;
+    UPROPERTY(EditAnywhere) TObjectPtr<class UMindMockResponseTable> MockResponseTable;  // 仅 Mock provider 用
 };
 ```
 
@@ -128,6 +129,19 @@ public:
 - 任何函数体的实际实现
 - DeepSeek HTTP 调用（T05）
 - ActionRegistry 注册机制（T06）
+
+## 路径命名锁定（必须在 T02 钉死，后续卡不得修改）
+
+```
+Public/Mind/                        # Mind 决策层
+Public/Mind/Actions/                # 通用动作（Speak/MoveTo/Wait/...）
+Public/Mind/GameMaster/             # GM 基类
+Public/Mind/GameMaster/Actions/     # 游戏专属动作（PlayCards/Vote/...）
+Public/Mind/GameMaster/State/       # FLiarsBarTableState 等 USTRUCT
+Private/Mind/...                    # 镜像 cpp
+```
+
+后续 T03 / T13 / T19 / T22 等卡都按此目录组织 .h/.cpp，不得引入新顶级命名空间。
 
 ## 实施策略
 14 个文件一次写完容易 link error 难定位。**按 .h+.cpp 配对一个一个加，每加一个就 increment 编译**。建议顺序：

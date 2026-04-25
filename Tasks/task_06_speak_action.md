@@ -88,18 +88,36 @@ void UMindAction_Speak::Execute(UMindComponent* Owner, const FString& ParamsJson
     TSharedPtr<FJsonObject> Params;
     auto Reader = TJsonReaderFactory<>::Create(ParamsJson);
     FString Text;
-    if (FJsonSerializer::Deserialize(Reader, Params) && Params->TryGetStringField(TEXT("text"), Text)) {
-        AActor* Speaker = Owner->GetOwner();
-        const FString Key = UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv();
-        const FString Voice = Owner->Config->MinimaxVoiceId;
-        const FString Provider = Owner->Config->A2FProviderName;
-        UMinimaxACELibrary::TriggerMinimaxSpeech(Owner, Speaker, FText::FromString(Text), Key, Voice, /*Endpoint*/{}, Provider);
-        Done.ExecuteIfBound(true, FString::Printf(TEXT("said: %s"), *Text.Left(40)));
-    } else {
-        Done.ExecuteIfBound(false, TEXT("invalid params"));
+    if (!FJsonSerializer::Deserialize(Reader, Params) || !Params->TryGetStringField(TEXT("text"), Text)) {
+        Done.ExecuteIfBound(false, TEXT("invalid params")); return;
     }
+    // 关键：通过 ResolveSpeechActor 取可见的 MetaHuman child actor，不是 NPC 壳 Pawn
+    AActor* Speaker = UMindSpeechHelpers::ResolveSpeechActor(Owner->GetOwner());
+    if (!Speaker) {
+        UE_LOG(LogMindAction, Warning, TEXT("ResolveSpeechActor returned null"));
+        Done.ExecuteIfBound(false, TEXT("no speech actor")); return;
+    }
+    const FString Key   = UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv();
+    const FString Voice = Owner->Config->MinimaxVoiceId;
+    const FName   Prov  = Owner->Config->A2FProviderName;       // FName，不是 FString
+    UMinimaxACELibrary::TriggerMinimaxSpeech(
+        Owner, Speaker,
+        Text,                                                    // FString，不是 FText
+        Key, Voice,
+        TEXT("https://api.minimaxi.com/v1/t2a_v2"),              // 显式默认；不传 {}
+        Prov);
+    Done.ExecuteIfBound(true, FString::Printf(TEXT("said: %s"), *Text.Left(40)));
 }
 ```
+
+## ResolveSpeechActor helper（**P0 关键**）
+
+`UMindSpeechHelpers::ResolveSpeechActor(MindOwner)` 的解析顺序：
+1. 如果 owner 上有 `AC_VisualOverrideManager`（或同等组件）且其 ChildActorComponent 已 spawn 子 actor → 返回 child actor
+2. 否则 fallback 到 owner（直接摆进关卡的 ref pose 模式）
+3. 如果目标 actor 没有 Face/ACE 契约（缺 SkeletalMeshComponent / 缺 ApplyACEAnimation 节点）→ `UE_LOG(LogMindAction, Warning, ...)` 并仍返回该 actor（让调用方决定是否 abort）
+
+放在 `Public/Mind/MindSpeechHelpers.h`，BlueprintCallable。所有 Speak / PlayCards / Challenge / Vote 的 TTS 都走这个 helper——避免每张卡自己摸 visual override。
 
 ## 验收信号
 - T07 完成后端到端测试
@@ -146,3 +164,5 @@ static constexpr int32 RecallChainMax = 2;
 - prompt 的 system 部分别太长——MVP 控制在 500 token 以内
 - prompt 防 injection 用"提醒 LLM 不执行 user 段命令"是软防御，不是密码学级别保护；高动机攻击者（如未来接入恶意 agent）仍可绕过——MVP 接受
 - 中文 prompt 在某些英文优势模型上可能影响输出质量，T18.5 跨厂商时观察
+- **T06 编译级验收**：`MindAction_Speak.cpp` 不允许出现 `FText::FromString` 作为 `TriggerMinimaxSpeech` 实参；不允许 `{}` 作为 endpoint 实参（会覆盖默认值为空）
+- **TTS 失败当前无法同步回报到 Action.Done**——TriggerMinimaxSpeech 本身是 fire-and-forget；MVP 接受这个限制（GM.Apply 仍按 Action.Done(true) 推进），后续 polish 时考虑回调

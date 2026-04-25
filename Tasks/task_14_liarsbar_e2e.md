@@ -73,6 +73,15 @@ On Game Event → Append to Event Log
 - 不同 persona 的 LLM 是否表现出可观察的策略差异
 - 谎称频率 / 挑战频率 / 平均存活回合数
 
+### 协议入口稳定性指标（**必收集**）
+- LLM 返回总数
+- JSON parse fallback 次数（解析失败用整段当 speak.text 的次数）
+- Validate reject 次数（非法 envelope）
+- 连续 reject 后强制 Wait 续命次数
+- HTTP 429 / 5xx 次数
+
+写入 DevLog；这是后续 prompt 工程稳定性的基线
+
 **说明**：A 级通过即可启动 M3 + T14.5 性能基线测量。B 级如果未通过，T17 的 5 局压测是天然的复检机会。
 
 ## 不在范围

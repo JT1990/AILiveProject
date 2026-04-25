@@ -92,9 +92,11 @@ FString MaskKey(const FString& K) {
 ```
 
 ## 验收信号
-- UE 编辑器打开后，新建一个测试 BP，调 `Get Env Value From Project Env("deepseek")`，Print String 看到 `sk-...`
+- UE 编辑器打开后，新建一个测试 BP，调 `Get Env Value From Project Env("DEEPSEEK_API_KEY")`，Print String 看到 `sk-...`
+- 调 `Get Env Value From Project Env("DEEPSEEK_API_BASE")`，看到 `https://api.deepseek.com/v1`
 - 重新调 `Get Minimax Api Key From Project Env`，仍能取到原 minimax key（回归测试）
-- Output Log 没有新增 warning / error
+- 调 `VerifyEnvSafety()` 返回 true（`.gitignore` 含 `.env`）
+- Output Log 没有新增 warning / error；如果有 key 打印则只显前 4+后 4
 
 ## 不在范围
 - DeepSeek 实际 API 调用（T05）

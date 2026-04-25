@@ -37,13 +37,18 @@ for i in 1..8:
     if has MindComponent: continue (M2 / M1 已加)
     add_component(BP_NPC_MH_Character_i, MindComponent)
     set_default(MindComponent.Config = DA_AgentConfig_NPCi)
-    在 BeginPlay 加 Initialize(Config, /*GM 用 Get All Actors of Class 找*/)
+    # 不在 BeginPlay 自己找 GM；GM.StartGame 会主动给所有 Participants Initialize
     compile_blueprint
 ```
 
-GM 引用：每 NPC 在 BeginPlay 时通过 `UGameplayStatics::GetAllActorsOfClass(AMindGameMaster::StaticClass())` 找当前关卡的 GM，调 Initialize。
+GM 引用：在 GM Actor 的 Details 面板手填 `Participants` 数组（8 个 NPC 引用），GM.BeginPlay → StartGame → 给每个 Participant 调 Initialize。
 
-## 验收信号（M4 验收清单 - **分级验收**）
+## M4A 验收（单 DeepSeek，本卡）vs M4B（多厂商，T18.5）
+
+**M4A**：8 NPC 全部用 DeepSeek（或 Mock + DeepSeek 混合）跑通少数决单轮。**不引入 GLM**——避免供应商账号、模型名、格式差异、ratelimit 同时上场。
+**M4B**：T18.5 完成后，4 DeepSeek + 4 GLM 混搭跑一次。
+
+## 验收信号（M4A 验收清单 - **分级验收**）
 
 启动 Memory Service → PIE Level_MinorityRule：
 
@@ -67,6 +72,10 @@ GM 引用：每 NPC 在 BeginPlay 时通过 `UGameplayStatics::GetAllActorsOfCla
 - 是否有 NPC 在 Negotiate 阶段表达"我们结盟一起投 yes"
 - 票数分布是否合理（不是 8:0 或 0:8 这种异常）
 - 私聊（ProposeAlliance）是否对应到投票一致性
+
+### 协议入口指标（**必收集**）
+- LLM 总数 / JSON parse fallback / Validate reject / Wait 续命 / HTTP 429
+- 单局总耗时 / 平均决策延迟 / fps spike
 
 ## 不在范围
 - 多轮循环（T24）

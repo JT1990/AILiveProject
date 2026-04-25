@@ -4,7 +4,7 @@
 新建 8 人版少数决关卡：客厅 + 圆桌 + 8 椅 + 投票箱（左右各一，象征 Yes/No） + NavMesh。沿用 T10 的 blockout 风格。
 
 ## 前置
-T01（NavigationSystem）
+T01（NavigationSystem）+ T19.7（SmartObjects 基础已就位，直接 spawn 用）
 
 ## DoD
 - [ ] `Content/MyAssets/Level_MinorityRule.umap` 新建

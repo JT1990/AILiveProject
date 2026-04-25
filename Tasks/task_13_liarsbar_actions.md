@@ -58,12 +58,17 @@ void UMindAction_PlayCards::Execute(UMindComponent* Owner, const FString& Params
         Done.ExecuteIfBound(false, "missing fields"); return;
     }
 
-    // 调 Speak 配音
-    AActor* Speaker = Owner->GetOwner();
+    // 调 Speak 配音（用 ResolveSpeechActor 拿可见 child actor，不是壳 Pawn）
+    AActor* Speaker = UMindSpeechHelpers::ResolveSpeechActor(Owner->GetOwner());
     FString Line = FString::Printf(TEXT("我打了 %d 张 %s"), Count, *Rank);
-    UMinimaxACELibrary::TriggerMinimaxSpeech(Owner, Speaker, FText::FromString(Line),
+    UMinimaxACELibrary::TriggerMinimaxSpeech(
+        Owner,
+        Speaker,
+        Line,                                                           // FString，不是 FText
         UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv(),
-        Owner->Config->MinimaxVoiceId, /*Endpoint*/{}, Owner->Config->A2FProviderName);
+        Owner->Config->MinimaxVoiceId,
+        TEXT("https://api.minimaxi.com/v1/t2a_v2"),                     // 显式默认；不要传 {}
+        Owner->Config->A2FProviderName);                                // FName
 
     // 简化：不等 TTS 完成（异步），直接 Done。表演 polish 见 T15
     Done.ExecuteIfBound(true, FString::Printf(TEXT("claimed %d %s"), Count, *Rank));
@@ -78,11 +83,13 @@ UMindAction_Challenge::UMindAction_Challenge() {
     ParamSchemaJson = TEXT("{}");
 }
 void UMindAction_Challenge::Execute(UMindComponent* Owner, const FString& ParamsJson, FOnActionDone Done) {
-    AActor* Speaker = Owner->GetOwner();
-    FString Line = TEXT("我质疑！");
-    UMinimaxACELibrary::TriggerMinimaxSpeech(Owner, Speaker, FText::FromString(Line),
+    AActor* Speaker = UMindSpeechHelpers::ResolveSpeechActor(Owner->GetOwner());
+    UMinimaxACELibrary::TriggerMinimaxSpeech(
+        Owner, Speaker, TEXT("我质疑！"),
         UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv(),
-        Owner->Config->MinimaxVoiceId, {}, Owner->Config->A2FProviderName);
+        Owner->Config->MinimaxVoiceId,
+        TEXT("https://api.minimaxi.com/v1/t2a_v2"),
+        Owner->Config->A2FProviderName);
     Done.ExecuteIfBound(true, "challenged");
 }
 ```
@@ -110,7 +117,7 @@ Available actions (you must pick one):
 ## 验收信号
 
 执行 T12 验收的同时：
-- LLM 决策返回 `play_cards` 时 → ValidateAndApply 通过 → Action.Execute 触发 NPC 喊"我打了 X 张 Y" + 口型同步
+- LLM 决策返回 `play_cards` 时 → Validate 通过 → Action.Execute 触发 NPC 喊"我打了 X 张 Y" + 口型同步 → Apply 修改 hand
 - 后续 ChallengeWindow 阶段，某个 NPC 选择 challenge → 喊"我质疑！" + GM 切 Reveal
 - Output Log 按 `LogMindAction` 过滤能看到 `play_cards: claimed 2 K`、`challenge: from npc_3`
 

@@ -34,7 +34,9 @@ public:
     UFUNCTION(BlueprintCallable) virtual void StartGame() {}
     UFUNCTION(BlueprintCallable) virtual void EndGame() {}
     virtual FMindAgentView BuildViewFor(AActor* Agent) { return {}; }
-    virtual bool ValidateAndApply(AActor* Agent, const FMindActionEnvelope& Env, FString& OutError) { return false; }
+    virtual bool Validate(AActor* Agent, const FMindActionEnvelope& Env, FString& OutError) const { return false; }
+    virtual void Apply(AActor* Agent, const FMindActionEnvelope& Env) {}
+    virtual void OnAgentActionFinished(AActor* Agent, const FMindActionEnvelope& Env, bool bOk) {}
 
 protected:
     void TransitionToPhase(FName NewPhase);
@@ -79,7 +81,9 @@ public:
     UPROPERTY(EditAnywhere) TObjectPtr<class UDataAsset> GameConfig;
     virtual void StartGame() override {}
     virtual FMindAgentView BuildViewFor(AActor* Agent) override { return {}; }
-    virtual bool ValidateAndApply(AActor* Agent, const FMindActionEnvelope& Env, FString& OutError) override { return false; }
+    virtual bool Validate(AActor* Agent, const FMindActionEnvelope& Env, FString& OutError) const override { return false; }
+    virtual void Apply(AActor* Agent, const FMindActionEnvelope& Env) override {}
+    virtual void OnAgentActionFinished(AActor* Agent, const FMindActionEnvelope& Env, bool bOk) override {}
 };
 ```
 

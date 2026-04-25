@@ -13,12 +13,14 @@
 
 | 里程碑 | 主题 | 任务卡 | 验收 |
 |---|---|---|---|
-| **M-1** | 环境前置 | T00 | 7 项 checklist 全过 |
+| **M-1** | 环境前置 | T00 | 1-7 + 9-11 必过；含 Monolith / speech actor / AIController baseline |
 | **M0** | 完整地基（编译 + 执行层桥梁） | T01-T04 + T18 + T19.5 + T19.7 | Build.bat 通过 + Memory Service `/health` OK + Perception/EQS/SO 手工 BP 调用通过 |
-| **M1** | 单 NPC Speak dry-run | T05-T07 + T05.5 | 按 T → NPC 用 LLM 即兴语音回应；OnPerceptionUpdated 接通 RequestDecision |
-| **M2** | 骗子酒馆 minimal | T08-T14 + T14.5 | 4 NPC `Level_LiarsBar` 跑通（直接用 PokerSeat SO） |
-| **M3** | 骗子酒馆 polish | T15-T17 | 5 局 + 跨局指控 + 多 persona |
-| **M4** | 少数决 minimal | T18.5 + T19-T23 | 8 NPC 跑通；Vote 走 EQS+SO；私聊基于 hearing 物理过滤 |
+| **M1A** | Mock Speak 闭环 | T02 → T05.5 → T06 → T07（用 Mock） | NPC 用 mock LLM 输出 speak action，验证 actor 解析 / 口型 / cooldown |
+| **M1B** | DeepSeek Speak 闭环 | T05 → T07 切真 LLM | 按 T → NPC 用真 LLM 即兴语音回应 |
+| **M2** | 骗子酒馆 minimal | T08-T13 + **T13.5** + T14 + T14.5 | 4 NPC `Level_LiarsBar` 跑通（先 T13.5 跑通规则机，再 T14 接真 LLM） |
+| **M3** | 骗子酒馆 polish | T16 → T17A → T15 → T17B（社会人格优先于动画） | 5 局 + 跨局指控 + 多 persona |
+| **M4A** | 少数决 minimal（单厂商） | T19-T23（仅 DeepSeek） | 8 NPC 跑通；Vote 走 EQS+SO；私聊基于 hearing 物理过滤 |
+| **M4B** | 多厂商混搭 | T18.5 | 4 DeepSeek + 4 GLM 跑一次 |
 | **M5** | 少数决完整 | T24-T26 | 多轮 + 联盟 + 背叛涌现 + 跨游戏会话 |
 
 ## 任务卡完整列表
@@ -35,74 +37,81 @@
 - [T19.7](task_19_7_smart_objects.md) — SmartObjects 基础（SOD + actor BP + ApproachAndUse）
 - [T19.5](task_19_5_eqs_queries.md) — EQS 查询集合（4 个 query + helpers）
 
-### M1 LLM + Speak dry-run
-- [T05](task_05_deepseek_provider.md) — DeepSeek Provider + TestPing + ratelimit 实测
-- [T05.5](task_05_5_mock_provider.md) — Mock LLM Provider（开发期加速 5-10×）
-- [T06](task_06_speak_action.md) — `UMindAction_Speak` + 中文 prompt + injection 防御 + RecallChainDepth
-- [T07](task_07_npc1_integration.md) — `BP_NPC_MH_Character_1` 接入（BeginPlay 顺序 + T 键归属）
+### M1 LLM + Speak dry-run（M1A Mock 优先 / M1B 真 LLM 后置）
+- [T05.5](task_05_5_mock_provider.md) — Mock LLM Provider（前置 T02，不依赖 T05；M1A 默认用）
+- [T06](task_06_speak_action.md) — `UMindAction_Speak` + ResolveSpeechActor + 中文 prompt + injection 防御 + RecallChainDepth
+- [T07](task_07_npc1_integration.md) — `BP_NPC_MH_Character_1` 接入（M1A 用 Mock；M1B 切 DeepSeek）
+- [T05](task_05_deepseek_provider.md) — DeepSeek Provider + TestPing + ratelimit 实测（M1B）
 
 ### M2 骗子酒馆 minimal
-- [T08](task_08_memory_write_recall.md) — Memory Service `/memory/write` + `/memory/recall`
-- [T09](task_09_memory_client_integration.md) — `UMindMemoryClient` + 决策前后自动写/读 + injection wrapping
-- [T10](task_10_level_liarsbar.md) — `Level_LiarsBar.umap` blockout + NavMesh
-- [T11](task_11_gamemaster_base.md) — `AMindGameMaster` 抽象基类 + Validate/Apply 拆分
+- [T08](task_08_memory_write_recall.md) — Memory Service `/memory/write` + `/memory/recall` + `/memory/by_tag`（提前到本卡）
+- [T09](task_09_memory_client_integration.md) — `UMindMemoryClient` Write/Recall/ByTag + injection wrapping
+- [T10](task_10_level_liarsbar.md) — `Level_LiarsBar.umap` blockout + NavMesh（直接 spawn `BP_PokerSeat_SmartObject`）
+- [T11](task_11_gamemaster_base.md) — `AMindGameMaster` 抽象基类 + Validate/Apply 拆分 + 动态委托
 - [T12](task_12_gamemaster_liarsbar.md) — `AMindGameMaster_LiarsBar` 阶段机
 - [T13](task_13_liarsbar_actions.md) — `PlayCards / Challenge / PassTurn`
-- [T14](task_14_liarsbar_e2e.md) — HUD（用 MCP）+ 分级验收 A/B
+- [T13.5](task_13_5_gm_simulation.md) — Deterministic GM Simulation（手工 envelope 跑规则机）
+- [T14](task_14_liarsbar_e2e.md) — HUD（用 MCP）+ 分级验收 A/B + JSON 计数指标
 - [T14.5](task_14_5_perf_baseline.md) — M2 性能基线测量
 
-### M3 骗子酒馆 polish
-- [T15](task_15_liarsbar_montage.md) — 出牌 / 拿枪 Montage + Notify 钩子
-- [T16](task_16_liarsbar_crosssession.md) — 跨局记忆 + 多 persona + 跨游戏关系 prompt 模板
-- [T17](task_17_liarsbar_validation.md) — 5 局压测 + 策略观察 + DevLog
+### M3 骗子酒馆 polish（社会人格优先 → 动画后置）
+- [T16](task_16_liarsbar_crosssession.md) — 跨局记忆 + 多 persona + 跨游戏关系 prompt 模板（用 ByTag）
+- [T17](task_17_liarsbar_validation.md) — 5 局压测 + 策略观察 + DevLog（含 JSON 计数指标）
+- [T15](task_15_liarsbar_montage.md) — 出牌 / 拿枪 Montage + IMindPerformableInterface（接口化调 BP function）
 
-### M4 少数决 minimal
-- [T18.5](task_18_5_multi_provider.md) — 接入 GLM
-- [T19](task_19_general_actions.md) — 通用动作扩展（消费 M0 的 EQS/SO/Perception）
-- [T20](task_20_level_minorityrule.md) — `Level_MinorityRule.umap`（直接用 SO）
-- [T21](task_21_gamemaster_minorityrule.md) — `AMindGameMaster_MinorityRule` 阶段机
-- [T22](task_22_minorityrule_actions.md) — Vote 用 EQS+SO；Speak channel 物理性基于 Perception
-- [T23](task_23_minorityrule_e2e.md) — HUD（用 MCP）+ 分级验收 A/B
+### M4A 少数决 minimal（单厂商）
+- [T19](task_19_general_actions.md) — 通用动作扩展（消费 M0 的 EQS/SO/Perception；recall inline）
+- [T20](task_20_level_minorityrule.md) — `Level_MinorityRule.umap`（直接 spawn SO actor）
+- [T21](task_21_gamemaster_minorityrule.md) — `AMindGameMaster_MinorityRule` 阶段机 + 全局 LLM budget
+- [T22](task_22_minorityrule_actions.md) — Vote 用 EQS+SO；私聊基于 Perception hearing
+- [T23](task_23_minorityrule_e2e.md) — HUD（用 MCP）+ 分级验收 A/B + Initialize ownership
+
+### M4B 多厂商
+- [T18.5](task_18_5_multi_provider.md) — 接入 GLM（候选 endpoint/model 实施日重新核实）
 
 ### M5 少数决完整
-- [T24](task_24_multiround_loop.md) — 多轮淘汰循环 + `/memory/by_tag` 检索
+- [T24](task_24_multiround_loop.md) — 多轮淘汰循环 + 承诺/投票对比（消费 T08 已实现的 by_tag）+ 持久化范围明确
 - [T25](task_25_alliance_hud.md) — 联盟可视化 Debug HUD（用 MCP）
-- [T26](task_26_m5_validation.md) — 多轮验证 + 跨游戏会话 + DevLog + CLAUDE.md 更新
+- [T26](task_26_m5_validation.md) — 多轮验证 + 跨游戏会话 + DevLog + 同步 CLAUDE.md / AGENTS.md
 
 ## 任务依赖图
 
 ```
 T00 (环境前置, 必须先过)
  ↓
-T01 ─┬─→ T02 ─┬─→ T03 ─┬─→ T18 (Perception, M0)
+T01 ─┬─→ T02 ─┬─→ T03 ─┬─→ T18 (Perception, M0; OnPerceptionUpdated 仅 log)
      │        │        │
-     │        │        ├─→ T19.7 (SO 类型, M0)
+     │        │        ├─→ T19.7 (SO 子类继承 GASP BP_SmartObject_Base, M0)
      │        │        │     ↓
      │        │        └─→ T19.5 (EQS, M0; 用 T19.7 的 SO 类)
      │        │
-     │        ├─→ T05 ─→ T05.5 ─→ T06 ─→ T07 (M1 完成)
+     │        ├─→ T05.5(Mock) ─→ T06 ─→ T07 (M1A: Mock 闭环)
+     │        │                            ↓
+     │        │                          T05 (DeepSeek) ──→ T07 切真 LLM (M1B)
      │        │
      │        └─→ T04 (Memory health)
      │              ↓
-     └──────────→ T08 ─→ T09 ─→ T11(Validate/Apply 拆分)
-                                  ↓
-                          T10 ────┴─→ T12 ─→ T13 ─→ T14 (M2 完成) ─→ T14.5
-                                                                      ↓
-                                                        T15 ─→ T16 ─→ T17 (M3 完成)
-                                                                      ↓
-                                          T18.5 ──→ T19 ──→ T20 ──→ T21 ──→ T22 ──→ T23 (M4 完成)
-                                                                                      ↓
-                                                                        T24 ─→ T25 ─→ T26 (M5 完成)
+     └──────────→ T08 (write/recall/by_tag) ─→ T09 (含 ByTag 客户端) ─→ T11(动态委托 + Validate/Apply)
+                                                                          ↓
+                              T10 (用 PokerSeat SO) ──┬─→ T12 ─→ T13 ─→ T13.5(规则机模拟) ─→ T14 ─→ T14.5
+                                                                                                    ↓
+                                                            T16 (用 ByTag) ─→ T17A ─→ T15 ─→ T17B (M3 完成)
+                                                                                                    ↓
+                                                T19 ──→ T20 ──→ T21(LLM budget) ──→ T22 ──→ T23 (M4A 完成)
+                                                                                                    ↓
+                                                                            T18.5 (GLM, M4B)
+                                                                                                    ↓
+                                                                                T24 ─→ T25 ─→ T26 (M5 完成)
 ```
 
 **M0 内部依赖**：
-- T19.7（SO actor BP）→ T19.5（EQS Generator 用 ActorsOfClass(SO)）
+- T19.7（继承 GASP `BP_SmartObject_Base` + 创建 BP_VoteBox/Chair/PokerSeat）→ T19.5（EQS Generator 用 ActorsOfClass(SO)）
 - T18 与 T19.5 / T19.7 并行（都依赖 T01 + T02/T03 骨架）
 
 **并行点**：
 - M0：T01 → (T02, T03, T04) 并行 → T19.7 → (T18, T19.5) 并行
-- M3：T15 / T16
-- M4：T18.5 / T20 准备阶段
+- M1：T05.5 与 T05 并行（Mock 不依赖真 DeepSeek）
+- M3：T16 后再 T15（社会人格优先）
 
 ## 设计原则
 
@@ -120,10 +129,13 @@ Dispatch(env)
        ├─ State = Idle
        └─ GM.OnAgentActionFinished
 ```
-落到 T11 / T12 / T13 / T22。
+落到 T11 / T12 / T13 / T22。**所有 Action 不直接改 GM state**，只解析参数 + 触发外显动作 + Done。
 
 **B. NPC 必须是 Pawn 子类**
 MoveTo / AIController / Perception 全依赖 Pawn 子类。T00 必须验证；如是 Actor 子类，M0 内部要先升 Pawn。
+
+**B+. Speak 必须驱动可见 MetaHuman child actor**
+NPC 是壳 Pawn，可见 mesh 在 `AC_VisualOverrideManager` spawn 的 `ChildActorComponent` 上。`TriggerMinimaxSpeech` 必须传可见 actor，否则 ACE 组件挂在壳 Pawn 上但 Face AnimBP 在 child 上，curve 读不到——口型静默失败。所有 TTS 必须经 `UMindSpeechHelpers::ResolveSpeechActor()`。落到 T06 / T13 / T22。
 
 **C. agent_id 必须跨关卡稳定**
 不能用 `GetName()`（PIE 有 `_C_0` 后缀）。`UMindAgentConfig.AgentIdStable` 用户手填稳定 ID（如 `"npc_1"`）。落到 T02 / T07 / T09。
@@ -171,6 +183,8 @@ NPC 跨骗子酒馆 → 少数决要带"对每个具体同伴的认知"。BuildS
 **N. 跨游戏会话验证**：T26 在同一 PIE 内连跑骗子酒馆 → 少数决，观察记忆迁移
 **O. 多家 LLM 厂商验证**：T18.5 接 GLM，证明抽象基类真扛多家
 **P. A/B 分级验收**：M2 / M4 不强求"完整一局"——A 级 = 3 回合 / 1 阶段（必须）；B 级 = 完整一局（推荐写 DevLog 不阻塞）
+
+**P+. 协议入口稳定性指标**：M2/M4/M5 验收必收集 LLM 总数 / JSON parse fallback / Validate reject / Wait 续命 / HTTP 429——是后续 prompt 工程的基线
 **Q. UMG / BP 一律用 Monolith MCP**（CLAUDE.md 强约束）
 **R. prompt 全中文模板**（仅 JSON 字段名英文）
 **S. BeginPlay 时序**：`Super → PrewarmA2F → SetFixedAndApply → MindComponent.Initialize`；MindComponent 不加 tick
@@ -199,11 +213,14 @@ NPC 跨骗子酒馆 → 少数决要带"对每个具体同伴的认知"。BuildS
 | 记忆系统对接 | 本地 HTTP REST（Python FastAPI） |
 | 记忆服务部署 | 独立 Python 进程，开发时 `uvicorn` 手动起 |
 | Memory Service 代码归属 | 仓库内 `Tools/MemoryService/` |
-| LLM Provider | DeepSeek（主）+ GLM `glm-5.1`（M4 验证抽象多家） |
+| LLM Provider | DeepSeek（主）+ GLM `glm-5.1`（M4B 验证抽象多家；实施日重新核实 model id） |
 | Embedding | ollama OpenAI-compat：`http://localhost:11434/v1/embeddings` + `qwen3-embedding:8b` |
 | Neo4j | `bolt://localhost:7687` / `neo4j` / `storynext123` |
+| Memory 向量检索 | Python 端 cosine fallback（默认）；Neo4j native vector index（如 5.x 可用则升级） |
 | `.env` key 命名 | `XXX_API_KEY` / `XXX_API_BASE` 风格 |
 | 动作空间 | 通用（Mind 模块）+ 游戏专属（GameMaster 阶段动态注册） |
+| SmartObject 路径 | 完全复用 GASP（继承 `BP_SmartObject_Base`，不自造低层 Claim） |
+| 持久化范围 | 同 Memory Service 进程内跨关卡跨局；不要求重启 Neo4j 后恢复 |
 
 ## 不在 MVP 范围
 

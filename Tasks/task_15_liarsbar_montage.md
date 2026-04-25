@@ -11,7 +11,19 @@ T14（M2 跑通）
   - `AM_PlaceCardOnTable`（出牌：单手向桌面伸 + 收）— 选最接近的 GASP montage
   - `AM_TableSlam_Or_Point`（质疑：拍桌 / 指向）
   - `AM_HoldGesture` 或 `AM_Stagger`（轮盘失败：踉跄）
-- [ ] 在 `BP_NPC_MH_Character`（父类）加 BlueprintCallable `PlayMindMontage(UAnimMontage*)`，简单 PlayMontage 即可
+- [ ] **接口化（不直接 Cast 调 BP function）**：新增 `IMindPerformableInterface`：
+  ```cpp
+  UINTERFACE(MinimalAPI, Blueprintable)
+  class UMindPerformableInterface : public UInterface { GENERATED_BODY() };
+  class IMindPerformableInterface {
+      GENERATED_BODY()
+  public:
+      UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category="AI Live")
+      void PlayMindMontage(UAnimMontage* Montage, FName Section);
+  };
+  ```
+- [ ] `BP_NPC_MH_Character`（父类）实现该接口，BP 内 `PlayMontage` 即可
+- [ ] C++ Action 通过 `IMindPerformableInterface::Execute_PlayMindMontage(Actor, Montage, Section)` 调用，避免直接 Cast/调 BP function
 - [ ] `UMindAction_PlayCards::Execute` 加：Speak 之前 `Owner->GetOwner()->PlayMindMontage(AM_PlaceCardOnTable)`
 - [ ] `UMindAction_Challenge::Execute` 加：`PlayMindMontage(AM_TableSlam_Or_Point)`
 - [ ] GM 在 `Phase_Roulette` 命中后给该 NPC 调 `PlayMindMontage(AM_Stagger)`
