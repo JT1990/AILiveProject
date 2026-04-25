@@ -81,3 +81,7 @@ Temp/
 # Local test artifacts
 Tools/*.wav
 Tools/*.pcm
+
+# Python (Tools/MemoryService)
+__pycache__/
+*.pyc

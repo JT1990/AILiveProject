@@ -1,6 +1,6 @@
-# Memory Service (framework, T00)
+# Memory Service
 
-> **状态**：T00 留下的目录占位与环境变量段。服务本体在 T04 卡（`Tasks/task_04_memory_service_health.md`）实现，包含 FastAPI app + `/health` + Neo4j 客户端 + ollama embedding 客户端。本文件只在 T04 起补充 install / run 实质内容。
+> **状态**：T04 已落地骨架 + `/health`。`/memory/write` / `/recall` / `/by_tag` 与 vector index 建表留 T08。
 
 ## 用途
 
@@ -42,13 +42,56 @@ CLAUDE.md "AI 心智决策系统" 的记忆层。NPC 通过 `UMindMemoryClient`�
   - `neo4j` 官方 driver：bolt 协议不走 HTTP proxy，但若用 HTTP REST 接口同样要 bypass
 - **Neo4j 部署**：Docker 容器名 `story-next-neo4j`，启动方式 `docker start story-next-neo4j`
 
-## 待 T04 填充
+## 目录结构（T04）
 
-- 目录结构（`main.py` / `routes/` / `clients/` / `tests/`）
-- 启动 / 停止命令
-- `/health` 检查项（Neo4j ping + ollama models 可达 + embedding 维度断言 = 4096）
-- vector index 建表脚本（5.x native）
-- warm-up 路径：首次 cold latency = 3436 ms（T00 实测，含模型加载），warm latency 在 T08 实测后回填
+```
+Tools/MemoryService/
+├── main.py            # FastAPI app + startup 探测 + /health
+├── models.py          # Pydantic schema（T04 仅 HealthResponse）
+├── requirements.txt   # 依赖
+├── start.bat          # 一键起服务
+└── README.md
+```
+
+T08 才会引入 `routes/` / `clients/` / `tests/` 子目录。
+
+## 安装与启动
+
+```bat
+:: 首次安装依赖
+pip install -r requirements.txt
+
+:: 起服务（端口 127.0.0.1:8765；--reload 开启）
+cd Tools\MemoryService
+start.bat
+```
+
+控制台看到 `Uvicorn running on http://127.0.0.1:8765` 即就绪。停止：终端 Ctrl+C。
+
+端口固定 8765（`start.bat` 写死）；如需换端口直接改 `start.bat`，UE 端 `UMindMemoryClient`（T09）也要同步。
+
+## `/health`（T04 实现）
+
+```bash
+curl http://127.0.0.1:8765/health
+# {"status":"ok","neo4j":true,"embedding":true,"version":"0.1"}
+```
+
+startup 阶段做的两件存活探测：
+
+- **Neo4j**：`MATCH (n) RETURN count(n) LIMIT 1`，连不上则 `neo4j:false`，服务自身不阻塞
+- **Embedding**：`GET {EMBEDDING_API_BASE}/models`（OpenAI-compat），200 即视为存活；连不上 `embedding:false`
+
+httpx client 用 `trust_env=False` 显式绕开本机全局 `HTTP_PROXY`（见上方"localhost 代理坑"段）。
+
+Neo4j 没启动也能跑 service —— 验收信号之一是 `docker stop story-next-neo4j` 后服务仍可起来 + `/health` 200，仅 `neo4j:false`。
+
+## 待 T08 填充
+
+- `/memory/write` / `/memory/recall` / `/memory/by_tag` 三个端点
+- ollama embedding 实调（断言 dim=4096）
+- vector index 建表脚本（Neo4j 5.x native，`db.index.vector.createNodeIndex`）
+- warm-up 路径：首次 cold latency = 3436 ms（T00 实测），warm latency 在 T08 实测后回填
 
 ## 不在范围
 
