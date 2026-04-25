@@ -27,5 +27,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="AI Live|Mind")
 	float Temperature = 0.7f;
 
-	// T05 实施 RequestCompletion override；T02 不实现，继承父类的 PURE_VIRTUAL 占位
+	// T05 实施真 HTTP 调用；T03 占位 override 防止 NewObject 后调 RequestCompletion 触发 LowLevelFatalError
+	virtual void RequestCompletion(
+		const FString& SystemPrompt,
+		const FString& UserPrompt,
+		const TArray<TSubclassOf<class UMindAction>>& AvailableActions,
+		FOnLLMResult Done) override;
 };
