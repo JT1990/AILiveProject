@@ -7,13 +7,13 @@
 - NPC 父类挂 PerceptionComponent + StimuliSource，互相能感知
 - 玩家 DefaultPawn 挂 StimuliSource
 - MindComponent 提供 `GetCurrentlyVisibleAgentIds` / `GetCurrentlyAudibleAgentIds` / `CanSenseActor` API
-- GM 基类提供 `BuildSceneAwarenessSection(Agent)` helper
-- OnPerceptionUpdated 委托挂上但**只 log**（T07 真接 Mind 后才补"调 RequestDecision"那一行）
+- GM 基类提供 `BuildSceneAwarenessSection(Agent)` helper（返回 FString，由子类 `BuildViewFor` 拼进 `FMindMessage` body）
+- OnPerceptionUpdated 委托：节流后 push 一条 `[感知]` user message 到 `Context.Layer2`；是否调 `RequestDecision` 由 `bPerceptionCanTriggerDecision` flag + 阶段策略决定（M0 默认 false）
 - 私聊 hearing 物理判定的工具方法就位（消费它在 T22）
 
 ## 前置
 
-T00（**强依赖**：NPC 必须是 Pawn 子类；如是 Actor 需要先升级 Pawn——这是 T18 进 M0 的真实成本）+ T01（AIModule + GameplayTasks）+ T02（MindComponent 骨架）
+T00（**强依赖**：NPC 必须是 Pawn 子类）+ T01（AIModule + GameplayTasks）+ T02（MindComponent 骨架）
 
 ## DoD（M0 范围）
 
@@ -27,11 +27,12 @@ T00（**强依赖**：NPC 必须是 Pawn 子类；如是 Actor 需要先升级 P
 - [ ] StimuliSource 注册感知到 Sight + Hearing
 - [ ] 玩家 DefaultPawn 加 `UAIPerceptionStimuliSourceComponent`（让 NPC 能感知玩家）—— **用 Monolith MCP**
 
-### 2. 感知回调（M0 阶段先 stub，T07 接 Mind 后补真实调用）
+### 2. 感知回调（push user message + 阶段策略控制是否唤醒）
 
 - [ ] `UMindComponent::OnPerceptionUpdated(AActor* Source, FAIStimulus Stim)`：
   - 节流：相同 Source 5s 内重复刺激不触发
-  - **行为受 `bPerceptionCanTriggerDecision` flag 控制**（M0 默认 false → 仅 log；T07 完成后由 NPC.Initialize 显式打开）
+  - 节流通过后：`Context->PushUser(EMindChannel::System, "[感知] X 进入视野/听到 X 的动静")`（无论是否唤醒，事件都进入 Layer2）
+  - 是否调 `RequestDecision` 由 `bPerceptionCanTriggerDecision` flag 控制（M0 默认 false → 仅 push + log；T07 完成后由 NPC.Initialize 显式打开；某些阶段如 Negotiate 由 GM 显式 disable）
 - [ ] `UMindComponent` 加 `bool bPerceptionCanTriggerDecision = false;` + setter `SetPerceptionCanTriggerDecision(bool)`
 
 ### 3. AgentView 数据源 API
@@ -40,27 +41,27 @@ T00（**强依赖**：NPC 必须是 Pawn 子类；如是 Actor 需要先升级 P
   - `GetCurrentlyVisibleAgentIds() const` —— 返回 agent_id 列表
   - `GetCurrentlyAudibleAgentIds() const`
   - `CanSenseActor(AActor*, FName SenseTag) const`
-- [ ] `AMindGameMaster` 基类提供 `BuildSceneAwarenessSection(Agent) const` —— GM 子类（T12/T21）拼 AgentView 时调用
+- [ ] `AMindGameMaster` 基类提供 `BuildSceneAwarenessSection(Agent) const` —— GM 子类（T12 / T21）`BuildViewFor` 时调用并把字符串拼进返回的 `FMindMessage` body
 
 ### 4. 私聊 hearing 物理判定的工具就位
 
 - [ ] `CanSenseActor(other, "Hearing")` 是物理性私聊的核心 query
-- [ ] 真正的"按 hearing 写记忆"消费在 T22 的 `RecordSpeechEvent`，本卡只确保 query API 工作
+- [ ] 真正的"按 hearing 推送 listener"消费在 T22 `RecordSpeechEvent`，本卡只确保 query API 工作
 
-## 不在 M0 范围（T07 / T22 等卡内消费）
+## 不在 M0 范围（T07 / T22 / T12 等卡内消费）
 
-- OnPerceptionUpdated 真正调 RequestDecision（T07 实施细节）
-- AgentView 拼 awareness section 进 prompt（T12 / T21）
-- 私聊记忆按 hearing 距离过滤（T22）
+- OnPerceptionUpdated 实际唤醒决策（由 T07 打开 flag）
+- AgentView 拼 awareness section（T12 / T21 实现 BuildViewFor 时调）
+- 私聊偷听物理过滤（T22）
 - 压力测试 frame time spike（移到 T07 完成后跑一次）
 
 ## 关键文件
 
 - 修改 `BP_NPC_MH_Character`（父类，加 PerceptionComponent + StimuliSource + 委托绑定）—— **用 Monolith MCP**
 - 修改 `Public/Mind/MindComponent.h` + `.cpp`（OnPerceptionUpdated + GetCurrently\*Agents）
-- 修改 `Public/Mind/GameMaster/MindGameMaster.h`（基类 BuildViewFor 提供工具方法 `BuildSceneAwarenessSection(Agent)` 让子类拼）
-- 修改 `MindGameMaster_*` 子类 BuildViewFor（拼 awareness section）
-- 修改 DefaultPawn（加 StimuliSource，BP 子类化或在 `L_prison` 里给现有 DefaultPawn 加组件）
+- 修改 `Public/Mind/GameMaster/MindGameMaster.h`（基类 `BuildSceneAwarenessSection(Agent)` 工具方法）
+- 修改 `MindGameMaster_*` 子类 `BuildViewFor`（拼 awareness 字符串进 `FMindMessage` body）
+- 修改 DefaultPawn（加 StimuliSource）
 
 ## 关键 API / 伪代码
 
@@ -77,6 +78,12 @@ TArray<FString> GetCurrentlyAudibleAgentIds() const;
 
 UFUNCTION(BlueprintCallable, BlueprintPure)
 bool CanSenseActor(AActor* Other, FName SenseTag /*Sight or Hearing*/) const;
+
+UFUNCTION(BlueprintCallable)
+void SetPerceptionCanTriggerDecision(bool bEnable);
+
+UPROPERTY(EditAnywhere)
+bool bPerceptionCanTriggerDecision = false;
 ```
 
 ```cpp
@@ -101,28 +108,26 @@ void UMindComponent::OnPerceptionUpdated(AActor* Source, FAIStimulus Stim) {
     if (!Source) return;
     const float Now = GetWorld()->GetTimeSeconds();
     auto* Last = LastPerceptionAt.Find(Source);
-    if (Last && (Now - *Last) < 5.0f) return;  // 节流
+    if (Last && (Now - *Last) < 5.0f) return;
     LastPerceptionAt.Add(Source, Now);
 
-    FString Reason;
-    if (Stim.Type == UAISense::GetSenseID<UAISense_Sight>())
-        Reason = FString::Printf(TEXT("saw_%s"), *Source->GetName());
-    else if (Stim.Type == UAISense::GetSenseID<UAISense_Hearing>())
-        Reason = FString::Printf(TEXT("heard_%s"), *Source->GetName());
+    FString SenseLabel;
+    if (Stim.Type == UAISense::GetSenseID<UAISense_Sight>()) SenseLabel = TEXT("看到");
+    else if (Stim.Type == UAISense::GetSenseID<UAISense_Hearing>()) SenseLabel = TEXT("听到");
+    else SenseLabel = TEXT("感知");
 
-    UE_LOG(LogMind, Verbose, TEXT("Perception: %s"), *Reason);
+    FString PerceptionLine = FString::Printf(TEXT("[感知] %s %s"), *SenseLabel, *Source->GetName());
+    UE_LOG(LogMind, Verbose, TEXT("%s"), *PerceptionLine);
 
-    // M0 阶段：仅 log，不触发决策。T07 / M1 完成后通过 SetPerceptionCanTriggerDecision(true) 打开
+    // 事件总是进 Layer2（保证 buffer 完整性）
+    if (Context) Context->PushUser(EMindChannel::System, PerceptionLine);
+
+    // 是否唤醒决策：由 flag + 阶段策略决定
     if (bPerceptionCanTriggerDecision) {
-        RequestDecision(Reason);  // 内部已节流（cooldown）+ async
+        FString Reason = FString::Printf(TEXT("perception_%s_%s"), *SenseLabel, *Source->GetName());
+        RequestDecision(Reason);   // 内部仍走 cooldown / bIsCompacting / PendingTrigger
     }
 }
-```
-
-```cpp
-// MindGameMaster.h（基类提供工具）
-protected:
-    FString BuildSceneAwarenessSection(AActor* Agent) const;
 ```
 
 ```cpp
@@ -154,11 +159,15 @@ FString AMindGameMaster::BuildSceneAwarenessSection(AActor* Agent) const {
 
 ```cpp
 // 子类 BuildViewFor 调用
-FMindAgentView AMindGameMaster_LiarsBar::BuildViewFor(AActor* Agent) {
-    FMindAgentView V;
-    // ... 现有内容 ...
-    V.PublicStateText += BuildSceneAwarenessSection(Agent);  // 追加
-    return V;
+FMindMessage AMindGameMaster_LiarsBar::BuildViewFor(AActor* Agent) {
+    FString Body = FString::Printf(TEXT("[当前帧]\n- 阶段: %s\n..."), *CurrentPhase.ToString());
+    Body += BuildSceneAwarenessSection(Agent);   // 追加 awareness 段
+    return FMindMessage{
+        .Role = EMindRole::User,
+        .Content = Body,
+        .Channel = EMindChannel::System,
+        .Tags = {{"phase", CurrentPhase.ToString()}, {"vis", "private+public+awareness"}}
+    };
 }
 ```
 
@@ -170,8 +179,9 @@ FMindAgentView AMindGameMaster_LiarsBar::BuildViewFor(AActor* Agent) {
   - NPC_2 面朝 NPC_3
   - 编辑器手工 BP 节点 `NPC_2.MindComponent.GetCurrentlyVisibleAgentIds()` → 返回 `["npc_3"]`
   - `NPC_3.GetCurrentlyVisibleAgentIds()` → 返回 `[]`（NPC_3 背对 NPC_2 看不见）
-- 玩家飞过 NPC_2 旁边 → Output Log 看到 `LogMind: saw_DefaultPawn_C_0`（仅日志，不触发决策因为 RequestDecision 还没接）
+- 玩家飞过 NPC_2 旁边 → Output Log 看到 `LogMind: [感知] 看到 DefaultPawn_C_0`；M0 阶段 `bPerceptionCanTriggerDecision=false` 不触发 RequestDecision
 - 离开 5s 后再回来 → 节流通过新 trace 出现
+- T07 后打开 flag 跑一次：感知触发会 push `[感知]` 到 Layer2 + 调 RequestDecision
 
 ### API
 
@@ -194,6 +204,6 @@ FMindAgentView AMindGameMaster_LiarsBar::BuildViewFor(AActor* Agent) {
 
 - 8 NPC 互相 stimuli source + perception 在 GM Negotiate 阶段一起 active 时 trace 数量是 8×8=64/tick，引擎内置批处理可控
 - `GetCurrentlyPerceivedActors` 在某些 UE 版本要求先注册 PerceptionListener — 检查接入时是否需要 init
-- 感知回调频繁触发可能导致 cooldown drop 占 95%——这是设计预期
+- 感知触发在阶段如 Negotiate 应由 GM 显式 disable（避免与 GM 主动唤醒并发）
 - DefaultPawn 加 StimuliSource 在 PIE 下要 spawn 后立即 RegisterForSense，否则前几秒不可感知
 - **如果 BP_NPC_MH_Character 是 Actor 子类（T00 验证）**，AIController 不存在，此卡需要重设计——感知组件可挂在 Actor 上但 stimuli source 处理路径要确认

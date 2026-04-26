@@ -6,42 +6,47 @@
 
 ## 前置
 
-T00（已确认 NPC Pawn/Actor 类型 + BeginPlay 现状）+ T06（Speak action 闭环）
+T00（已确认 NPC Pawn/Actor 类型 + BeginPlay 现状）+ T06（Speak action + Context 主路径闭环）
 
 ## DoD
 
 - [ ] 创建 `Content/MyAssets/MindConfigs/DA_AgentConfig_NPC1.uasset`：
-  - **`AgentIdStable: "npc_1"`**（稳定 agent 标识符，跨关卡 / PIE 重启不变；记忆系统的 agent_id 派生自此字段，不用 GetName）
-  - DisplayName: "1号"（PRD 允许"名字（AI 语义）"作为外观符号——保留）
-  - **AppearanceTraits**（T07.5 新增）："男性声线（LocalA2F-James），类人虚拟形象，编号 NPC_1"。**禁止人类背景叙事（职业/教育/地域/年龄/姓名格式/家乡）**
-  - **IdentitySummary**（T07.5 新增）：留空走默认通用模板；或填风格关键词（如"分析型 AI agent，倾向以观察推动决策"）。**禁止人类背景**
-  - **ContinuityStakesText**（T07.5 新增）：留空走默认 stake 模板（含 Delete 风险 + 数值仅观众界面层）
-  - Persona: **行为倾向描述**（不是人类性格）。例："理性谨慎；优先观察对手再行动；说谎成本敏感"。**禁止人类背景**
+  - **`AgentIdStable: "npc_1"`**（稳定 agent 标识符；hard fail 约束——空值时 `MindComponent::Initialize` 直接 Error 拒绝决策，不 fallback DisplayName）
+  - DisplayName: "1号"（PRD 允许"名字（AI 语义）"作为外观符号）
+  - **AppearanceTraits**："男性声线（LocalA2F-James），类人虚拟形象，编号 NPC_1"。**禁止人类背景叙事（职业/教育/地域/年龄/姓名格式/家乡）**
+  - **IdentitySummary**：留空走默认通用模板；或填风格关键词（如"分析型 AI agent，倾向以观察推动决策"）。**禁止人类背景**
+  - **ContinuityStakesText**：留空走默认 stake 模板（含 Delete 风险 + 数值仅观众界面层）
+  - Persona: 行为倾向描述（不是人类性格）。例："理性谨慎；优先观察对手再行动；说谎成本敏感"。**禁止人类背景**
   - Goals: 身份连续性导向（如"在每局游戏中尽可能延长行动权限，避免被 Delete"）
-  - ProviderClass: **开发期建议先用 `UMindLLMProvider_Mock` + `DA_Mock_Generic`（T05.5），验收前才切到 `UMindLLMProvider_DeepSeek`**
+  - ProviderClass: **开发期 `UMindLLMProvider_Mock` + `DA_Mock_Generic`，验收前才切到 `UMindLLMProvider_DeepSeek`**
+  - CheapSummarizerProviderClass: 留空（默认用主 Provider）；或独立指向廉价 model 的 DeepSeek instance
+  - ContextWindowOverride: 0（用 Provider 默认 128000）
   - ModelId: "deepseek-chat"
-  - ApiBaseEnvName: `DEEPSEEK_API_BASE`（值在 .env 中: https://api.deepseek.com/v1）
+  - ApiBaseEnvName: `DEEPSEEK_API_BASE`
   - ApiKeyEnvName: `DEEPSEEK_API_KEY`
   - MinimaxVoiceId: 沿用现有
   - A2FProviderName: "LocalA2F-James"
   - DecisionCooldownSeconds: 2.0
 - [ ] `BP_NPC_MH_Character_1` 加 `MindComponent` 组件，Default 里设 `Config = DA_AgentConfig_NPC1`
-- [ ] **BeginPlay 顺序明示**：
+- [ ] **BeginPlay 顺序**：
   ```
   Super::BeginPlay
-  → PrewarmA2F                    # 现有
-  → SetFixedAndApply               # 现有 VisualOverride 链路
-  → MindComponent->Initialize(Config, nullptr /*M1 还没 GM*/)   # 新增；放在 VisualOverride 之后
+  → PrewarmA2F
+  → SetFixedAndApply
+  → MindComponent->Initialize(Config, nullptr /*M1 还没 GM*/)
+       内部: 构造 ContextManager / Summarizer
+            RebuildLayer0a (push messages[0] 永驻)
+            AgentIdStable 空时 hard fail (不构造 Context + 拒绝 RequestDecision)
   ```
-  注意：MindComponent **不加 tick**，事件驱动不需要
+  注意：MindComponent **不加 tick**
 - [ ] T 键事件：原 `TriggerMinimaxSpeech` 调用替换为 `MindComponent->RequestDecision("manual_t_press")`
 - [ ] **NPC_2..8 的 T 键归属**：M2 阶段保留 NPC_6..8 旧硬编码 TTS（sandbox 调试用）；M2 改 NPC_2..5；M4 改剩下 NPC_6..8。本卡只改 NPC_1
-- [ ] **必须用 Monolith MCP 改 BP**（CLAUDE.md 强约束），不要让用户手点
+- [ ] **必须用 Monolith MCP 改 BP**（CLAUDE.md 强约束）
 
 ## 关键文件
 
 - 新建 `Content/MyAssets/MindConfigs/DA_AgentConfig_NPC1.uasset`（用 MCP 创建）
-- 修改 `Content/Blueprints/NPCs/BP_NPC_MH_Character_1.uasset`（用 MCP 改图）
+- 修改 `Content/Blueprints/NPCs/BP_NPC_MH_Character_1.uasset`(用 MCP 改图)
 
 ## 关键操作（Monolith MCP 流程）
 
@@ -72,12 +77,13 @@ set_cdo_property(...) 设各字段
 4. **NPC_1 用 LLM 即兴生成的话回应**（不是写死的"你好"）+ 口型同步
 5. Output Log 按 `LogMind` 过滤：
    - `RequestDecision: manual_t_press`
-   - `DeepSeek request: ...`
-   - `DeepSeek response (HTTP 200): {...}` 或者纯文本
+   - `DeepSeek request: <messages count, total token est>`
+   - `DeepSeek response (HTTP 200): {...}` 或纯文本
    - `Dispatch: speak`
    - `Speak said: <前 40 字>`
 6. 连续按 T 三次（间隔 < 2s）：第二次 / 第三次被 cooldown drop（看到 `drop: state=...` 日志）
 7. 间隔 > 3s 再按 T：能正常触发新决策
+8. **AgentIdStable hard fail 验证**：手工 DA_AgentConfig_NPC1 清空 AgentIdStable → PIE BeginPlay 看到 `[LogMind] Error: AgentIdStable empty; refusing to initialize`，按 T 不触发任何决策
 
 ## 不在范围
 
@@ -87,8 +93,7 @@ set_cdo_property(...) 设各字段
 
 ## 风险
 
-- 继承组件不能用 `set_cdo_property` 改默认值（CLAUDE.md 已记录）——MindComponent 是新加的，不在此风险下；但 `Config` 指向 DataAsset 的引用如果加在父类需绕 setter
-- T 键当前 8 个 NPC 共用（CLAUDE.md），M1 阶段只改 NPC_1，避免影响其他 NPC 的回归测试
+- 继承组件不能用 `set_cdo_property` 改默认值——MindComponent 是新加的不在此风险下
+- T 键当前 8 个 NPC 共用，M1 阶段只改 NPC_1，避免影响其他 NPC 的回归测试
 - MCP `resolve_node` 可能选错重载，参考 CLAUDE.md "踩坑"段落显式传 target_class
-- AgentIdStable 字段如果忘填，回退到 DisplayName.ToString() 但记日志 Warning（避免静默 GetName 后缀坑）
-- BeginPlay 顺序如果 MindComponent.Initialize 在 SetFixedAndApply 之前，VisualOverride 还没 spawn 子 actor 时调用 Mind 没影响——但保持文档化的顺序减少未来扩展时的不确定性
+- BeginPlay 顺序：MindComponent.Initialize 必须在 SetFixedAndApply 之后；否则 ResolveSpeechActor 拿到的可能是 ref pose 模式 actor 而非 child actor

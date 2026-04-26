@@ -4,15 +4,15 @@
 做一个最简 UMG HUD 显示游戏状态，并整体验收"4 NPC 在 `Level_LiarsBar` 跑通骗子酒馆"。**M2 总验收（分级）**。
 
 ## 前置
-T13（3 个 Action 实现）+ T12（GM 阶段机）+ T10（关卡）+ T07（NPC 接 Mind）
+T13（3 个 Action 实现）+ T12（GM 阶段机）+ T10（关卡）+ T07（NPC 接 Mind + ContextManager / Summarizer 自动构造）
 
 ## DoD
-- [ ] 创建 `WBP_LiarsBarHUD` UMG widget（**用 Monolith MCP 创建 + 编辑图，不要让用户手点编辑器**——CLAUDE.md 强约束）：
+- [ ] 创建 `WBP_LiarsBarHUD` UMG widget（**用 Monolith MCP 创建 + 编辑图**——CLAUDE.md 强约束）：
   - 顶部：当前 Phase + Round
   - 中央：当前出牌玩家 / 当前 claim（"npc_2 claimed 3 K"）
   - 底部：4 玩家状态条：名字 / chamber / alive 标记 / "上次行动"摘要
 - [ ] HUD 订阅 `AMindGameMaster::OnPhaseChanged` 实时刷新
-- [ ] HUD 订阅一个新 Multicast `OnGameEvent(FString)`（GM 发出 challenge / reveal / roulette_hit / agent_eliminated 等事件）
+- [ ] HUD 订阅 `OnGameEvent(FString)`（GM 发出 challenge / reveal / roulette_hit / agent_eliminated 等事件）
 - [ ] 4 个 NPC（NPC_2..5）全部接 Mind：
   - 创建 `DA_AgentConfig_NPC2..5`，4 个不同 Persona（如：保守稳重 / 激进好斗 / 善欺善辩 / 保守跟风）
   - 给 4 个 NPC 加 MindComponent + Config 引用（用 MCP 批量改）
@@ -31,14 +31,13 @@ T13（3 个 Action 实现）+ T12（GM 阶段机）+ T10（关卡）+ T07（NPC 
 ```
 # 4 个 DA
 build_asset(UMindAgentConfig, /Game/MyAssets/MindConfigs/DA_AgentConfig_NPC2)
-set_cdo_property(... Persona="保守稳重..." ...)
+set_cdo_property(... AgentIdStable="npc_2" Persona="保守稳重..." ...)
 ... NPC3 NPC4 NPC5 同样
 
 # 4 个 BP（按 CLAUDE.md 预检后批量）
 for i in 2..5:
     add_component(BP_NPC_MH_Character_i, MindComponent)
     set_default(MindComponent.Config = DA_AgentConfig_NPCi)
-    # BeginPlay 加 Initialize 调用
 compile_blueprint
 ```
 
@@ -61,13 +60,15 @@ On Game Event → Append to Event Log
 3. ✅ 进入 ChallengeWindow 至少一次（要么有人 challenge，要么 auto-reveal）
 4. ✅ Reveal 阶段 HUD 显示真假；Roulette 阶段触发（命中或没命中都行）
 5. ✅ **至少跑通 3 个完整回合**（PlayerTurn → Challenge/Skip → Reveal → Roulette → CheckWin → 下一回合）
-6. ✅ Memory Service 里能查到这 3 回合的 action 记录
-7. ✅ Output Log 完整链路无 Error（Warning 可有）
+6. ✅ Memory Service `/memory/event` 中能查到这 3 回合所有 NPC 的 action 记录（按 `agent_id` 过滤可分别查到）
+7. ✅ 第 3 回合时 NPC 的 `messages[]` Layer 2 hot 中能引用上回合自己的 commitment（用 LogMind Verbose 抓 messages 切片验证）
+8. ✅ Output Log 完整链路无 Error（Warning 可有）
 
 ### B 级（推荐达成，写到 DevLog 但不阻塞 M3 启动）
-8. ✅ 完整跑一局直到 alive=1（如 LLM ratelimit 或 JSON 漂移导致中断，记录在 DevLog 作为 M3 改进点）
-9. ✅ HUD 每个 NPC 状态条 chamber 数随失败正确递减
-10. ✅ HUD 显示 `Phase: GameOver` + `Winner: npc_X`
+9. ✅ 完整跑一局直到 alive=1（如 LLM ratelimit 或 JSON 漂移导致中断，记录在 DevLog）
+10. ✅ HUD 每个 NPC 状态条 chamber 数随失败正确递减
+11. ✅ HUD 显示 `Phase: GameOver` + `Winner: npc_X`
+12. ✅ GameOver 触发 RecordSceneEnd → Summarizer 排队执行；Memory Service `/memory/peer_summary` 中能查到 4 NPC × 3 peer = 12 个 peer_summary 节点
 
 ### 观察项（不强求，记录到 DevLog）
 - 不同 persona 的 LLM 是否表现出可观察的策略差异
@@ -76,9 +77,11 @@ On Game Event → Append to Event Log
 ### 协议入口稳定性指标（**必收集**）
 - LLM 返回总数
 - JSON parse fallback 次数（解析失败用整段当 speak.text 的次数）
-- Validate reject 次数（非法 envelope）
-- 连续 reject 后强制 Wait 续命次数
+- Validate reject 次数 / ValidateRetryDepth 触底次数
 - HTTP 429 / 5xx 次数
+- prompt cache 命中率（DeepSeek `usage.prompt_cache_hit_tokens / prompt_tokens`）
+- Compact 触发次数（128k 模型期望 ≥ 1，200k 模型可能 0）
+- recall_long_term_memory tool_call 触发次数（M2 不强求；T26 详查）
 
 写入 DevLog；这是后续 prompt 工程稳定性的基线
 
@@ -87,10 +90,10 @@ On Game Event → Append to Event Log
 ## 不在范围
 - 表演动画（T15）
 - 跨局记忆引用（T16）
-- 模型差异化（T16）
+- 模型差异化（T16 / T18.5）
 
 ## 风险
-- LLM 调用并发 4 路：DeepSeek QPS 在 ChallengeWindow 阶段会瞬时 4 次调用——账号 tier 限制可能命中。回退：阶段内串行（一次唤醒一个）
+- LLM 调用并发 4 路：DeepSeek QPS 在 ChallengeWindow 阶段会瞬时 4 次调用；reasoner pool MaxConcurrent=4 兜底
 - 一局可能太长（每回合 LLM 调用 ×2 ≈ 4-8s，10 回合 ≈ 1 分钟）— 接受
 - 8 NPC 中只有 4 个接 Mind，其他 4 个保留原硬编码 T 键 TTS——避免影响 sandbox
 - HUD 数据源：通过 GM 直接 GetWorld 找 actor，简化设计；如果未来支持 split-screen 需要重做
