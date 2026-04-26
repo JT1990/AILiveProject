@@ -22,7 +22,7 @@ UBT 构建 Editor target：
 
 ## AI 心智决策系统（M-1 ~ M5 主线）
 
-详细任务卡和设计原则在 `Tasks/README.md`。AGENTS.md 只保留**进入这条工作流就必须立刻知道**的部分。
+详细任务卡和设计原则在 `Tasks/README.md`。
 
 ### 架构层
 
@@ -87,6 +87,8 @@ UBT 构建 Editor target：
 Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json` 配置，proxy 在 `Plugins/Monolith/Binaries/monolith_proxy.exe`）。不要让用户手点编辑器，除非 MCP 确实做不到——那时再明确说明走 fallback。
 
 工作流：`mcp__monolith__monolith_status` 确认在线 → 预检目标 BP（见关键规则）→ `build_blueprint_from_spec` + `connect_pins` + `compile_blueprint` 一次批量改图（比多轮 `add_node` 高效）→ `get_execution_flow` 验证 BeginPlay/input 链路。
+
+**v0.14.7 新便利动作**：`ai::add_perception_to_actor` — 为 Actor 直接附加 AI Perception，省去手动布线（T18 感知任务可用）。
 
 ### MCP 最致命的 3 个坑
 
