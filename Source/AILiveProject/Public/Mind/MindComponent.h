@@ -120,7 +120,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category="AI Live|Mind")
 	void DispatchAction(const FMindActionEnvelope& Env);
 
-	void HandleActionDone(bool bOk, const FString& Summary);
+	void HandleActionDone(bool bOk, FString Summary);
 
 	// ============================================================
 	// Helper accessors
@@ -154,4 +154,12 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="AI Live|Mind")
 	void SetPerceptionCanTriggerDecision(bool bEnabled);
+
+private:
+	/** 拼 system prompt（人格 + 目标 + injection 防御 + ActionRegistry schema）。T06 实装。 */
+	FString BuildSystemPrompt() const;
+
+	/** Provider 异步回调。绑定为 `FOnLLMResult::CreateUObject(this, ...)`，所以不能 static。
+	 *  签名按值传 FString —— 与 DECLARE_DELEGATE_TwoParams(... FString ...) 完全匹配，避免 const&/value 不一致。 */
+	void OnLLMResponse(bool bOk, FString JsonText);
 };
