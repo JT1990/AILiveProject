@@ -8,7 +8,7 @@
 - 测试日期：2026-04-26
 - 网络环境：N/A（个人项目，未记录）
 - DeepSeek endpoint：`https://api.deepseek.com/v1`
-- 测试 prompt：`用一句话介绍你自己`（21 chars）
+- 测试 prompt：`用一句话介绍你自己`（21 chars；历史实测记录，仅用于解释本次 baseline 数据来源，后续不要复用该 identity prompt）
 - N（请求总数）：10
 - IntervalMs（请求间隔）：500
 - 测试 cadence：2 QPS（串行，间隔触发）
@@ -48,5 +48,6 @@
 ## 备注
 
 - BatchPing 串行触发（IntervalMs 间隔），不是并发猛冲；并发上限要在 T18.5 / T21 单独测。
+- 该 baseline 早于 T07.5「AI 自我定义」回补；后续 DeepSeek / GLM 连接健康检查改用 `回复一个 'pong'` / `将 1+1 的结果用一个数字回答` 这类中性 prompt，避免触发"介绍你自己 / 你是谁"带来的元意识反应。
 - 若 P95 > 5000ms 或 429 比例 > 10%，需要在 T21 把 GM 唤醒间隔放大、或在 `Engine.ini` 调大 `[HTTP] HttpReceiveTimeout`。
 - 第 0 次 1327ms 是 HTTPS TLS 握手 + 服务端首次冷加载；后续连接复用降到 ~800ms 是合理水位。

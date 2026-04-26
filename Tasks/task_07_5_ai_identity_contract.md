@@ -54,7 +54,7 @@ T07（M1B 通过）
 - [ ] CLAUDE.md `P0 强约束` 段加一条："**AI 就是 AI**：所有 NPC prompt / DataAsset / 任务卡示例 严禁人类职业、教育、地域、年龄、姓名格式、家乡等背景叙事；只赋予外观符号（名字 / 昵称 / 性别 / 声线 / 类人虚拟形象）"
 - [ ] AGENTS.md 同步（如存在；当前仓库 git status 显示存在）
 - [ ] `Tasks/README.md` 设计原则 P1 段加一条 T「AI 自我定义」引用，并在 M1 任务卡列表加 T07.5 引用（标注"轻量回补，不进依赖图"）
-- [ ] `Tasks/Tasks-Prompt.md` 启动指令段含"AI 就是 AI"约束（如果文件存在）
+- [ ] `Tasks/Tasks-Prompt.md` 继续以 `CLAUDE.md` 的 P0 强约束作为单一事实源；无需复述"AI 就是 AI"，但加载顺序必须保证执行单卡前会读取 `CLAUDE.md` 的 P0 段
 
 ### 6. M1B 重跑（验收）
 
