@@ -4,11 +4,11 @@
 #include "Mind/MindLLMProvider.h"
 #include "MindLLMProvider_DeepSeek.generated.h"
 
+DECLARE_DYNAMIC_DELEGATE_TwoParams(FDeepSeekTestPingDone, bool, bOk, FString, Text);
+
 /**
- * DeepSeek LLM Provider。T05 实现 RequestCompletion；T02 仅落骨架，让
- * UMindAgentConfig.ProviderClass 下拉能选到（验证 EditInlineNew + Abstract 子类显示）。
- *
- * non-Abstract 必须显式不带 Abstract 关键字，才能在 ProviderClass 下拉中显示。
+ * DeepSeek LLM Provider。T05 实现 RequestCompletion（OpenAI 兼容 /chat/completions）+
+ * BP 可调的 TestPing / BatchPing 两个静态测试函数。
  */
 UCLASS()
 class AILIVEPROJECT_API UMindLLMProvider_DeepSeek : public UMindLLMProvider
@@ -27,10 +27,17 @@ public:
 	UPROPERTY(EditAnywhere, Category="AI Live|Mind")
 	float Temperature = 0.7f;
 
-	// T05 实施真 HTTP 调用；T03 占位 override 防止 NewObject 后调 RequestCompletion 触发 LowLevelFatalError
 	virtual void RequestCompletion(
 		const FString& SystemPrompt,
 		const FString& UserPrompt,
 		const TArray<TSubclassOf<class UMindAction>>& AvailableActions,
 		FOnLLMResult Done) override;
+
+	/** 一次性 BP 测试入口。内部 NewObject + AddToRoot 临时持有，回调里 RemoveFromRoot + MarkAsGarbage。 */
+	UFUNCTION(BlueprintCallable, Category="AI Live|Mind|Test", meta=(WorldContext="WorldCtx"))
+	static void TestPing(UObject* WorldCtx, const FString& Prompt, FDeepSeekTestPingDone OnDone);
+
+	/** Ratelimit 实测：串行触发 N 次（间隔 IntervalMs），完成后日志输出 avg/p95/429 计数。 */
+	UFUNCTION(BlueprintCallable, Category="AI Live|Mind|Test", meta=(WorldContext="WorldCtx"))
+	static void BatchPing(UObject* WorldCtx, const FString& Prompt, int32 N = 10, int32 IntervalMs = 500);
 };
