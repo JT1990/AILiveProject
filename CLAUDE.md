@@ -88,6 +88,8 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 工作流：`mcp__monolith__monolith_status` 确认在线 → 预检目标 BP（见关键规则）→ `build_blueprint_from_spec` + `connect_pins` + `compile_blueprint` 一次批量改图（比多轮 `add_node` 高效）→ `get_execution_flow` 验证 BeginPlay/input 链路。
 
+**v0.14.7 新便利动作**：`ai::add_perception_to_actor` — 为 Actor 直接附加 AI Perception，省去手动布线（T18 感知任务可用）。
+
 ### MCP 最致命的 3 个坑
 
 - 参数名是 `value`，不是 `property_value`；资产参数是 `asset_path`，不是 `blueprint_path`。
