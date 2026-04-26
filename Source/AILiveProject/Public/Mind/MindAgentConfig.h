@@ -27,6 +27,24 @@ public:
 	UPROPERTY(EditAnywhere, Category="Identity")
 	FText DisplayName;
 
+	/** 外观符号（声线/性别/类人虚拟形象描述）。
+	 *  PRD「AI 自我定义」要求：只赋予外观符号供观众识别，不赋予人类职业/教育/地域/年龄/姓名格式。 */
+	UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true))
+	FText AppearanceTraits;
+
+	/** AI 身份档案摘要。描述这个 AI agent 是谁——风格关键词、行为锚点。
+	 *  可空，空时 BuildSystemPrompt 用通用 AI 自陈模板。
+	 *  禁止：人类职业、教育、地域、年龄、姓名格式、家乡叙事。 */
+	UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true))
+	FText IdentitySummary;
+
+	/** 身份连续性风险描述。对应 PRD 的「Delete 风险 / 同伴关系 / 行动权限」三种身份连续性 stake。
+	 *  可空，空时 BuildSystemPrompt 用通用 stake 模板。 */
+	UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true))
+	FText ContinuityStakesText;
+
+	/** 行为倾向（不是人类性格）。例："理性分析多于情感判断 / 谎称权重 0.3 / 优先观察对手再行动"。
+	 *  禁止：人类职业、教育、地域、年龄、姓名格式、家乡叙事。 */
 	UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true))
 	FText Persona;
 

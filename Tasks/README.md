@@ -46,6 +46,7 @@
 - [T06](task_06_speak_action.md) — `UMindAction_Speak` + ResolveSpeechActor + 中文 prompt + injection 防御 + RecallChainDepth
 - [T07](task_07_npc1_integration.md) — `BP_NPC_MH_Character_1` 接入（M1A 用 Mock；M1B 切 DeepSeek）
 - [T05](task_05_deepseek_provider.md) — DeepSeek Provider + TestPing + ratelimit 实测（M1B）
+- [T07.5](task_07_5_ai_identity_contract.md) — **AI 身份契约回补**（轻量回补卡，**不进依赖图**；M1B 后、M2 启动前的 checklist；落地 PRD 「AI 自我定义」+ Identity 字段 + AI 自我声明 prompt 锚段）
 
 ### M2 骗子酒馆 minimal
 
@@ -183,6 +184,9 @@ T05 验收阶段跑 batched ping，记录到 `Tasks/T05_RATELIMIT_BASELINE.md`�
 
 **I. 跨游戏长期关系**
 NPC 跨骗子酒馆 → 少数决要带"对每个具体同伴的认知"。BuildSystemPrompt 时对每个 peer 做 ByTag 检索（`speaker=peer_id` top_3）拼到 system 段。落到 T16 / T26。
+
+**I+. AI 自我定义（PRD 第 77-114 行）**
+所有 NPC prompt / DataAsset / 任务卡示例 **严禁人类职业 / 教育 / 地域 / 年龄 / 姓名格式 / 家乡** 等背景叙事；只赋予外观符号（名字 / 昵称 / 性别 / 声线 / 类人虚拟形象）。`BuildSystemPrompt` 必须输出三段固定结构（AI 实例声明 + 身份摘要 + 身份连续性 stake）。Delete 在 MVP 内仅作为 prompt stake + schema 状态预留（status=active/inactive 两态），本局淘汰 ≠ 永久 Delete，agent 跨游戏延续。落到 T07.5（回补） / T08 / T16 / T18.5 / T22 / T24 / T26。
 
 **J. 验证顺序：骗子酒馆 → 少数决**
 

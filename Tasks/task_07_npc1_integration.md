@@ -12,9 +12,12 @@ T00（已确认 NPC Pawn/Actor 类型 + BeginPlay 现状）+ T06（Speak action 
 
 - [ ] 创建 `Content/MyAssets/MindConfigs/DA_AgentConfig_NPC1.uasset`：
   - **`AgentIdStable: "npc_1"`**（稳定 agent 标识符，跨关卡 / PIE 重启不变；记忆系统的 agent_id 派生自此字段，不用 GetName）
-  - DisplayName: "1号"
-  - Persona: 一段中文人格描述（约 100 字）
-  - Goals: 简短目标（如"在游戏中存活并赢得最多筹码"）
+  - DisplayName: "1号"（PRD 允许"名字（AI 语义）"作为外观符号——保留）
+  - **AppearanceTraits**（T07.5 新增）："男性声线（LocalA2F-James），类人虚拟形象，编号 NPC_1"。**禁止人类背景叙事（职业/教育/地域/年龄/姓名格式/家乡）**
+  - **IdentitySummary**（T07.5 新增）：留空走默认通用模板；或填风格关键词（如"分析型 AI agent，倾向以观察推动决策"）。**禁止人类背景**
+  - **ContinuityStakesText**（T07.5 新增）：留空走默认 stake 模板（含 Delete 风险 + 数值仅观众界面层）
+  - Persona: **行为倾向描述**（不是人类性格）。例："理性谨慎；优先观察对手再行动；说谎成本敏感"。**禁止人类背景**
+  - Goals: 身份连续性导向（如"在每局游戏中尽可能延长行动权限，避免被 Delete"）
   - ProviderClass: **开发期建议先用 `UMindLLMProvider_Mock` + `DA_Mock_Generic`（T05.5），验收前才切到 `UMindLLMProvider_DeepSeek`**
   - ModelId: "deepseek-chat"
   - ApiBaseEnvName: `DEEPSEEK_API_BASE`（值在 .env 中: https://api.deepseek.com/v1）

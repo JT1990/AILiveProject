@@ -131,9 +131,19 @@ public:
     UPROPERTY(EditAnywhere, Category="Identity")
     FString AgentIdStable;  // 用户手填稳定 ID（如 "npc_1"），跨关卡稳定
 
-    UPROPERTY(EditAnywhere) FText DisplayName;
-    UPROPERTY(EditAnywhere, meta=(MultiLine=true)) FText Persona;
-    UPROPERTY(EditAnywhere, meta=(MultiLine=true)) FText Goals;
+    UPROPERTY(EditAnywhere, Category="Identity") FText DisplayName;
+
+    // PRD「AI 自我定义」三字段（T07.5 回补）：
+    /** 外观符号（声线/性别/类人虚拟形象）。不含人类背景叙事。 */
+    UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true)) FText AppearanceTraits;
+    /** AI 身份档案摘要。可空（空时 BuildSystemPrompt 用通用 AI 自陈模板）。禁止人类背景。 */
+    UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true)) FText IdentitySummary;
+    /** 身份连续性 stake 描述（Delete 风险 / 同伴关系 / 行动权限）。可空（空时走通用 stake 模板）。 */
+    UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true)) FText ContinuityStakesText;
+
+    /** 行为倾向（不是人类性格）。例："理性分析多于情感判断 / 谎称权重 0.3"。禁止人类背景。 */
+    UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true)) FText Persona;
+    UPROPERTY(EditAnywhere, Category="Identity", meta=(MultiLine=true)) FText Goals;
     UPROPERTY(EditAnywhere) TSubclassOf<class UMindLLMProvider> ProviderClass;
 
     // === LLM 配置（Provider 子类同名字段的"覆盖来源"——Initialize 时拷过去）===

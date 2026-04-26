@@ -82,11 +82,12 @@ void UMindLLMProvider_DeepSeek::RequestCompletion(...) {
 ```
 
 ## 验收信号
-- 编辑器创建一个一次性测试 BP（含 BeginPlay），调 `TestPing("用一句话介绍你自己")`
+- 编辑器创建一个一次性测试 BP（含 BeginPlay），调 `TestPing("回复一个 'pong'")` 或 `TestPing("将 1+1 的结果用一个数字回答")`
+  - **不要用"介绍你自己 / 你是谁"** 类身份提问，会触发 PRD 失败模式 3（元意识触发："我只是语言模型..."），破坏 T07.5 AI 身份契约
 - PIE 后 Output Log（按 `LogMind` 过滤）看到：
   - `[LogMind] DeepSeek request: <prompt 长度>`
   - `[LogMind] DeepSeek response (HTTP 200): <返回文字>`
-- 文字是符合 DeepSeek 风格的中文自我介绍
+- 文字符合 prompt 期待（如 "pong" 或 "2"），仅验证 HTTP 200 + JSON 解析路径
 
 ### 额外：ratelimit 实测
 
