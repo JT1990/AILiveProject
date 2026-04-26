@@ -21,13 +21,16 @@ UMindComponent::UMindComponent()
 
 void UMindComponent::Initialize(UMindAgentConfig* InConfig, AActor* InGameMaster)
 {
-	if (!IsValid(InConfig))
+	if (IsValid(InConfig))
+	{
+		Config = InConfig;
+	}
+	if (!IsValid(Config))
 	{
 		UE_LOG(LogMind, Error, TEXT("Initialize: Config is null on %s"),
 			GetOwner() ? *GetOwner()->GetName() : TEXT("?"));
 		return;
 	}
-	Config = InConfig;
 	GameMaster = Cast<AMindGameMaster>(InGameMaster);
 
 	if (!IsValid(Config->ProviderClass.Get()))
