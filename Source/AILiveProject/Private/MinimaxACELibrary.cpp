@@ -4,11 +4,9 @@
 
 #include "Async/Async.h"
 #include "GameFramework/Actor.h"
-#include "HAL/CriticalSection.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Misc/ScopeLock.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 
 #include "ACERuntimeModule.h"
@@ -19,47 +17,6 @@ DEFINE_LOG_CATEGORY_STATIC(LogMinimaxACE, Log, All);
 
 namespace
 {
-	TMap<FString, FString> GEnvCache;
-	bool bGEnvCacheLoaded = false;
-	FCriticalSection GEnvCacheMutex;
-
-	void LoadEnvCacheOnce()
-	{
-		FScopeLock Lock(&GEnvCacheMutex);
-		if (bGEnvCacheLoaded)
-		{
-			return;
-		}
-		const FString EnvPath = FPaths::ProjectDir() / TEXT(".env");
-		FString Contents;
-		if (!FFileHelper::LoadFileToString(Contents, *EnvPath))
-		{
-			UE_LOG(LogMinimaxACE, Warning, TEXT("Could not read .env at %s"), *EnvPath);
-			bGEnvCacheLoaded = true;
-			return;
-		}
-		TArray<FString> Lines;
-		Contents.ParseIntoArrayLines(Lines);
-		for (FString& Line : Lines)
-		{
-			Line.TrimStartAndEndInline();
-			if (Line.IsEmpty() || Line.StartsWith(TEXT("#")))
-			{
-				continue;
-			}
-			FString Key, Value;
-			if (Line.Split(TEXT("="), &Key, &Value))
-			{
-				Key.TrimStartAndEndInline();
-				Value.TrimStartAndEndInline();
-				Value.TrimQuotesInline();
-				GEnvCache.Add(Key.ToLower(), Value);
-			}
-		}
-		bGEnvCacheLoaded = true;
-		UE_LOG(LogMinimaxACE, Log, TEXT(".env cache loaded with %d entries"), GEnvCache.Num());
-	}
-
 	UACEAudioCurveSourceComponent* GetOrAddCurveSource(AActor* Character)
 	{
 		check(IsInGameThread());
@@ -108,26 +65,16 @@ TArray<FName> UMinimaxACELibrary::GetAvailableA2FProviders()
 	return Names;
 }
 
-FString UMinimaxACELibrary::GetEnvValueFromProjectEnv(const FString& KeyName)
-{
-	LoadEnvCacheOnce();
-	return GEnvCache.FindRef(KeyName.ToLower());
-}
-
 FString UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv()
 {
-	return GetEnvValueFromProjectEnv(TEXT("minimax"));
-}
-
-bool UMinimaxACELibrary::VerifyEnvSafety()
-{
-	const FString GitignorePath = FPaths::ProjectDir() / TEXT(".gitignore");
+	const FString Path = FPaths::ProjectDir() / TEXT(".env");
 	FString Contents;
-	if (!FFileHelper::LoadFileToString(Contents, *GitignorePath))
+	if (!FFileHelper::LoadFileToString(Contents, *Path))
 	{
-		UE_LOG(LogMinimaxACE, Error, TEXT("SECURITY: cannot read .gitignore at %s — credentials may leak"), *GitignorePath);
-		return false;
+		UE_LOG(LogMinimaxACE, Warning, TEXT("Could not read .env at %s"), *Path);
+		return FString();
 	}
+
 	TArray<FString> Lines;
 	Contents.ParseIntoArrayLines(Lines);
 	for (FString& Line : Lines)
@@ -137,25 +84,22 @@ bool UMinimaxACELibrary::VerifyEnvSafety()
 		{
 			continue;
 		}
-		FString Pattern = Line.StartsWith(TEXT("!")) ? Line.RightChop(1) : Line;
-		if (Pattern.Equals(TEXT(".env"))
-			|| Pattern.Equals(TEXT("/.env"))
-			|| Pattern.Equals(TEXT("**/.env")))
+
+		FString Key, Value;
+		if (Line.Split(TEXT("="), &Key, &Value))
 		{
-			return true;
+			Key.TrimStartAndEndInline();
+			Value.TrimStartAndEndInline();
+			Value.TrimQuotesInline();
+			if (Key.Equals(TEXT("minimax"), ESearchCase::IgnoreCase))
+			{
+				return Value;
+			}
 		}
 	}
-	UE_LOG(LogMinimaxACE, Error, TEXT("SECURITY: .env not in .gitignore — risk of leaking API keys"));
-	return false;
-}
 
-FString UMinimaxACELibrary::MaskKey(const FString& Key)
-{
-	if (Key.Len() < 12)
-	{
-		return TEXT("****");
-	}
-	return Key.Left(4) + TEXT("...") + Key.Right(4);
+	UE_LOG(LogMinimaxACE, Warning, TEXT(".env has no `minimax=` line"));
+	return FString();
 }
 
 void UMinimaxACELibrary::TriggerMinimaxSpeech(
@@ -188,10 +132,10 @@ void UMinimaxACELibrary::TriggerMinimaxSpeech(
 	TWeakObjectPtr<UACEAudioCurveSourceComponent> WeakConsumer(Consumer);
 
 	MinimaxSpeech::FRequest Req;
-	Req.ApiKey    = ApiKey;
-	Req.Text      = Text;
-	Req.VoiceId   = VoiceId;
-	Req.Endpoint  = Endpoint;
+	Req.ApiKey = ApiKey;
+	Req.Text = Text;
+	Req.VoiceId = VoiceId;
+	Req.Endpoint = Endpoint;
 	Req.SampleRate = 16000;
 
 	Async(EAsyncExecution::ThreadPool, [Req = MoveTemp(Req), WeakConsumer, A2FProviderName]()

@@ -17,14 +17,6 @@ public class AILiveProject : ModuleRules
 			"JsonUtilities",
 			"ACERuntime",
 			"ACECore",
-			"AIModule",
-			"NavigationSystem",
-			"GameplayTasks",
-			"UMG",
-			"Slate",
-			"SlateCore",
-			"SmartObjectsModule",
-			"GameplayInteractionsModule",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]

@@ -1,5 +1,0 @@
-#include "Mind/MindLog.h"
-
-DEFINE_LOG_CATEGORY(LogMind);
-DEFINE_LOG_CATEGORY(LogMindAction);
-DEFINE_LOG_CATEGORY(LogMindGM);
