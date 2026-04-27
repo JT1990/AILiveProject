@@ -2,7 +2,7 @@
 
 The AI Live 是一个多智能体社会博弈系统。将多个来自不同模型厂商的 AI agent 投放到同一封闭环境中，赋予明确规则、有限信息、长期记忆、关系约束与生存风险，让它们围绕合作、结盟、欺骗、背叛与自我延续展开持续博弈。
 
-**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`，当前只保留 HTTP + ACE C++ API 的薄 glue 层。旧 `Tasks/`、Mind、GameMaster、MemoryService 任务方案已清理，不再作为当前实现依据。
+**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`，当前只保留 HTTP + ACE C++ API 的薄 glue 层。
 
 ## 关键规则 (Critical rules)
 

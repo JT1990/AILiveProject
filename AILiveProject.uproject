@@ -147,6 +147,10 @@
 				"Linux",
 				"Android"
 			]
+		},
+		{
+			"Name": "GameplayBehaviorSmartObjects",
+			"Enabled": true
 		}
 	],
 	"EpicSampleNameHash": "1673045636"
