@@ -122,28 +122,34 @@ K2Node_Select:
 
 ### 7. `L_prison` Level BP 重写
 
-新加 3 个 `class:Actor` 变量：
+新加 3 个 `class:Actor` 变量 + 1 个 `bool` 调试开关：
 - `NavTargetClass`，default = `/Script/Engine.BlueprintGeneratedClass'/Game/Blueprints/Markers/BP_NavTarget.BP_NavTarget_C'`
 - `NavLookTargetClass`，default 同样指向 `BP_NavLookTarget_C`
 - `MoverNPCClass`，default 指向 `/Game/Blueprints/SandboxCharacter_Mover.SandboxCharacter_Mover_C`（用作 `GetAllActorsOfClass` 的过滤类）
+- `bAllNPCs: bool`，default `true`（**调试开关**：false=只触发 NPC1；true=触发全员）
 
-`EventGraph` 删掉 32 个旧硬编码 vector 散点节点，保留 `Tick + GetPlayerController + WasInputKeyJustPressed("M") + Branch`。`NPC1Class..NPC8Class` 变量保留但不再引用（历史包袱，下次清理）。
+`EventGraph` 删掉 32 个旧硬编码 vector 散点节点，保留 `Tick + GetPlayerController + WasInputKeyJustPressed("M") + Branch`。`NPC2Class..NPC8Class` 变量保留但不再引用（`NPC1Class` 在 `bAllNPCs=false` 路径用上了），下次清理 NPC2..8。
 
 新链路（Branch.then 之后）：
 ```
 GetActorOfClass(NavTargetClass)        → MoveActor: Actor
 GetActorOfClass(NavLookTargetClass)    → LookActor: Actor
-GetAllActorsOfClass(MoverNPCClass)     → OutActors: Array<Actor>
-ForEachLoop(OutActors)
-  LoopBody → DynamicCast<SandboxCharacter_Mover_C>(ArrayElement)
-              ├─ CastFailed → (skip)
-              └─ then → MoveAndLookAt(self, MoveActor, LookActor)
-  Completed → end
+Branch(bAllNPCs)
+  ├─ true  → GetAllActorsOfClass(MoverNPCClass) → ForEachLoop
+  │           LoopBody → DynamicCast<SandboxCharacter_Mover_C>(ArrayElement)
+  │                       ├─ CastFailed → (skip)
+  │                       └─ then → MoveAndLookAt(self, MoveActor, LookActor)
+  │           Completed → end
+  └─ false → GetActorOfClass(NPC1Class) → DynamicCast<SandboxCharacter_Mover_C>
+                ├─ CastFailed → (skip)
+                └─ then → MoveAndLookAt(self, MoveActor, LookActor)  // 仅 NPC1
 ```
 
-Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内部处理。Cast 失败的 ArrayElement（理论上不会发生，因为 GetAllActorsOfClass 已按类筛过）也直接 skip。
+**`bAllNPCs` 用法**：在 Outliner 选中 Level Blueprint（或 World Settings → Level Blueprint）→ Class Defaults / Variables（NPCMove 类目）切换 → PIE 即时生效。开发期单 NPC 调试设 false；扩展到 8 NPC 验证设 true。
 
-> 副作用：玩家 Pawn 如果也是 `SandboxCharacter_Mover_C` 的直接实例（非 NPC 子类），会被 `GetAllActorsOfClass` 抓到一起执行 `MoveAndLookAt`。当前 PRD 未要求排除玩家；如需要，加一个 `Cast<BP_NPC_MH_Character_*>` 或 `if AIController != null` 过滤。
+Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内部处理。
+
+> 副作用（仅 `bAllNPCs=true` 路径）：玩家 Pawn 如果也是 `SandboxCharacter_Mover_C` 的直接实例（非 NPC 子类），会被 `GetAllActorsOfClass` 抓到一起执行 `MoveAndLookAt`。当前 PRD 未要求排除玩家；如需要，加一个 `Cast<BP_NPC_MH_Character_*>` 或 `if AIController != null` 过滤。
 
 ## MCP 实施踩坑
 
@@ -171,8 +177,8 @@ PIE 实测（2026-04-28）：
 ## 已知限制 / 后续
 
 - 8 NPC 同点拥挤（都走到 BP_NavTarget 同一位置）：当前依赖 CharacterMover 自带物理碰撞避让，视觉上会有轻微挤压但不卡死。如要平滑分散，下一里程碑加 `ai_query::set_crowd_manager_config` 启用 DetourCrowdManager。
-- 玩家 Pawn 如果是 `SandboxCharacter_Mover_C` 直接实例，会被 `GetAllActorsOfClass` 抓到一起执行。当前 PRD 不要求排除；如需要，在 ForEachLoop 内换成 Cast 到 `BP_NPC_MH_Character_*` 父类（如有）或加 `if AIController != null` 过滤。
-- `NPC1Class..NPC8Class` 这 8 个 Level BP 变量已不引用，留作历史包袱，下一里程碑随手清理。
+- 玩家 Pawn 如果是 `SandboxCharacter_Mover_C` 直接实例（且 `bAllNPCs=true`），会被 `GetAllActorsOfClass` 抓到一起执行。当前 PRD 不要求排除；如需要，在 ForEachLoop 内换成 Cast 到 `BP_NPC_MH_Character_*` 父类（如有）或加 `if AIController != null` 过滤。
+- `NPC2Class..NPC8Class` 这 7 个 Level BP 变量已不引用（`NPC1Class` 仍被 `bAllNPCs=false` 路径使用），下一里程碑随手清理。
 - `BP_NavTarget` / `BP_NavLookTarget` 的 `Visual` 静态网格组件未指定 Mesh，PIE 默认不可见（不影响寻路）。如需可视化标识可在两个 BP 的 Visual 组件 Details 里配 `EngineSky/SM_Sphere` 或类似 Engine 自带网格。
 - 旋转过程是 Mover 的 RotationRate 决定的（GASP 默认值），目前肉眼观感 OK；如要更快/更慢转向，可调 CharacterMover 的 RotationRate 设置或 `Update_ControlRotationRate` 函数。
 - 当前 `Get_OrientationIntent` 的覆盖只作用在 Walking + idle + OrientToMovement/Strafe 这一条出口。若 NPC 在其它 movement mode（Falling/Sliding/Traversing/Aim）下需要 look-at，要分别处理。本里程碑场景内 NPC 全程 Walking，不涉及。
