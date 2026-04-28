@@ -68,7 +68,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 ### 关卡
 
-`Content/MyAssets/Levels/L_prison.umap`：玩家 Pawn 是引擎默认的 `DefaultPawn`（飞行、不可见）。`DefaultEngine.ini` 没有 `GlobalDefaultGameMode` 覆盖，所以 engine default 生效。场景中有 8 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_8_C`。
+`Content/MyAssets/Levels/L_prison.umap`：通过 `DefaultEngine.ini` 中 `+GameModeMapPrefixes` 映射到 `GM_Sandbox`，玩家 Pawn = `SandboxCharacter_Mover_C`，PlayerController = `PC_Sandbox_C`。场景中有 8 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_8_C`，全部由 `AIController`（`AutoPossessAI=PlacedInWorld`）控制，挂有 `NavMoverComponent`（GASP Mover 2.0 AI 寻路接口）。
 
 ## 参考 (References)
 
@@ -76,6 +76,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 - `@DevLog/2026-04-25_gasp_mover_metahuman.md` —— GASP Mover 2.0 应用到 MetaHuman 身体。
 - `@DevLog/2026-04-25_npc_visual_override_fixed.md` —— NPC 固定 override 模式 + DefaultPawn 飞行摄像头。
 - `@DevLog/2026-04-26_npc_baseline_inventory.md` —— NPC / A2F / VisualOverride 基线盘点，若与实际资产冲突，以资产状态为准并更新 DevLog。
+- `@DevLog/2026-04-28_npc_movement_basic.md` —— NPC 移动基础能力（已 PIE 验证）：GASP Mover 2.0 + AIController.MoveToLocation，Level BP M 键触发，MCP class pin 绕过方案。
 
 每个里程碑新增一份 `DevLog/YYYY-MM-DD_<topic>.md`。
 
