@@ -81,3 +81,5 @@ Temp/
 # Local test artifacts
 Tools/*.wav
 Tools/*.pcm
+
+FVT/
