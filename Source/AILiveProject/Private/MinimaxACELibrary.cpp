@@ -13,6 +13,9 @@
 #include "ACEAudioCurveSourceComponent.h"
 #include "A2FProvider.h"
 
+#include "GameFramework/Pawn.h"
+#include "Perception/AISense_Hearing.h"
+
 DEFINE_LOG_CATEGORY_STATIC(LogMinimaxACE, Log, All);
 
 namespace
@@ -169,5 +172,105 @@ void UMinimaxACELibrary::TriggerMinimaxSpeech(
 			A2FProviderName);
 
 		UE_LOG(LogMinimaxACE, Log, TEXT("AnimateFromAudioSamples returned %s"), bOk ? TEXT("true") : TEXT("false"));
+	});
+}
+
+void UMinimaxACELibrary::TriggerMinimaxSpeechWithNoise(
+	UObject* /*WorldContextObject*/,
+	AActor* AudioTarget,
+	AActor* NoiseInstigator,
+	const FString& Text,
+	const FString& ApiKey,
+	const FString& VoiceId,
+	const FString& Endpoint,
+	FName A2FProviderName)
+{
+	if (!IsValid(AudioTarget))
+	{
+		UE_LOG(LogMinimaxACE, Warning, TEXT("TriggerMinimaxSpeechWithNoise: invalid AudioTarget"));
+		return;
+	}
+	if (Text.IsEmpty() || ApiKey.IsEmpty())
+	{
+		UE_LOG(LogMinimaxACE, Warning, TEXT("TriggerMinimaxSpeechWithNoise: empty Text or ApiKey"));
+		return;
+	}
+
+	UACEAudioCurveSourceComponent* Consumer = GetOrAddCurveSource(AudioTarget);
+	if (!Consumer)
+	{
+		UE_LOG(LogMinimaxACE, Warning, TEXT("TriggerMinimaxSpeechWithNoise: failed to get/add UACEAudioCurveSourceComponent"));
+		return;
+	}
+
+	TWeakObjectPtr<UACEAudioCurveSourceComponent> WeakConsumer(Consumer);
+	TWeakObjectPtr<AActor> WeakNoiseInstigator(NoiseInstigator);
+
+	MinimaxSpeech::FRequest Req;
+	Req.ApiKey = ApiKey;
+	Req.Text = Text;
+	Req.VoiceId = VoiceId;
+	Req.Endpoint = Endpoint;
+	Req.SampleRate = 16000;
+
+	Async(EAsyncExecution::ThreadPool,
+		[Req = MoveTemp(Req), WeakConsumer, WeakNoiseInstigator, A2FProviderName]()
+	{
+		const MinimaxSpeech::FResult Result = MinimaxSpeech::RequestBlocking(Req);
+		if (!Result.bSuccess)
+		{
+			UE_LOG(LogMinimaxACE, Error, TEXT("MiniMax TTS failed: %s"), *Result.ErrorMessage);
+			return;
+		}
+
+		UACEAudioCurveSourceComponent* Live = WeakConsumer.Get();
+		if (!Live)
+		{
+			UE_LOG(LogMinimaxACE, Warning, TEXT("Consumer destroyed before audio delivered"));
+			return;
+		}
+
+		UE_LOG(LogMinimaxACE, Log,
+			TEXT("WithNoise: dispatching %d samples @ %d Hz (duration %.2fs)"),
+			Result.Samples.Num(), Result.SampleRate, Result.DurationSec);
+
+		// ReportNoiseEvent 必须在 audio dispatch 之前发：AnimateFromAudioSamples 是
+		// 阻塞 streaming dispatch（多个 chunk 串行 send 到 ACE thread），实测可能
+		// 持续数秒。如果把 ReportNoiseEvent 放到 dispatch 之后，hearing 命中会推迟到
+		// audio 几乎播完时，超出测试 timer 窗口。dispatch 之前发等同"音频开播刹那"。
+		// AISense API 不是线程安全的，GetActorLocation 也必须在 GameThread 内取。
+		AsyncTask(ENamedThreads::GameThread, [WeakNoiseInstigator]()
+		{
+			APawn* Pawn = Cast<APawn>(WeakNoiseInstigator.Get());
+			if (!Pawn)
+			{
+				UE_LOG(LogMinimaxACE, Warning,
+					TEXT("ReportNoiseEvent skipped: NoiseInstigator null or not a Pawn"));
+				return;
+			}
+			UAISense_Hearing::ReportNoiseEvent(
+				Pawn,
+				Pawn->GetActorLocation(),
+				/*Loudness=*/ 1.f,
+				/*Instigator=*/ Pawn,
+				/*MaxRange=*/ 0.f,
+				/*Tag=*/ NAME_None);
+			UE_LOG(LogMinimaxACE, Log,
+				TEXT("ReportNoiseEvent: instigator=%s loc=%s"),
+				*Pawn->GetName(), *Pawn->GetActorLocation().ToString());
+		});
+
+		const bool bOk = FACERuntimeModule::Get().AnimateFromAudioSamples(
+			Live,
+			TArrayView<const int16>(Result.Samples.GetData(), Result.Samples.Num()),
+			/*NumChannels*/ 1,
+			Result.SampleRate,
+			/*bEndOfSamples*/ true,
+			TOptional<FAudio2FaceEmotion>{},
+			/*Params*/ nullptr,
+			A2FProviderName);
+
+		UE_LOG(LogMinimaxACE, Log, TEXT("WithNoise: AnimateFromAudioSamples returned %s"),
+			bOk ? TEXT("true") : TEXT("false"));
 	});
 }

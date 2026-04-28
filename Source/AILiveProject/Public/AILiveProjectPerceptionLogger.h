@@ -5,6 +5,7 @@
 #include "AILiveProjectPerceptionLogger.generated.h"
 
 class AAIController;
+class UChildActorComponent;
 
 USTRUCT(BlueprintType)
 struct AILIVEPROJECT_API FPerceivedAgentInfo
@@ -34,6 +35,35 @@ struct AILIVEPROJECT_API FPerceivedAgentInfo
 	FVector LastStimulusLocation = FVector::ZeroVector;
 };
 
+USTRUCT(BlueprintType)
+struct AILIVEPROJECT_API FHeardSoundInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Perception")
+	FName SourceIdentity;
+
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Perception")
+	float DistanceCm = 0.f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Perception")
+	FRotator DirectionFromPerceiver = FRotator::ZeroRotator;
+
+	/** 相对 Perceiver forward 的偏航角，[-180, 180]。0=正前，+90=正右，-90=正左，±180=正后。 */
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Perception")
+	float RelativeYawDeg = 0.f;
+
+	/** 噪声事件发生时的世界坐标（不是 source actor 当前位置）。 */
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Perception")
+	FVector StimulusLocation = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Perception")
+	float Loudness = 0.f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Perception")
+	float StimulusAge = 0.f;
+};
+
 UCLASS()
 class AILIVEPROJECT_API UAILiveProjectPerceptionLogger : public UBlueprintFunctionLibrary
 {
@@ -53,4 +83,24 @@ public:
 		AAIController* Perceiver,
 		FString Tag,
 		UObject* WorldContextObject);
+
+	UFUNCTION(BlueprintCallable, Category = "AILive|Perception",
+		meta = (WorldContext = "WorldContextObject",
+			DisplayName = "Gather Hearing Perception"))
+	static TArray<FHeardSoundInfo> GatherHearingPerception(
+		AAIController* Perceiver,
+		UObject* WorldContextObject);
+
+	UFUNCTION(BlueprintCallable, Category = "AILive|Perception",
+		meta = (WorldContext = "WorldContextObject",
+			DisplayName = "Log Hearing Perception To Output"))
+	static int32 LogHearingPerceptionToOutput(
+		AAIController* Perceiver,
+		FString Tag,
+		UObject* WorldContextObject);
+
+	/** UChildActorComponent::GetChildActor() 的 BP 包装（原 native getter 不是 UFUNCTION）。 */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "AILive|Util",
+		meta = (DisplayName = "Get Child Actor Of"))
+	static AActor* GetChildActorOf(UChildActorComponent* Component);
 };

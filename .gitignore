@@ -83,3 +83,6 @@ Tools/*.wav
 Tools/*.pcm
 
 FVT/
+
+# Claude Code local session/state files
+.claude/scheduled_tasks.lock
