@@ -20,6 +20,17 @@ UBT 构建 Editor target：
 
 改 `.Build.cs` / `.Target.cs` / `.uproject` plugin 列表才需要全量重建（命令见上），其余 `.cpp` / `.h` 改动走 Live Coding。没有自动测试套件；关键烟测是 PIE + T 键触发 TTS/A2F。
 
+### UE 编辑器进程管理
+
+需要重启编辑器时自己用 PowerShell 操作，不让用户手点；强杀前先确认改动已保存，启动后等 `monolith_status` 返回 online 再继续（加载约 30–90 s）。
+
+```
+# 关
+powershell -NoProfile -Command "Get-Process UnrealEditor -ErrorAction SilentlyContinue | Stop-Process -Force"
+# 开
+powershell -NoProfile -Command "Start-Process 'D:\Software\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe' -ArgumentList '\"D:\Project\Unreal\AILiveProject\AILiveProject.uproject\"'"
+```
+
 ## Unreal 资产操作（Monolith MCP）
 
 **YOU MUST** 在操作 UE 前做两件准备工作：1. 扫描查阅是否有可用的 skill，避免猜测走弯路；2. 用 Monolith MCP 的 `tools` 读当前真实状态，再对照计划做差量。
@@ -82,6 +93,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 ## 约定
 
+- **功能实现选 C++**（除非蓝图比C++更合适）。
 - 用户用中文交流，回复也用中文。
 - GASP / Mover / Visual-override / NPC 父类等既有 BP 链路沿用，不重写。蓝图限于配置资产（DataAsset / Curve）、UMG / AnimBP / 关卡蓝图、必须继承既有 BP 父类的场景。
 - 当 DevLog / 手册与实际资产状态冲突时，**以资产状态为准**并更新 DevLog。不要为了贴合过时文档去改动资产。

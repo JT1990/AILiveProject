@@ -82,6 +82,7 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 ## 约定
 
+- **功能实现选 C++**（除非蓝图比C++更合适）。
 - 用户用中文交流，回复也用中文。
 - GASP / Mover / Visual-override / NPC 父类等既有 BP 链路沿用，不重写。蓝图限于配置资产（DataAsset / Curve）、UMG / AnimBP / 关卡蓝图、必须继承既有 BP 父类的场景。
 - 当 DevLog / 手册与实际资产状态冲突时，**以资产状态为准**并更新 DevLog。不要为了贴合过时文档去改动资产。

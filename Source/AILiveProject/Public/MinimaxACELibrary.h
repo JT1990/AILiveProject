@@ -53,6 +53,27 @@ public:
 		const FString& Endpoint = TEXT("https://api.minimaxi.com/v1/t2a_v2"),
 		FName A2FProviderName = FName(TEXT("LocalA2F-James")));
 
+	/*
+	 * Convenience wrapper for NPC pawns using the VisualOverride child actor as
+	 * the ACE/A2F audio target and the pawn itself as the hearing instigator.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Minimax|ACE",
+		meta = (WorldContext = "WorldContextObject",
+			AdvancedDisplay = "VoiceId,Endpoint,A2FProviderName",
+			DisplayName = "Trigger Minimax Speech From Pawn With Noise"))
+	static bool TriggerMinimaxSpeechFromPawnWithNoise(
+		UObject* WorldContextObject,
+		AActor* SpeakerPawn,
+		const FString& Text,
+		const FString& ApiKey,
+		const FString& VoiceId = TEXT("male-qn-qingse"),
+		const FString& Endpoint = TEXT("https://api.minimaxi.com/v1/t2a_v2"),
+		FName A2FProviderName = FName(TEXT("LocalA2F-James")));
+
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Minimax|ACE",
+		meta = (DisplayName = "Get Visual Override Audio Target"))
+	static AActor* GetVisualOverrideAudioTarget(AActor* SpeakerPawn);
+
 	UFUNCTION(BlueprintCallable, Category = "Minimax|ACE")
 	static void PrewarmA2F(FName A2FProviderName = FName(TEXT("LocalA2F-James")));
 

@@ -3,6 +3,7 @@
 #include "MinimaxSpeechClient.h"
 
 #include "Async/Async.h"
+#include "Components/ChildActorComponent.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
@@ -273,4 +274,67 @@ void UMinimaxACELibrary::TriggerMinimaxSpeechWithNoise(
 		UE_LOG(LogMinimaxACE, Log, TEXT("WithNoise: AnimateFromAudioSamples returned %s"),
 			bOk ? TEXT("true") : TEXT("false"));
 	});
+}
+
+AActor* UMinimaxACELibrary::GetVisualOverrideAudioTarget(AActor* SpeakerPawn)
+{
+	if (!IsValid(SpeakerPawn))
+	{
+		return nullptr;
+	}
+
+	TArray<UChildActorComponent*> ChildActorComponents;
+	SpeakerPawn->GetComponents<UChildActorComponent>(ChildActorComponents);
+	for (UChildActorComponent* Component : ChildActorComponents)
+	{
+		if (!Component)
+		{
+			continue;
+		}
+
+		const bool bLooksLikeVisualOverride =
+			Component->ComponentHasTag(TEXT("VisualOverride")) ||
+			Component->GetFName() == TEXT("VisualOverride");
+		if (!bLooksLikeVisualOverride)
+		{
+			continue;
+		}
+
+		if (AActor* ChildActor = Component->GetChildActor())
+		{
+			return ChildActor;
+		}
+	}
+
+	return nullptr;
+}
+
+bool UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoise(
+	UObject* WorldContextObject,
+	AActor* SpeakerPawn,
+	const FString& Text,
+	const FString& ApiKey,
+	const FString& VoiceId,
+	const FString& Endpoint,
+	FName A2FProviderName)
+{
+	AActor* AudioTarget = GetVisualOverrideAudioTarget(SpeakerPawn);
+	if (!IsValid(AudioTarget))
+	{
+		UE_LOG(LogMinimaxACE, Warning,
+			TEXT("TriggerMinimaxSpeechFromPawnWithNoise: no VisualOverride child actor for %s"),
+			*GetNameSafe(SpeakerPawn));
+		return false;
+	}
+
+	TriggerMinimaxSpeechWithNoise(
+		WorldContextObject,
+		AudioTarget,
+		SpeakerPawn,
+		Text,
+		ApiKey,
+		VoiceId,
+		Endpoint,
+		A2FProviderName);
+	return true;
 }
