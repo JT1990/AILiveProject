@@ -1,14 +1,16 @@
-# NPC 移动 + 看向目标（NPC1 单角色）
+# NPC 移动 + 看向目标
 
 日期：2026-04-28
 
 ## 目标
 
-NPC1 按 M 键 → 走到关卡 `BP_NavTarget` 实例位置 → 走路过程身体朝速度方向（自然行走）；到达后身体转向 `BP_NavLookTarget` 实例。LLM 决策层接入前的最小执行基线。
+按 M 键 → 关卡内全部 `SandboxCharacter_Mover_C` 子类实例（含 8 个 MetaHuman NPC）各自走到 `BP_NavTarget` 实例位置 → 走路过程身体朝速度方向（自然行走）；到达后身体转向 `BP_NavLookTarget` 实例。LLM 决策层接入前的最小执行基线。
+
+> **M 键是测试触发器**，不是产品入口。LLM 决策层接入后，此 Level BP 段直接删除，由 Mind 模块按 NPC 实例分别 dispatch `MoveAndLookAt`；功能本身（父类 `SandboxCharacter_Mover` 的函数 + 状态变量）零改动复用。
 
 ## 调试链路替换说明
 
-上一里程碑（`2026-04-28_npc_movement_basic.md`）的 M 键链路是 8 NPC 各自走到一个硬编码 vector 散点，本里程碑**替换**为单 NPC + 关卡 Actor 引用流程。NPC2..NPC8 的 `NPC2Class..NPC8Class` Level BP 变量保留，下一里程碑再把新流程扩到全部 8 个。
+上一里程碑（`2026-04-28_npc_movement_basic.md`）的 M 键链路是 8 NPC 各自走到一个硬编码 vector 散点，本里程碑**替换**为统一目标 + `GetAllActorsOfClass + ForEachLoop` 一段循环驱动全部 NPC。原 `NPC1Class..NPC8Class` Level BP 变量保留但已不引用，留作历史参考，可后续清理。
 
 ## 关键技术决策（必读）
 
@@ -120,23 +122,28 @@ K2Node_Select:
 
 ### 7. `L_prison` Level BP 重写
 
-新加 2 个 `class:Actor` 变量：
+新加 3 个 `class:Actor` 变量：
 - `NavTargetClass`，default = `/Script/Engine.BlueprintGeneratedClass'/Game/Blueprints/Markers/BP_NavTarget.BP_NavTarget_C'`
-- `NavLookTargetClass`，default = 同样指向 `BP_NavLookTarget_C`
+- `NavLookTargetClass`，default 同样指向 `BP_NavLookTarget_C`
+- `MoverNPCClass`，default 指向 `/Game/Blueprints/SandboxCharacter_Mover.SandboxCharacter_Mover_C`（用作 `GetAllActorsOfClass` 的过滤类）
 
-`EventGraph` 删掉 32 个旧节点（8 段 `(GetActorOfClass + DynamicCast + MoveToLocation + VariableGet)`），保留 `Tick + GetPlayerController + WasInputKeyJustPressed("M") + Branch + NPC1Class..NPC8Class 8 个变量定义`。
+`EventGraph` 删掉 32 个旧硬编码 vector 散点节点，保留 `Tick + GetPlayerController + WasInputKeyJustPressed("M") + Branch`。`NPC1Class..NPC8Class` 变量保留但不再引用（历史包袱，下次清理）。
 
 新链路（Branch.then 之后）：
 ```
-GetActorOfClass(NavTargetClass via VariableGet) → MoveActor: Actor
-  → GetActorOfClass(NavLookTargetClass) → LookActor: Actor
-    → GetActorOfClass(NPC1Class) → NPC1: Actor
-      → DynamicCast<SandboxCharacter_Mover_C>(NPC1)
-          ├─ CastFailed → PrintString "[Level] NPC1 not found or wrong class"
-          └─ then → MoveAndLookAt(self=Mover, MoveTarget=MoveActor, LookTarget=LookActor)
+GetActorOfClass(NavTargetClass)        → MoveActor: Actor
+GetActorOfClass(NavLookTargetClass)    → LookActor: Actor
+GetAllActorsOfClass(MoverNPCClass)     → OutActors: Array<Actor>
+ForEachLoop(OutActors)
+  LoopBody → DynamicCast<SandboxCharacter_Mover_C>(ArrayElement)
+              ├─ CastFailed → (skip)
+              └─ then → MoveAndLookAt(self, MoveActor, LookActor)
+  Completed → end
 ```
 
-Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内部处理。
+Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内部处理。Cast 失败的 ArrayElement（理论上不会发生，因为 GetAllActorsOfClass 已按类筛过）也直接 skip。
+
+> 副作用：玩家 Pawn 如果也是 `SandboxCharacter_Mover_C` 的直接实例（非 NPC 子类），会被 `GetAllActorsOfClass` 抓到一起执行 `MoveAndLookAt`。当前 PRD 未要求排除玩家；如需要，加一个 `Cast<BP_NPC_MH_Character_*>` 或 `if AIController != null` 过滤。
 
 ## MCP 实施踩坑
 
@@ -145,7 +152,7 @@ Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内�
 3. `IsValid` 不论 `target_class` 怎么传，都解析到 `SubobjectDataBlueprintFunctionLibrary.IsValid`（auto-memory 已记）。绕法：用 `DynamicCast<Actor>` 当 None-check（cast on null 走 CastFailed 分支，等价 IsValid）。
 4. **新增：`add_function` 创建函数后，多 `K2Node_FunctionResult` 节点在 compile 后仍可能没有输出 pin（`bSucceeded` / `ReturnValue`），即便 `set_function_params` 已声明返回值**。绕法：用 `K2Node_Select` 数据合流到 GASP 已有的、带正确 `ReturnValue` 的 `FunctionResult` 节点，避开新建 result 节点。
 5. **新增：`K2Node_Select` 的 wildcard 类型在 connect 时按"先连接的那个 pin 的类型"锁定**。如果先把 `Self` 节点（Pawn-ref）连到 Option 0，然后想把 `Actor` 连到 Option 1 会报"Actor 对象引用和Self 对象引用不兼容"。解决：要么把所有 Option 都连同一类型源，要么用变量中转（本里程碑用 `LookDirection` Vector 变量绕过这个坑）。
-6. **新增：MCP `connect_pins` 不会触发 wildcard pin 的类型推断**。`K2Node_Array_Get` / `K2Node_Select` 这类 wildcard 节点必须先有一端是确定类型且能连上，再连其它端。`Array_Get` 在 MCP 下基本不可用（DevLog `2026-04-28_npc_movement_basic.md` 已记），本里程碑用 `GetActorOfClass` + 专用 BP 类回避。
+6. **新增：MCP `connect_pins` 不会触发 wildcard pin 的类型推断**。`K2Node_Array_Get` / `K2Node_Select` 这类 wildcard 节点必须先有一端是确定类型且能连上，再连其它端。`Array_Get` 在 MCP 下基本不可用（DevLog `2026-04-28_npc_movement_basic.md` 已记），本里程碑用 `GetActorOfClass` + 专用 BP 类回避。**例外**：`K2Node_MacroInstance("ForEachLoop")` 的 `Array`（input wildcard）和 `Array Element`（output wildcard）pin 在 Monolith 0.14.7 下能正常连——`GetAllActorsOfClass.OutActors → ForEachLoop.Array → ForEachLoop.Array Element → DynamicCast.Object` 整条 wildcard 链 `connect_pins_bulk` 一次成功。看起来 MCP 对 ForEachLoop 这种特殊 macro 的 wildcard 推断有专门处理，但 `Array_Get` 仍不行。
 7. **新增：`class:Actor` 变量的 `default_value` 写法**：`/Script/Engine.BlueprintGeneratedClass'/Game/.../BP_xxx.BP_xxx_C'`（外层路径 + 内层引号 + `_C` 后缀，外层不加引号）。
 8. `batch_execute` + `add_nodes_bulk` + `connect_pins_bulk` + `set_pin_defaults_bulk` 一次 round-trip 完成大改，比逐节点操作高效得多。
 
@@ -153,17 +160,20 @@ Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内�
 
 PIE 实测（2026-04-28）：
 
-- [x] 按 M：NPC1 启动并走到 BP_NavTarget。寻路链路正常。
+- [x] 按 M：关卡内全部 8 个 NPC 同时启动并走到 BP_NavTarget。`GetAllActorsOfClass + ForEachLoop` 一段循环驱动全员，无个体掉队。
 - [x] 走路过程身体朝速度方向（NavMover.MoveInput 通过 `Get_MoveInput` 写入 `FCharacterDefaultInputs.MoveInput`，Mover 在 OrientToMovement 模式下用速度方向作为 OrientationIntent）。
 - [x] 到达 BP_NavTarget 80uu 内：身体 yaw 主动转向 BP_NavLookTarget。`Get_OrientationIntent` 的 Select 切到 `LookDirection`，Mover 每帧按 RotationRate 平滑旋转。
 - [x] OutputLog 无 `LogAIController` / `LogPathFollowing` 异常。
 - [x] 失败路径：`MoveAndLookAt` 三条 PrintString 在故意断关卡引用时正确触发。
 
-诊断 PrintString（`[Poll] fired` / `[Poll] arrived idle, aligning yaw`）已在验证通过后从 `PollAndAlignLook` 中移除，避免轮询期间日志刷屏；`MoveAndLookAt` 失败诊断 PrintString 保留。
+诊断 PrintString（`[Poll] fired` / `[Poll] arrived idle, aligning yaw`）已在验证通过后从 `PollAndAlignLook` 中移除，避免 8 NPC 并行轮询时日志刷屏；`MoveAndLookAt` 失败诊断 PrintString 保留。
 
 ## 已知限制 / 后续
 
-- NPC2..NPC8 暂未接入新流程。下一里程碑把 Level BP 链路扩到 8 个 NPC，并按需加 `set_crowd_manager_config` 处理同点拥挤。
+- 8 NPC 同点拥挤（都走到 BP_NavTarget 同一位置）：当前依赖 CharacterMover 自带物理碰撞避让，视觉上会有轻微挤压但不卡死。如要平滑分散，下一里程碑加 `ai_query::set_crowd_manager_config` 启用 DetourCrowdManager。
+- 玩家 Pawn 如果是 `SandboxCharacter_Mover_C` 直接实例，会被 `GetAllActorsOfClass` 抓到一起执行。当前 PRD 不要求排除；如需要，在 ForEachLoop 内换成 Cast 到 `BP_NPC_MH_Character_*` 父类（如有）或加 `if AIController != null` 过滤。
+- `NPC1Class..NPC8Class` 这 8 个 Level BP 变量已不引用，留作历史包袱，下一里程碑随手清理。
 - `BP_NavTarget` / `BP_NavLookTarget` 的 `Visual` 静态网格组件未指定 Mesh，PIE 默认不可见（不影响寻路）。如需可视化标识可在两个 BP 的 Visual 组件 Details 里配 `EngineSky/SM_Sphere` 或类似 Engine 自带网格。
 - 旋转过程是 Mover 的 RotationRate 决定的（GASP 默认值），目前肉眼观感 OK；如要更快/更慢转向，可调 CharacterMover 的 RotationRate 设置或 `Update_ControlRotationRate` 函数。
 - 当前 `Get_OrientationIntent` 的覆盖只作用在 Walking + idle + OrientToMovement/Strafe 这一条出口。若 NPC 在其它 movement mode（Falling/Sliding/Traversing/Aim）下需要 look-at，要分别处理。本里程碑场景内 NPC 全程 Walking，不涉及。
+- M 键触发是测试 hook，未来 LLM 决策层接入时该段 Level BP 直接删，由 Mind 模块按 NPC dispatch；功能本身（父类的 `MoveAndLookAt` 函数 + 状态变量 + `Get_OrientationIntent` 覆盖）零改动复用。
