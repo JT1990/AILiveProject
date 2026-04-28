@@ -17,6 +17,8 @@ public class AILiveProject : ModuleRules
 			"JsonUtilities",
 			"ACERuntime",
 			"ACECore",
+			"AIModule",
+			"NavigationSystem",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
