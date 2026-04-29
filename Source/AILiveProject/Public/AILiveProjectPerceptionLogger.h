@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "SmartObjectRuntime.h"
 #include "AILiveProjectPerceptionLogger.generated.h"
 
 class AAIController;
@@ -103,4 +104,19 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "AILive|Util",
 		meta = (DisplayName = "Get Child Actor Of"))
 	static AActor* GetChildActorOf(UChildActorComponent* Component);
+
+	/**
+	 * 在指定的 SmartObject Actor 上查找首个匹配的可用 slot 并申领它。
+	 * 一次性完成 FindSmartObjectsInActor + MarkSmartObjectSlotAsClaimed，
+	 * 绕开 BP Array_Get wildcard pin 在 MCP 下不可用的问题。
+	 * 返回的 ClaimHandle 可直接传给 MoveToAndUseSmartObjectWithGameplayInteraction。
+	 * 失败时返回默认（无效）句柄，可用 IsValidSmartObjectClaimHandle 检测。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AILive|SmartObject",
+		meta = (WorldContext = "WorldContextObject",
+			DisplayName = "Claim First Slot In Actor"))
+	static FSmartObjectClaimHandle ClaimFirstSlotInActor(
+		AActor* SmartObjectActor,
+		AActor* UserActor,
+		UObject* WorldContextObject);
 };

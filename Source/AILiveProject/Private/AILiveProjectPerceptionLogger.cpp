@@ -9,6 +9,11 @@
 #include "Perception/AISense.h"
 #include "Perception/AISense_Hearing.h"
 #include "Perception/AISense_Sight.h"
+#include "GameplayTagContainer.h"
+#include "SmartObjectBlueprintFunctionLibrary.h"
+#include "SmartObjectComponent.h"
+#include "SmartObjectRequestTypes.h"
+#include "SmartObjectTypes.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAILivePerception, Log, All);
 
@@ -244,4 +249,70 @@ int32 UAILiveProjectPerceptionLogger::LogHearingPerceptionToOutput(
 			true, true, FLinearColor(1.f, 0.5f, 0.f), 6.f);
 	}
 	return List.Num();
+}
+
+FSmartObjectClaimHandle UAILiveProjectPerceptionLogger::ClaimFirstSlotInActor(
+	AActor* SmartObjectActor,
+	AActor* UserActor,
+	UObject* WorldContextObject)
+{
+	if (!SmartObjectActor)
+	{
+		UE_LOG(LogAILivePerception, Warning, TEXT("[Sit] ClaimFirstSlotInActor: SmartObjectActor is null"));
+		return FSmartObjectClaimHandle();
+	}
+
+	TArray<FSmartObjectRequestResult> Results;
+	FSmartObjectRequestFilter Filter;
+	// SO_BenchDefinition.UserTagFilter = ANY_EXACT(SmartObject.ObjectType.NPC, .Player)
+	// 默认 Filter.UserTags 为空 → ANY_EXACT 评估为 false → 所有 slot 被过滤。
+	// 主动给 NPC 这个 user tag 让 SO 接受请求。
+	const FGameplayTag NPCTag = FGameplayTag::RequestGameplayTag(
+		FName(TEXT("SmartObject.ObjectType.NPC")), /*bErrorIfNotFound=*/false);
+	Filter.UserTags.AddTag(NPCTag);
+	UE_LOG(LogAILivePerception, Display,
+		TEXT("[Sit] Filter prepared: NPCTag.IsValid=%d UserTags=%s bShouldEvaluateConditions=%d bShouldIncludeClaimedSlots=%d"),
+		NPCTag.IsValid() ? 1 : 0,
+		*Filter.UserTags.ToString(),
+		Filter.bShouldEvaluateConditions ? 1 : 0,
+		Filter.bShouldIncludeClaimedSlots ? 1 : 0);
+
+	// 也直接遍历 SO actor 的所有 SmartObjectComponent 看 RegisteredHandle 是否就位。
+	TArray<UActorComponent*> SOComps;
+	SmartObjectActor->GetComponents(USmartObjectComponent::StaticClass(), SOComps);
+	for (UActorComponent* C : SOComps)
+	{
+		if (USmartObjectComponent* SOC = Cast<USmartObjectComponent>(C))
+		{
+			UE_LOG(LogAILivePerception, Display,
+				TEXT("[Sit]   SOComp on %s: RegisteredHandle.IsValid=%d Definition=%s"),
+				*SmartObjectActor->GetName(),
+				SOC->GetRegisteredHandle().IsValid() ? 1 : 0,
+				*GetNameSafe(SOC->GetDefinition()));
+		}
+	}
+
+	const bool bAny = USmartObjectBlueprintFunctionLibrary::FindSmartObjectsInActor(
+		Filter, SmartObjectActor, Results, UserActor);
+	UE_LOG(LogAILivePerception, Display,
+		TEXT("[Sit] FindSmartObjectsInActor returned bAny=%d Results.Num=%d"),
+		bAny ? 1 : 0, Results.Num());
+	if (!bAny || Results.Num() == 0)
+	{
+		UE_LOG(LogAILivePerception, Warning,
+			TEXT("[Sit] ClaimFirstSlotInActor: no available slot on %s"),
+			*SmartObjectActor->GetName());
+		return FSmartObjectClaimHandle();
+	}
+
+	const FSmartObjectClaimHandle Handle =
+		USmartObjectBlueprintFunctionLibrary::MarkSmartObjectSlotAsClaimed(
+			WorldContextObject, Results[0].SlotHandle, UserActor,
+			ESmartObjectClaimPriority::Normal);
+
+	UE_LOG(LogAILivePerception, Display,
+		TEXT("[Sit] ClaimFirstSlotInActor: claimed slot on %s, valid=%d"),
+		*SmartObjectActor->GetName(), Handle.IsValid() ? 1 : 0);
+
+	return Handle;
 }

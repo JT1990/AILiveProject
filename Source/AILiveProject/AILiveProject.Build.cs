@@ -19,6 +19,8 @@ public class AILiveProject : ModuleRules
 			"ACECore",
 			"AIModule",
 			"NavigationSystem",
+			"SmartObjectsModule",
+			"GameplayTags",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
