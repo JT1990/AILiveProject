@@ -10,7 +10,7 @@
 
 ## 调试链路替换说明
 
-上一里程碑（`2026-04-28_npc_movement_basic.md`）的 M 键链路是 10 NPC 各自走到一个硬编码 vector 散点，本里程碑**替换**为统一目标 + `GetAllActorsOfClass + ForEachLoop` 一段循环驱动全部 NPC。原 `NPC1Class..NPC10Class` Level BP 变量保留但已不引用，留作历史参考，可后续清理。
+M 键链路使用统一目标 + `GetAllActorsOfClass + ForEachLoop` 一段循环驱动全部 NPC。`NPC1Class..NPC10Class` 这类个体 class 变量不参与全员移动路径；全员路径以 `MoverNPCClass=SandboxCharacter_Mover_C` 为过滤入口。
 
 ## 关键技术决策（必读）
 
@@ -128,7 +128,7 @@ K2Node_Select:
 - `MoverNPCClass`，default 指向 `/Game/Blueprints/SandboxCharacter_Mover.SandboxCharacter_Mover_C`（用作 `GetAllActorsOfClass` 的过滤类）
 - `bAllNPCs: bool`，default `true`（**调试开关**：false=只触发 NPC1；true=触发全员）
 
-`EventGraph` 删掉 32 个旧硬编码 vector 散点节点，保留 `Tick + GetPlayerController + WasInputKeyJustPressed("M") + Branch`。`NPC2Class..NPC8Class` 变量保留但不再引用（`NPC1Class` 在 `bAllNPCs=false` 路径用上了），下次清理 NPC2..8。
+`EventGraph` 保留 `Tick + GetPlayerController + WasInputKeyJustPressed("M") + Branch`。全员移动路径不依赖 `NPC2Class..NPC10Class` 个体变量；`bAllNPCs=false` 仅作为 NPC1 单体调试路径。
 
 新链路（Branch.then 之后）：
 ```
@@ -145,7 +145,7 @@ Branch(bAllNPCs)
                 └─ then → MoveAndLookAt(self, MoveActor, LookActor)  // 仅 NPC1
 ```
 
-**`bAllNPCs` 用法**：在 Outliner 选中 Level Blueprint（或 World Settings → Level Blueprint）→ Class Defaults / Variables（NPCMove 类目）切换 → PIE 即时生效。开发期单 NPC 调试设 false；扩展到 8 NPC 验证设 true。
+**`bAllNPCs` 用法**：在 Outliner 选中 Level Blueprint（或 World Settings → Level Blueprint）→ Class Defaults / Variables（NPCMove 类目）切换 → PIE 即时生效。开发期单 NPC 调试设 false；10 NPC 全员验证设 true。
 
 Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内部处理。
 
@@ -172,13 +172,13 @@ PIE 实测（2026-04-28）：
 - [x] OutputLog 无 `LogAIController` / `LogPathFollowing` 异常。
 - [x] 失败路径：`MoveAndLookAt` 三条 PrintString 在故意断关卡引用时正确触发。
 
-诊断 PrintString（`[Poll] fired` / `[Poll] arrived idle, aligning yaw`）已在验证通过后从 `PollAndAlignLook` 中移除，避免 8 NPC 并行轮询时日志刷屏；`MoveAndLookAt` 失败诊断 PrintString 保留。
+诊断 PrintString（`[Poll] fired` / `[Poll] arrived idle, aligning yaw`）已在验证通过后从 `PollAndAlignLook` 中移除，避免 10 NPC 并行轮询时日志刷屏；`MoveAndLookAt` 失败诊断 PrintString 保留。
 
 ## 已知限制 / 后续
 
-- 8 NPC 同点拥挤（都走到 BP_NavTarget 同一位置）：当前依赖 CharacterMover 自带物理碰撞避让，视觉上会有轻微挤压但不卡死。如要平滑分散，下一里程碑加 `ai_query::set_crowd_manager_config` 启用 DetourCrowdManager。
+- 10 NPC 同点拥挤（都走到 BP_NavTarget 同一位置）：当前依赖 CharacterMover 自带物理碰撞避让，视觉上会有轻微挤压但不卡死。平滑分散路径由 `2026-04-29_npc_scatter_to_target.md` 的 EQS 散点流程承担。
 - 玩家 Pawn 如果是 `SandboxCharacter_Mover_C` 直接实例（且 `bAllNPCs=true`），会被 `GetAllActorsOfClass` 抓到一起执行。当前 PRD 不要求排除；如需要，在 ForEachLoop 内换成 Cast 到 `BP_NPC_MH_Character_*` 父类（如有）或加 `if AIController != null` 过滤。
-- `NPC2Class..NPC8Class` 这 7 个 Level BP 变量已不引用（`NPC1Class` 仍被 `bAllNPCs=false` 路径使用），下一里程碑随手清理。
+- `NPC2Class..NPC10Class` 个体变量不参与全员移动路径；`NPC1Class` 仍用于 `bAllNPCs=false` 单体调试路径。
 - `BP_NavTarget` / `BP_NavLookTarget` 的 `Visual` 静态网格组件未指定 Mesh，PIE 默认不可见（不影响寻路）。如需可视化标识可在两个 BP 的 Visual 组件 Details 里配 `EngineSky/SM_Sphere` 或类似 Engine 自带网格。
 - 旋转过程是 Mover 的 RotationRate 决定的（GASP 默认值），目前肉眼观感 OK；如要更快/更慢转向，可调 CharacterMover 的 RotationRate 设置或 `Update_ControlRotationRate` 函数。
 - 当前 `Get_OrientationIntent` 的覆盖只作用在 Walking + idle + OrientToMovement/Strafe 这一条出口。若 NPC 在其它 movement mode（Falling/Sliding/Traversing/Aim）下需要 look-at，要分别处理。本里程碑场景内 NPC 全程 Walking，不涉及。

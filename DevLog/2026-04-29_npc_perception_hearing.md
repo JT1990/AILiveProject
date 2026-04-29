@@ -113,7 +113,7 @@ ai_query::configure_stimuli_source
   sense_types=["Sight", "Hearing"]
 ```
 
-8 个 NPC 子类全部继承（与 Sight 同样）。
+10 个 NPC 子类全部继承（与 Sight 同样）。
 
 ### 5. L_prison Level BP
 

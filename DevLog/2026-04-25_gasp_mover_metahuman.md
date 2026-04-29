@@ -132,7 +132,7 @@ PIE + 控制台输入 `DDCvar.VisualOverride 6` → WASD 身体跑动 ✓ → �
 
 ### 做对的事
 
-- **先 Monolith MCP 预检，再动手**。原计划以为要加 13 节点、改 Face AnimBP、加 ACEAudioCurveSource 组件，预检发现 8 处中 6 处已就位 —— 实际动手量压到最小
+- **先 Monolith MCP 预检，再动手**。原计划以为要加 13 节点、改 Face AnimBP、加 ACEAudioCurveSource 组件，预检发现多数关键项已就位，实际动手量压到最小
 - **`build_blueprint_from_spec` 一次性添节点 + 连线**。10 节点 + 12 连线一个事务完成，比 `add_node × 10 + connect_pins × 12` 的 22 轮往返快得多，且原子性
 - **保留旧 WAV 测试链**。DevLog 2026-04-24 提过这条死链（`Print Text → CreateAudio2FaceParameters → SetParametersFromStruct → AnimateCharacterFromWavFileAsync`）被解挂但节点保留；这次也不动，延续"新旧并存，一键切回"的模式
 - **双层 IsValid 保护**。把"VisualOverride 模式"和"直接场景 NPC 模式"的代码路径合一：同一个 BP 能作为 VisualOverride 跑 GASP，也能作为场景 NPC 静止站立（Ref Pose），互不冲突
@@ -151,13 +151,12 @@ PIE + 控制台输入 `DDCvar.VisualOverride 6` → WASD 身体跑动 ✓ → �
 - **`build_blueprint_from_spec` + 1 次 `connect_pins` 衔接既有节点**。一次性加新节点并连完内部线；只有"新节点 ↔ 既有节点"的衔接需要单独 `connect_pins`
 - **`get_execution_flow` 验证链路**。编译通过不等于连线正确；用 `get_execution_flow` 追一次 `ReceiveBeginPlay`，看分支走向能不能对上 Lucy 3.7 的预期
 
-### 后续改进（未做）
+### 当前 10 NPC 结论
 
-- **10 个场景 MetaHuman NPC 同时触发 T 键**：`L_prison` 里放了 `BP_MH_Character_1_C_1 ~ BP_MH_Character_10_C_1` 10 个实例，每个都在 BeginPlay 调 `EnableInput`。按 T 时 10 个都会触发 TriggerMinimaxSpeech，同时说话。本次未处理；要么按 PlayerController 路由（让只有 VisualOverride 里的那个触发），要么给每个 NPC 单独的 InputContext
-- **其他 9 个 MH（BP_MH_Character_2~10）还没接 GASP**：本次只做 MH_Character_1。模式已验证，下次按 8-2-7 步骤能批量复制到其他 BP
-- **场景 NPC 的 Body 表现**：场景里直接放的 `BP_MH_Character_1_C_1` 实例，Body.AnimClass = `ABP_GenericRetarget_C` 但没有父 UEFN Mesh → Ref Pose（A-Pose 站立）。用户确认"可接受"，但如果要场景 NPC 也有动画，要给它们自己的 AI Controller 或 ABP
-- **WorldSettings.GameModeOverride 直接设置**：当前走的是 `DefaultEngine.ini` 全局 GameMode。如果以后加第二个关卡且不想用 GM_Sandbox，要么在那个关卡的 WorldSettings 里覆盖，要么回头改 INI 方案为按关卡 map 的 `GameModeMap` 形式
-- **`DefaultEngine.ini` 需重启才生效**：后续实施手册应明确标注"改完重启编辑器"
+- `L_prison` 中的 10 个 NPC 都是 `BP_NPC_MH_Character_1..10` 包装 Pawn 实例，视觉身体由 `AC_VisualOverrideManager.SetFixedAndApply(FixedVisualOverrideClass)` 生成；关卡不直接放置 `BP_MH_Character_*` 视觉占位。
+- `BP_MH_Character_2..10` 已具备通用 NPC 视觉基线：Body GASP 3 属性、Face AnimClass、`ACEAudioCurveSource`、BeginPlay tick prerequisite 链。它们不复制 `BP_MH_Character_1` 的 T 键输入链、PrewarmA2F 链或 6 个 A2F 调试变量。
+- `BP_MH_Character_1` 是个体调试特例，保留 T 键链与 A2F 调试变量；生产路径通过代码调用 `TriggerMinimaxSpeech` 驱动任意 NPC 的 VisualOverride ChildActor。
+- `DefaultEngine.ini` 的 GameMode 设置仍只在编辑器启动时读取。涉及 GameMode / map prefix 配置时，改完需要重启编辑器确认。
 
 ### 验证日志样本（成功一次的执行流）
 

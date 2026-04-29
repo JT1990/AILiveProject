@@ -29,7 +29,7 @@
 ## 寻路验证（离线）
 
 - NavMesh `is_built=true`
-- 8 个目标点 (9200~10600, 7500, Z=321) 全部 `project_point_to_navigation` 成功，投影到 Z≈240（地板级）
+- 10 个目标点全部 `project_point_to_navigation` 成功，投影到地板级 NavMesh
 - 抽样 find_path：`success=true, is_partial=false`，路径约 3000~3200 uu
 
 ## MCP 实现要点
@@ -38,7 +38,7 @@
 
 `GetActorOfClass.ActorClass` 是 `TSubclassOf<AActor>` pin。`set_pin_default` 接受任何格式（全路径、`Class'...'`、短类名）但编译时全部报 `String NewDefaultValue '...' specified on class pin 'ActorClass'`，UE 无法从字符串解析 BP 类引用。
 
-**当前方案**：Level BP 变量（`NPC1Class..NPC8Class: TSubclassOf<Actor>`，default_value 设全路径，存在变量 CDO 里）→ `VariableGet` 节点连接到 `ActorClass` pin。pin 有连接时编译器忽略 pin default，变量的 CDO 值在运行时正确解析为类引用。
+**当前方案**：Level BP 变量（`NPC1Class..NPC10Class: TSubclassOf<Actor>`，default_value 设全路径，存在变量 CDO 里）→ `VariableGet` 节点连接到 `ActorClass` pin。pin 有连接时编译器忽略 pin default，变量的 CDO 值在运行时正确解析为类引用。
 
 ### Array wildcard 连接限制
 
@@ -68,7 +68,7 @@ BP 生成类的短名必须带 `_C` 后缀（如 `SandboxCharacter_Mover_C`）�
 
 ## 运行时链路
 
-**CastFailed 旁路**：`cast_i.CastFailed → gac_{i+1}.execute`（i=1..7）。任意 NPC 找不到时不会中断整条链，后续 NPC 仍会继续发起移动。
+**CastFailed 旁路**：`cast_i.CastFailed → gac_{i+1}.execute`（i=1..9）。任意 NPC 找不到时不会中断整条链，后续 NPC 仍会继续发起移动。
 
 ## 已知限制
 

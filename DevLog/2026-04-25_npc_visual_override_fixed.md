@@ -133,7 +133,7 @@ NPC 的 SandboxCharacter_Mover.BeginPlay:
 
 ### 为什么 GM_Sandbox 不是 GameMode 也能用
 
-上一轮我担心 `FindAndApplyVisualOverride` Cast GM_Sandbox 失败会 early return 导致整个流程挂掉。实测没事：
+`FindAndApplyVisualOverride` 在默认 GameMode 下 Cast GM_Sandbox 失败时会 early return，但固定 VisualOverride 路径不受影响：
 
 - 默认 GameMode 下 Cast 失败，确实 early return —— 但那是在 true 分支跳过后（FixedVisualOverride 有效时根本不走 Cast）
 - 所以子类 BeginPlay 调 SetFixedAndApply 内部的 FindAndApplyVisualOverride 会走 true 分支，不会碰到 Cast 失败的问题
@@ -165,12 +165,12 @@ NPC 的 SandboxCharacter_Mover.BeginPlay:
 - **"公共 setter + 子类 BeginPlay 调用"模式**。Component 的属性 per-instance 默认值 MCP 搞不定时，改写时机到运行时 —— 加一个公开函数 `SetXAndApply(X)`，子类 BP BeginPlay 调一次。这个模式对"配置通过数据驱动"场景通用
 - **"继承组件自动变量"作为类型安全引用**。MCP 操作继承组件时不走 `GetComponentByClass + Cast`，直接 `VariableGet AC_VisualOverrideManager` —— 返回值类型已是子类，节省 2 个节点
 
-### 后续改进（未做）
+### 当前扩展结论
 
-- **复用到 BP_MH_Character_2~10**：`BP_NPC_MH_Character_N`（N=2..10）可以复制 `BP_NPC_MH_Character_1`，把 `FixedVisualOverrideClass` 改成对应的 `BP_MH_Character_N_C`。Level 里再把 `BP_MH_Character_N_C_1` 原地替换成 `BP_NPC_MH_Character_N`。预估每个 <5 分钟
-- **解决 T 键多 NPC 同时响应**：现在所有 NPC 的 ChildActor 都通过 `EnableInput(PlayerController)` 绑了 T 键，按 T 会让 10 个都说话。生产场景应改为：NPC ChildActor 的 BeginPlay 里**不**调 EnableInput（把 T 键监听改成代码驱动触发），或者给每个 NPC 一个独立的 ID/InputComponent priority
-- **`GM_Sandbox.VisualOverrides[6]`**：上一轮加的 `BP_MH_Character_1_C` 保留在数组里。现在玩家走 DefaultPawn 路径不会消费它，可以清掉但无害
-- **NPC AI Controller**：当前 SandboxCharacter_Mover 的 `AutoPossessAI` 未改，默认可能 AIController 自动占用但没 BehaviorTree，所以 NPC 站着不动。代码驱动 Mover 时要注意和 AIController 的输入冲突
+- `BP_NPC_MH_Character_1..10` 都走固定 VisualOverride 路径：包装 Pawn 持有 `FixedVisualOverrideClass`，BeginPlay 调 `AC_VisualOverrideManager.SetFixedAndApply`，由 `VisualOverride` ChildActorComponent 生成对应 `BP_MH_Character_N_C`。
+- `BP_MH_Character_2..10` 是通用 NPC 视觉基线，不复制 `BP_MH_Character_1` 的 T 键输入链和 A2F 调试变量；`BP_MH_Character_1` 只作为个体调试特例保留这些节点。
+- `GM_Sandbox.VisualOverrides` 不驱动场景 NPC。NPC 固定视觉完全由 `FixedVisualOverrideClass` 决定，玩家 Pawn 路径不受 NPC 阵容影响。
+- 10 个 NPC 包装 Pawn 都继承 `AutoPossessAI=PlacedInWorld` 与 `AIControllerClass=AIC_NPC_SmartObject_C`，代码驱动移动、感知和 SmartObject 行为均从包装 Pawn 侧进入。
 
 ### 验证点
 
