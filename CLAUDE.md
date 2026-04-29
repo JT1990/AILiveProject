@@ -22,7 +22,7 @@ UBT 构建 Editor target：
 
 ### UE 编辑器进程管理
 
-需要重启编辑器时自己用 PowerShell 操作，不让用户手点；强杀前先确认改动已保存，启动后等 `monolith_status` 返回 online 再继续（加载约 30–90 s）。
+需要重启编辑器时自己用 PowerShell 操作，不让用户手点；强杀前先确认改动已保存，启动后等 `monolith_status` 返回 online 再继续（加载约 60–90 s）。
 
 ```
 # 关
