@@ -86,3 +86,8 @@ FVT/
 
 # Claude Code local session/state files
 .claude/scheduled_tasks.lock
+
+*.mp4
+*.avi
+*.mov
+*.mkv
