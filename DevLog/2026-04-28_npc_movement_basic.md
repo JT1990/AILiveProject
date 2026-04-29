@@ -4,7 +4,7 @@
 
 ## 目标
 
-让 8 个 MetaHuman NPC（`BP_NPC_MH_Character_1..8`）在 PIE 中按 M 键后移动到指定目标点。
+让 10 个 MetaHuman NPC（`BP_NPC_MH_Character_1..10`）在 PIE 中按 M 键后移动到指定目标点。
 
 ## 技术选型
 
@@ -22,7 +22,7 @@
 
 ### L_prison Level BP 触发图
 
-`EventTick → WasInputKeyJustPressed(M) → Branch → GetActorOfClass(NPCi_Class) → Cast → MoveToLocation(target_i, 80, false)` × 8 串联
+`EventTick → WasInputKeyJustPressed(M) → Branch → GetActorOfClass(NPCi_Class) → Cast → MoveToLocation(target_i, 80, false)` × 10 串联
 
 触发方式：PIE 中焦点在 viewport，按 M 键。
 
@@ -61,7 +61,7 @@ BP 生成类的短名必须带 `_C` 后缀（如 `SandboxCharacter_Mover_C`）�
 - [x] WasInputKeyJustPressed FKey 字符串 "M" 正确传入，触发链路正常
 - [x] AIController 自动 possess 成功（AutoPossessAI=PlacedInWorld 在 PlacedInWorld 时生效）
 - [x] NavMover + CharacterMover 驱动移动：**GASP Mover 2.0 与标准 AIController.MoveToLocation 原生兼容**，无需额外配置
-- [x] 8 NPC 同时走到各自目标位置，路径正确
+- [x] 10 NPC 同时走到各自目标位置，路径正确
 - [ ] CrowdManager 互相避让未测（首版不做，路径可能有轻微重叠，待需要时加 set_crowd_manager_config）
 
 触发键：**M 键**。原占用于 PC_Sandbox.IA_NextVisualOverride 皮肤切换，已断开该连线（移除皮肤切换功能），M 键现专用于 NPC 移动测试。

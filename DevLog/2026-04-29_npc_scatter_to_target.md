@@ -1,10 +1,10 @@
-# 8 NPC 同时到达目标 + EQS 自动散点
+# 10 NPC 同时到达目标 + EQS 自动散点
 
 日期：2026-04-29
 
 ## 目标
 
-按 **L** 键 → 关卡内 8 个 `BP_NPC_MH_Character_*_C` 各自走到 `BP_NavTarget` 周围 NavMesh 上**不同的散点位置**（不是先聚到目标再分散），到达后看向 `BP_NavLookTarget`。每个 NPC 的最终落点在按 L 那一刻就分别确定，路径从一开始分叉。
+按 **L** 键 → 关卡内 10 个 `BP_NPC_MH_Character_*_C` 各自走到 `BP_NavTarget` 周围 NavMesh 上**不同的散点位置**（不是先聚到目标再分散），到达后看向 `BP_NavLookTarget`。每个 NPC 的最终落点在按 L 那一刻就分别确定，路径从一开始分叉。
 
 LLM Mind 接管前的最小执行基线：验证多 agent 散点协调能跑通整条 EQS → 异步派发 → 单 NPC MoveAndLookAt-by-Location 链路。
 
@@ -62,7 +62,7 @@ static void ScatterNPCsAroundTarget(
 3. `Request.Execute(EEnvQueryRunMode::AllMatching, FQueryFinishedSignature::CreateLambda(...))` —— 异步触发。
 4. `WeakNPCs[]` + `WeakLookTarget` 用 `TWeakObjectPtr` 装进 lambda capture 防 dangling。
 5. 回调里 `Result->GetAllAsLocations(Locations)` 取所有点。
-6. **贪心最近匹配**：`min(NumNPCs, NumPoints)` 轮里，每轮扫描所有未分配 NPC × 未占用 point，挑全局 `DistSquared` 最小的一对锁定。8 NPC × 37 点 × 8 轮 ≈ 2400 比较，零开销。每个 NPC 拿当前最近的可选点，避免"NPC 在东、被分到西边的点"。
+6. **贪心最近匹配**：`min(NumNPCs, NumPoints)` 轮里，每轮扫描所有未分配 NPC × 未占用 point，挑全局 `DistSquared` 最小的一对锁定。10 NPC × 37 点 × 10 轮 ≈ 3700 比较，零开销。每个 NPC 拿当前最近的可选点，避免"NPC 在东、被分到西边的点"。
 7. NPC 数大于点数（罕见）：超出部分降级为复用最后一个点（warning）。
 8. 通过 `NPC->FindFunction("MoveAndLookAtLocation") + ProcessEvent` 调 BP 函数派发，避免 C++ 直接依赖 BP 类。
 
@@ -180,8 +180,8 @@ struct FMoveAndLookAtLocationParams
 
 已通过：
 
-- 按 **M**（对照基线）：8 NPC 全部冲到 BP_NavTarget，到达后看 BP_NavLookTarget。未退化。
-- 按 **L**：8 NPC 各自走向不同 NavMesh 位置，路径从一开始分叉，没有 NPC 走最远点（贪心匹配生效）。Output Log 出现 `[Scatter] firing EQS ... for 8 NPCs (skipped 1 player-controlled)` + per-NPC dispatch 日志。NPC 与墙保持 ~80cm 距离（Overlap filter 生效）。
+- 按 **M**（对照基线）：10 NPC 全部冲到 BP_NavTarget，到达后看 BP_NavLookTarget。未退化。
+- 按 **L**：10 NPC 各自走向不同 NavMesh 位置，路径从一开始分叉，没有 NPC 走最远点（贪心匹配生效）。Output Log 出现 `[Scatter] firing EQS ... for 10 NPCs (skipped 1 player-controlled)` + per-NPC dispatch 日志。NPC 与墙保持 ~80cm 距离（Overlap filter 生效）。
 - 按 **K**（坐下）/ **N** / **I** / **O**：既有按键链路未坏。
 - Output Log 无 `LogPathFollowing` / `LogAIController` Failed/Aborted。
 

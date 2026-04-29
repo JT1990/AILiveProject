@@ -167,8 +167,8 @@ NPC 的 SandboxCharacter_Mover.BeginPlay:
 
 ### 后续改进（未做）
 
-- **复用到 BP_MH_Character_2~8**：`BP_NPC_MH_Character_N`（N=2..8）可以复制 `BP_NPC_MH_Character_1`，把 `FixedVisualOverrideClass` 改成对应的 `BP_MH_Character_N_C`。Level 里再把 `BP_MH_Character_N_C_1` 原地替换成 `BP_NPC_MH_Character_N`。预估每个 <5 分钟
-- **解决 T 键多 NPC 同时响应**：现在所有 NPC 的 ChildActor 都通过 `EnableInput(PlayerController)` 绑了 T 键，按 T 会让 8 个都说话。生产场景应改为：NPC ChildActor 的 BeginPlay 里**不**调 EnableInput（把 T 键监听改成代码驱动触发），或者给每个 NPC 一个独立的 ID/InputComponent priority
+- **复用到 BP_MH_Character_2~10**：`BP_NPC_MH_Character_N`（N=2..10）可以复制 `BP_NPC_MH_Character_1`，把 `FixedVisualOverrideClass` 改成对应的 `BP_MH_Character_N_C`。Level 里再把 `BP_MH_Character_N_C_1` 原地替换成 `BP_NPC_MH_Character_N`。预估每个 <5 分钟
+- **解决 T 键多 NPC 同时响应**：现在所有 NPC 的 ChildActor 都通过 `EnableInput(PlayerController)` 绑了 T 键，按 T 会让 10 个都说话。生产场景应改为：NPC ChildActor 的 BeginPlay 里**不**调 EnableInput（把 T 键监听改成代码驱动触发），或者给每个 NPC 一个独立的 ID/InputComponent priority
 - **`GM_Sandbox.VisualOverrides[6]`**：上一轮加的 `BP_MH_Character_1_C` 保留在数组里。现在玩家走 DefaultPawn 路径不会消费它，可以清掉但无害
 - **NPC AI Controller**：当前 SandboxCharacter_Mover 的 `AutoPossessAI` 未改，默认可能 AIController 自动占用但没 BehaviorTree，所以 NPC 站着不动。代码驱动 Mover 时要注意和 AIController 的输入冲突
 

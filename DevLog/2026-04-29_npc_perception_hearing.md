@@ -233,13 +233,13 @@ object pin 也有相同限制：试图 `set_pin_default node.self value="/Script
 
 本里程碑修复路径：`monolith_reindex` + `trigger_build` + `remove + add_node` 重建受影响节点（不再手动 `set_pin_default self`）。
 
-### 7. IAILiveAgent interface 在 8 个 NPC BP 上"丢失"了，需重新 implement_interface + save
+### 7. IAILiveAgent interface 在 10 个 NPC BP 上"丢失"了，需重新 implement_interface + save
 
 PIE 验证 hearing 时遇到怪现象：`runtime_get_perceived_actors(NPC1)` 返回 5 个 NPC（sight 完全 OK），但 `LogPerceptionToOutput` 输出 `count=0`。`runtime_check_perception(NPC1, NPC2)` 也显示 NPC2 已被 sight 感知。Logger 把 5 个全过滤掉了——`GatherSightPerception` 内部 `IsAgentActor(A)` 检查 `A->GetClass()->ImplementsInterface(UAILiveAgent::StaticClass())`。
 
-`get_interfaces` 检查 8 个 BP_NPC_MH_Character_*：`count: 0`——marker interface 没在 BP 子类上！前里程碑 DevLog 写的"实现 IAILiveAgent"实际可能从未持久化到子类 .uasset；或某次 UE 重启 / 父类 reparent 时丢了。
+`get_interfaces` 检查 10 个 BP_NPC_MH_Character_*：`count: 0`——marker interface 没在 BP 子类上！前里程碑 DevLog 写的"实现 IAILiveAgent"实际可能从未持久化到子类 .uasset；或某次 UE 重启 / 父类 reparent 时丢了。
 
-修法：8 个子类 BP 各调一次 `blueprint_query::implement_interface`（interface_class="AILiveAgent"），然后 compile + save。**关键约束：必须先 stop PIE 才能 save_asset**——PIE 在跑时 `save_asset` 直接报 `Failed to save asset`，但不会自动告诉你原因；compile 反而能 work（compile 是内存操作）。
+修法：10 个子类 BP 各调一次 `blueprint_query::implement_interface`（interface_class="AILiveAgent"），然后 compile + save。**关键约束：必须先 stop PIE 才能 save_asset**——PIE 在跑时 `save_asset` 直接报 `Failed to save asset`，但不会自动告诉你原因；compile 反而能 work（compile 是内存操作）。
 
 ### 8. PIE 多次启动累积 Level BP 实例，timer 持续刷屏
 

@@ -8,7 +8,7 @@
 
 - `USightMemoryComponent` 挂在 `/Game/Blueprints/AI/AIC_NPC_SmartObject` 上，绑定 `UAIPerceptionComponent::OnTargetPerceptionUpdated`，维护每个 NPC 自己的 `CurrentlyVisibleActors` 和 `LastSeenLocations`。
 - `AStoryScenarioDirector` 放在 `L_prison` 关卡里，PIE 中按 `O` 启动 NPC1/NPC2 餐厅相遇剧情。
-- `L_prison` Level BP 已回退到 `159f708192f6782bc532b9bff7b120aafb33c317` 的听觉验证基线，再只做最小清理：移除未使用的 `NPC3Class` 到 `NPC8Class` 变量。
+- `L_prison` Level BP 已回退到 `159f708192f6782bc532b9bff7b120aafb33c317` 的听觉验证基线，再只做最小清理：移除未使用的 `NPC3Class` 到 `NPC10Class` 变量。
 - 关卡蓝图不再包含旧的 `RunDialogueScene_*` / `Scene_*` 剧情节点，也不再包含 `Speak` 函数或 `SceneStory` 变量。
 - 移动仍调用现有 `SandboxCharacter_Mover.MoveAndLookAt`，不重写 GASP / Mover / VisualOverride / NPC 父类链路。
 - NPC1 的 `SightMemory.bDebugPrintScreen` 默认仍为 false；剧情开始时 Director 只临时打开 NPC1 controller 上的屏显，结束或失败后恢复。

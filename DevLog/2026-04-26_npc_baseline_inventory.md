@@ -2,16 +2,16 @@
 
 ## 目的
 
-记录当前 8 个场景 NPC 的 BP / 组件 / BeginPlay / T 键 / AIController / speech actor 基线。后续如果 DevLog 或手册与资产状态冲突，以资产状态为准并更新本文。
+记录当前 10 个场景 NPC 的 BP / 组件 / BeginPlay / T 键 / AIController / speech actor 基线。后续如果 DevLog 或手册与资产状态冲突，以资产状态为准并更新本文。
 
-## 8 个 NPC 壳 Pawn
+## 10 个 NPC 壳 Pawn
 
-`/Game/Blueprints/NPCs/BP_NPC_MH_Character_1..8`
+`/Game/Blueprints/NPCs/BP_NPC_MH_Character_1..10`
 
 类型链：
 
 ```
-BP_NPC_MH_Character_1..8
+BP_NPC_MH_Character_1..10
     -> SandboxCharacter_Mover
     -> APawn
 ```
@@ -44,6 +44,8 @@ BP_NPC_MH_Character_1..8
 | BP_NPC_MH_Character_6 | `/Game/MetaHumans/MH_Character_6/BP_MH_Character_6.BP_MH_Character_6_C` |
 | BP_NPC_MH_Character_7 | `/Game/MetaHumans/MH_Character_7/BP_MH_Character_7.BP_MH_Character_7_C` |
 | BP_NPC_MH_Character_8 | `/Game/MetaHumans/MH_Character_8/BP_MH_Character_8.BP_MH_Character_8_C` |
+| BP_NPC_MH_Character_9 | `/Game/MetaHumans/MH_Character_9/BP_MH_Character_9.BP_MH_Character_9_C` |
+| BP_NPC_MH_Character_10 | `/Game/MetaHumans/MH_Character_10/BP_MH_Character_10.BP_MH_Character_10_C` |
 
 ### BeginPlay（壳 Pawn）
 
@@ -63,9 +65,9 @@ Event BeginPlay -> Parent BeginPlay -> SetFixedAndApply(AC_VisualOverrideManager
 
 `AIC_NPC_SmartObject` 存在于 `Content/Blueprints/AI/`，但当前这些 NPC 没有引用它；这是 GASP 模板遗留，不属于当前 TTS/A2F 链路。
 
-## 8 个 visual child（speech actor）
+## 10 个 visual child（speech actor）
 
-`/Game/MetaHumans/MH_Character_1..8/BP_MH_Character_*`
+`/Game/MetaHumans/MH_Character_1..10/BP_MH_Character_*`
 
 抽样检查 `BP_MH_Character_1`，其余由同一 MetaHuman 模板生成，应保持同形。
 
@@ -95,7 +97,7 @@ MetaHuman (MetaHumanComponentUE)
 
 ### Face AnimBP
 
-Face 组件 `AnimClass` = `/Game/MetaHumans/Common/Face/Face_Archetype_Skeleton_AnimBP_C`，8 个 NPC 共用同一份。
+Face 组件 `AnimClass` = `/Game/MetaHumans/Common/Face/Face_Archetype_Skeleton_AnimBP_C`，10 个 NPC 共用同一份。
 
 结论：A2F 角色契约第 2 项达成，Face AnimBP 的 AnimGraph 含 `AnimGraphNode_ApplyACEAnimation`。`TriggerMinimaxSpeech` 喂入的 PCM 经 `ACEAudioCurveSource` -> `ApplyACEAnimation` -> Face mesh，链路完整。
 
@@ -126,8 +128,8 @@ EventGraph 里另有未接入 T 键执行链的 `AnimateCharacterFromWavFileAsyn
 
 ## 当前结论
 
-1. `BP_NPC_MH_Character_1..8` 是壳 Pawn，负责承载 GASP/Mover、AIController、VisualOverride。
-2. `BP_MH_Character_1..8` 是 visual child，负责可见 MetaHuman、ACEAudioCurveSource、Face AnimBP、T 键 TTS。
+1. `BP_NPC_MH_Character_1..10` 是壳 Pawn，负责承载 GASP/Mover、AIController、VisualOverride。
+2. `BP_MH_Character_1..10` 是 visual child，负责可见 MetaHuman、ACEAudioCurveSource、Face AnimBP、T 键 TTS。
 3. A2F 主链为 `GetMinimaxApiKeyFromProjectEnv -> TriggerMinimaxSpeech -> ACEAudioCurveSource -> ApplyACEAnimation`。
 4. `PrewarmA2F` 在 visual child BeginPlay 上调用，不在壳 Pawn 上调用。
 5. 壳 Pawn 的 BeginPlay 保持 `Super -> SetFixedAndApply`，不要删两层 `IsValid` 分支。

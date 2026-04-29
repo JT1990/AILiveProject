@@ -105,7 +105,7 @@ void UAILiveProjectScatterMover::ScatterNPCsAroundTarget(
 				const int32 NumPoints = Locations.Num();
 
 				// 贪心最近匹配：每轮在所有未分配 NPC × 未占用点里挑全局最短距离的
-				// 一对，分配掉。复杂度 O(N^2 * min(N,P))，N=8、P~37 完全可接受。
+				// 一对，分配掉。复杂度 O(N^2 * min(N,P))，N=10、P~37 完全可接受。
 				// 比 stride 采样合理：NPC 直接走最近的散点而不是被强制配到远处。
 				TArray<int32> AssignedIdx;
 				AssignedIdx.Init(-1, NumNPCs);

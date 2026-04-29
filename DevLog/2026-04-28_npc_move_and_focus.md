@@ -4,13 +4,13 @@
 
 ## 目标
 
-按 M 键 → 关卡内全部 `SandboxCharacter_Mover_C` 子类实例（含 8 个 MetaHuman NPC）各自走到 `BP_NavTarget` 实例位置 → 走路过程身体朝速度方向（自然行走）；到达后身体转向 `BP_NavLookTarget` 实例。LLM 决策层接入前的最小执行基线。
+按 M 键 → 关卡内全部 `SandboxCharacter_Mover_C` 子类实例（含 10 个 MetaHuman NPC）各自走到 `BP_NavTarget` 实例位置 → 走路过程身体朝速度方向（自然行走）；到达后身体转向 `BP_NavLookTarget` 实例。LLM 决策层接入前的最小执行基线。
 
 > **M 键是测试触发器**，不是产品入口。LLM 决策层接入后，此 Level BP 段直接删除，由 Mind 模块按 NPC 实例分别 dispatch `MoveAndLookAt`；功能本身（父类 `SandboxCharacter_Mover` 的函数 + 状态变量）零改动复用。
 
 ## 调试链路替换说明
 
-上一里程碑（`2026-04-28_npc_movement_basic.md`）的 M 键链路是 8 NPC 各自走到一个硬编码 vector 散点，本里程碑**替换**为统一目标 + `GetAllActorsOfClass + ForEachLoop` 一段循环驱动全部 NPC。原 `NPC1Class..NPC8Class` Level BP 变量保留但已不引用，留作历史参考，可后续清理。
+上一里程碑（`2026-04-28_npc_movement_basic.md`）的 M 键链路是 10 NPC 各自走到一个硬编码 vector 散点，本里程碑**替换**为统一目标 + `GetAllActorsOfClass + ForEachLoop` 一段循环驱动全部 NPC。原 `NPC1Class..NPC10Class` Level BP 变量保留但已不引用，留作历史参考，可后续清理。
 
 ## 关键技术决策（必读）
 
@@ -166,7 +166,7 @@ Nav 目标的 None-check 不在 Level BP 里加，统一由 `MoveAndLookAt` 内�
 
 PIE 实测（2026-04-28）：
 
-- [x] 按 M：关卡内全部 8 个 NPC 同时启动并走到 BP_NavTarget。`GetAllActorsOfClass + ForEachLoop` 一段循环驱动全员，无个体掉队。
+- [x] 按 M：关卡内全部 10 个 NPC 同时启动并走到 BP_NavTarget。`GetAllActorsOfClass + ForEachLoop` 一段循环驱动全员，无个体掉队。
 - [x] 走路过程身体朝速度方向（NavMover.MoveInput 通过 `Get_MoveInput` 写入 `FCharacterDefaultInputs.MoveInput`，Mover 在 OrientToMovement 模式下用速度方向作为 OrientationIntent）。
 - [x] 到达 BP_NavTarget 80uu 内：身体 yaw 主动转向 BP_NavLookTarget。`Get_OrientationIntent` 的 Select 切到 `LookDirection`，Mover 每帧按 RotationRate 平滑旋转。
 - [x] OutputLog 无 `LogAIController` / `LogPathFollowing` 异常。

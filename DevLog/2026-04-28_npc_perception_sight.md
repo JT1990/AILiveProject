@@ -4,7 +4,7 @@
 
 ## 目标
 
-NPC1 走进 L_prison 大厅时，**精确感知 5 个可见 NPC（NPC2–NPC6）**，**不感知套间内 2 个被墙体遮挡的 NPC（NPC7/NPC8）**。结果输出"身份/距离/方向/视线状态"，作为后续 LLM Mind 模块的视野输入数据契约的最小可行版本。
+NPC1 走进 L_prison 大厅时，**精确感知大厅内同向同排可见的其他 NPC**（具体集合由 sight radius=2000uu 与关卡几何决定：NPC1 在 row1 Y=5837，朝向 -Y；row1 同排 NPC2/NPC3/NPC4/NPC9 全在 sight radius 内，row2 Y=3586 距离 ≈2251uu 接近 sight 边缘视情形定），**不感知套间内被墙体遮挡的 NPC**。结果输出"身份/距离/方向/视线状态"，作为后续 LLM Mind 模块的视野输入数据契约的最小可行版本。
 
 ## 技术决策
 
@@ -69,7 +69,7 @@ ai_query::configure_sight_sense
 
 参数选择：
 
-- `radius=2000`：DevLog `2026-04-28_npc_movement_basic.md` 已知大厅路径长度 3000~3200uu，2000uu 够覆盖大厅 5 NPC 的一圈，又不会"穿透"覆盖到套间外更远位置（其实墙挡了也无所谓）。
+- `radius=2000`：DevLog `2026-04-28_npc_movement_basic.md` 已知大厅路径长度 3000~3200uu，2000uu 够覆盖大厅同排 NPC 的一圈，又不会"穿透"覆盖到套间外更远位置（其实墙挡了也无所谓）。
 - `peripheral_angle=90`：FOV 半角 90 → 全 FOV 180°，NPC1 进门朝向时把可见 5 NPC 都包进，避免"视野太窄漏看"。
 - `affiliation` 全 true：本里程碑不区分阵营。Team 系统接入后再收紧。
 
@@ -88,7 +88,7 @@ blueprint_query::set_cdo_property
   value=/Script/Engine.BlueprintGeneratedClass'/Game/Blueprints/AI/AIC_NPC_SmartObject.AIC_NPC_SmartObject_C'
 ```
 
-`add_stimuli_source_component` 必须挂被感知方（CLAUDE.md / unreal-ai skill 第 4 条）；挂在 AIController 上没用。所以这条加在 `SandboxCharacter_Mover`（pawn 父类），8 个 NPC 子类全部继承，无需各自配置。
+`add_stimuli_source_component` 必须挂被感知方（CLAUDE.md / unreal-ai skill 第 4 条）；挂在 AIController 上没用。所以这条加在 `SandboxCharacter_Mover`（pawn 父类），10 个 NPC 子类全部继承，无需各自配置。
 
 `AIControllerClass` 走 CDO 写，全路径 + `_C` 后缀（DevLog `2026-04-28_npc_move_and_focus.md` 第 7 节坑已记）。
 
@@ -150,11 +150,11 @@ LLM 决策层接入后：
 
 ### 2. 子类 BP CDO 不会自动跟随父类 CDO
 
-父类 `SandboxCharacter_Mover.AIControllerClass` 改成 `AIC_NPC_SmartObject_C` 后，子类 `BP_NPC_MH_Character_1..8` 的 CDO **仍然是 `/Script/AIModule.AIController`**（引擎默认）。
+父类 `SandboxCharacter_Mover.AIControllerClass` 改成 `AIC_NPC_SmartObject_C` 后，子类 `BP_NPC_MH_Character_1..10` 的 CDO **仍然是 `/Script/AIModule.AIController`**（引擎默认）。
 
 根因：UE 反射继承在子类 BP **首次保存时**会把当前所有 inherited property 的值序列化进子类 .uasset 自己的 CDO。之后父类改了，子类 CDO 是旧值，除非显式重新保存或 reset to default。
 
-修法：用 `set_cdo_property` 把 8 个子类 BP 的 `AIControllerClass` 全改一遍，再 compile + save。
+修法：用 `set_cdo_property` 把 10 个子类 BP 的 `AIControllerClass` 全改一遍，再 compile + save。
 
 诊断方式：`get_cdo_properties` 看子类 CDO，对比父类 CDO 是否一致。
 
@@ -164,7 +164,7 @@ LLM 决策层接入后：
 
 L_prison 是 OFPA / external-actor 关卡，每个 actor 实例存在 `__ExternalActors__/.../*.uasset`，实例 override 会保留在那里。
 
-修法（MCP 限制下走 fallback）：用户在 Editor outliner 选 8 个 NPC → Details 面板 AI Controller Class 字段右键 → "Reset to Default" → 保存关卡。
+修法（MCP 限制下走 fallback）：用户在 Editor outliner 选 10 个 NPC → Details 面板 AI Controller Class 字段右键 → "Reset to Default" → 保存关卡。
 
 **MCP `set_actor_properties` 6 字段限制**仅支持 mobility/simulate_physics/collision_preset/cast_shadow/tags/mass_kg，无法自动 reset Pawn 类的 AIControllerClass。
 
@@ -174,7 +174,7 @@ L_prison 是 OFPA / external-actor 关卡，每个 actor 实例存在 `__Externa
 
 PRD 不区分玩家与 AI（全是 AI 博弈），但开发期 PIE 中需要玩家 Pawn 当观察相机，玩家也是 `SandboxCharacter_Mover_C` 实例，继承父类的 `AIPerceptionStimuliSourceComponent`，因此会产生 Sight stimulus。
 
-修法：新增 `IAILiveAgent` marker interface，只让 8 个 `BP_NPC_MH_Character_*` 子类 BP 实现该接口。`GatherSightPerception` 在当前 Sight 感知结果上继续按 `UAILiveAgent` 过滤，只输出真正的 agent；玩家 Pawn 仍可被底层 AISystem 看到，但不会进入 LLM 输入数据。
+修法：新增 `IAILiveAgent` marker interface，只让 10 个 `BP_NPC_MH_Character_*` 子类 BP 实现该接口。`GatherSightPerception` 在当前 Sight 感知结果上继续按 `UAILiveAgent` 过滤，只输出真正的 agent；玩家 Pawn 仍可被底层 AISystem 看到，但不会进入 LLM 输入数据。
 
 ## 已知限制 / 后续
 

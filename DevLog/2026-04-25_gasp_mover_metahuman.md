@@ -153,8 +153,8 @@ PIE + 控制台输入 `DDCvar.VisualOverride 6` → WASD 身体跑动 ✓ → �
 
 ### 后续改进（未做）
 
-- **8 个场景 MetaHuman NPC 同时触发 T 键**：`L_prison` 里放了 `BP_MH_Character_1_C_1 ~ BP_MH_Character_8_C_1` 8 个实例，每个都在 BeginPlay 调 `EnableInput`。按 T 时 8 个都会触发 TriggerMinimaxSpeech，同时说话。本次未处理；要么按 PlayerController 路由（让只有 VisualOverride 里的那个触发），要么给每个 NPC 单独的 InputContext
-- **其他 7 个 MH（BP_MH_Character_2~8）还没接 GASP**：本次只做 MH_Character_1。模式已验证，下次按 8-2-7 步骤能批量复制到其他 BP
+- **10 个场景 MetaHuman NPC 同时触发 T 键**：`L_prison` 里放了 `BP_MH_Character_1_C_1 ~ BP_MH_Character_10_C_1` 10 个实例，每个都在 BeginPlay 调 `EnableInput`。按 T 时 10 个都会触发 TriggerMinimaxSpeech，同时说话。本次未处理；要么按 PlayerController 路由（让只有 VisualOverride 里的那个触发），要么给每个 NPC 单独的 InputContext
+- **其他 9 个 MH（BP_MH_Character_2~10）还没接 GASP**：本次只做 MH_Character_1。模式已验证，下次按 8-2-7 步骤能批量复制到其他 BP
 - **场景 NPC 的 Body 表现**：场景里直接放的 `BP_MH_Character_1_C_1` 实例，Body.AnimClass = `ABP_GenericRetarget_C` 但没有父 UEFN Mesh → Ref Pose（A-Pose 站立）。用户确认"可接受"，但如果要场景 NPC 也有动画，要给它们自己的 AI Controller 或 ABP
 - **WorldSettings.GameModeOverride 直接设置**：当前走的是 `DefaultEngine.ini` 全局 GameMode。如果以后加第二个关卡且不想用 GM_Sandbox，要么在那个关卡的 WorldSettings 里覆盖，要么回头改 INI 方案为按关卡 map 的 `GameModeMap` 形式
 - **`DefaultEngine.ini` 需重启才生效**：后续实施手册应明确标注"改完重启编辑器"
