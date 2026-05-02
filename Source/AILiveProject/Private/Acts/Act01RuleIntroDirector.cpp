@@ -194,7 +194,8 @@ void AAct01RuleIntroDirector::CacheInitialNPCTransforms()
 	UGameplayStatics::GetAllActorsOfClass(this, NPCMoverClass, Found);
 	for (AActor *Actor : Found)
 	{
-		if (IsValid(Actor) && Cast<APawn>(Actor))
+		APawn *Pawn = Cast<APawn>(Actor);
+		if (IsValid(Pawn) && !Pawn->IsPlayerControlled())
 		{
 			InitialNPCTransforms.Add(Actor, Actor->GetActorTransform());
 		}

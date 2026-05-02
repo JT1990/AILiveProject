@@ -1,8 +1,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "MinimaxACELibrary.generated.h"
+
+DECLARE_DELEGATE_OneParam(FOnMinimaxSpeechFinishedNative, bool /*bSuccess*/);
 
 UCLASS()
 class AILIVEPROJECT_API UMinimaxACELibrary : public UBlueprintFunctionLibrary
@@ -86,4 +89,21 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Minimax|ACE")
 	static FString GetMinimaxApiKeyFromProjectEnv();
+
+	/*
+	 * C++ only variant of TriggerMinimaxSpeechFromPawnWithNoise that fires OnFinished
+	 * delegate on the GameThread once the AnimateFromAudioSamples streaming dispatch
+	 * returns (i.e. effectively when the audio finished playing). bSuccess=false if
+	 * the HTTP TTS call failed or the audio target / pawn was destroyed before
+	 * dispatch.
+	 */
+	static bool TriggerMinimaxSpeechFromPawnNative(
+		UObject* WorldContextObject,
+		AActor* SpeakerPawn,
+		const FString& Text,
+		const FString& ApiKey,
+		const FString& VoiceId,
+		const FString& Endpoint,
+		FName A2FProviderName,
+		FOnMinimaxSpeechFinishedNative OnFinished);
 };

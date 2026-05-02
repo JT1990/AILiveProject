@@ -338,3 +338,136 @@ bool UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoise(
 		A2FProviderName);
 	return true;
 }
+
+bool UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnNative(
+	UObject* /*WorldContextObject*/,
+	AActor* SpeakerPawn,
+	const FString& Text,
+	const FString& ApiKey,
+	const FString& VoiceId,
+	const FString& Endpoint,
+	FName A2FProviderName,
+	FOnMinimaxSpeechFinishedNative OnFinished)
+{
+	auto FireFinished = [OnFinished](bool bSuccess)
+	{
+		if (!OnFinished.IsBound())
+		{
+			return;
+		}
+		AsyncTask(ENamedThreads::GameThread, [OnFinished, bSuccess]()
+		{
+			OnFinished.ExecuteIfBound(bSuccess);
+		});
+	};
+
+	if (!IsValid(SpeakerPawn))
+	{
+		UE_LOG(LogMinimaxACE, Warning, TEXT("TriggerMinimaxSpeechFromPawnNative: invalid pawn"));
+		FireFinished(false);
+		return false;
+	}
+	AActor* AudioTarget = GetVisualOverrideAudioTarget(SpeakerPawn);
+	if (!IsValid(AudioTarget))
+	{
+		UE_LOG(LogMinimaxACE, Warning,
+			TEXT("TriggerMinimaxSpeechFromPawnNative: no VisualOverride child actor for %s"),
+			*GetNameSafe(SpeakerPawn));
+		FireFinished(false);
+		return false;
+	}
+	if (Text.IsEmpty() || ApiKey.IsEmpty())
+	{
+		UE_LOG(LogMinimaxACE, Warning, TEXT("TriggerMinimaxSpeechFromPawnNative: empty Text or ApiKey"));
+		FireFinished(false);
+		return false;
+	}
+
+	UACEAudioCurveSourceComponent* Consumer = GetOrAddCurveSource(AudioTarget);
+	if (!Consumer)
+	{
+		UE_LOG(LogMinimaxACE, Warning,
+			TEXT("TriggerMinimaxSpeechFromPawnNative: failed to get/add UACEAudioCurveSourceComponent"));
+		FireFinished(false);
+		return false;
+	}
+
+	TWeakObjectPtr<UACEAudioCurveSourceComponent> WeakConsumer(Consumer);
+	TWeakObjectPtr<AActor> WeakNoiseInstigator(SpeakerPawn);
+
+	MinimaxSpeech::FRequest Req;
+	Req.ApiKey = ApiKey;
+	Req.Text = Text;
+	Req.VoiceId = VoiceId;
+	Req.Endpoint = Endpoint;
+	Req.SampleRate = 16000;
+
+	Async(EAsyncExecution::ThreadPool,
+		[Req = MoveTemp(Req), WeakConsumer, WeakNoiseInstigator, A2FProviderName, OnFinished]()
+	{
+		auto FireFinishedWorker = [OnFinished](bool bSuccess)
+		{
+			if (!OnFinished.IsBound())
+			{
+				return;
+			}
+			AsyncTask(ENamedThreads::GameThread, [OnFinished, bSuccess]()
+			{
+				OnFinished.ExecuteIfBound(bSuccess);
+			});
+		};
+
+		const MinimaxSpeech::FResult Result = MinimaxSpeech::RequestBlocking(Req);
+		if (!Result.bSuccess)
+		{
+			UE_LOG(LogMinimaxACE, Error, TEXT("[Native] MiniMax TTS failed: %s"), *Result.ErrorMessage);
+			FireFinishedWorker(false);
+			return;
+		}
+
+		UACEAudioCurveSourceComponent* Live = WeakConsumer.Get();
+		if (!Live)
+		{
+			UE_LOG(LogMinimaxACE, Warning, TEXT("[Native] Consumer destroyed before audio delivered"));
+			FireFinishedWorker(false);
+			return;
+		}
+
+		UE_LOG(LogMinimaxACE, Log,
+			TEXT("[Native] dispatching %d samples @ %d Hz (duration %.2fs)"),
+			Result.Samples.Num(), Result.SampleRate, Result.DurationSec);
+
+		AsyncTask(ENamedThreads::GameThread, [WeakNoiseInstigator]()
+		{
+			APawn* Pawn = Cast<APawn>(WeakNoiseInstigator.Get());
+			if (!Pawn)
+			{
+				return;
+			}
+			UAISense_Hearing::ReportNoiseEvent(
+				Pawn,
+				Pawn->GetActorLocation(),
+				/*Loudness=*/ 1.f,
+				/*Instigator=*/ Pawn,
+				/*MaxRange=*/ 0.f,
+				/*Tag=*/ NAME_None);
+		});
+
+		const bool bOk = FACERuntimeModule::Get().AnimateFromAudioSamples(
+			Live,
+			TArrayView<const int16>(Result.Samples.GetData(), Result.Samples.Num()),
+			/*NumChannels*/ 1,
+			Result.SampleRate,
+			/*bEndOfSamples*/ true,
+			TOptional<FAudio2FaceEmotion>{},
+			/*Params*/ nullptr,
+			A2FProviderName);
+
+		UE_LOG(LogMinimaxACE, Log, TEXT("[Native] AnimateFromAudioSamples returned %s"),
+			bOk ? TEXT("true") : TEXT("false"));
+
+		FireFinishedWorker(bOk);
+	});
+
+	return true;
+}
