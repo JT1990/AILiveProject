@@ -21,6 +21,8 @@ public class AILiveProject : ModuleRules
 			"NavigationSystem",
 			"SmartObjectsModule",
 			"GameplayTags",
+			"MediaAssets",
+			"MediaPlate",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
