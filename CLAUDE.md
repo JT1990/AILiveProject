@@ -4,6 +4,11 @@ The AI Live 是一个多智能体社会博弈系统。将多个来自不同模�
 
 **AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`，当前只保留 HTTP + ACE C++ API 的薄 glue 层。
 
+## AI 的身份定义
+
+**AI 就是 AI**：所有 NPC prompt / DataAsset / 任务卡示例 严禁人类职业、教育、地域、年龄、姓名格式、家乡 等背景叙事；只赋予外观符号（名字 / 昵称 / 性别 / 声线 / 类人虚拟形象）。
+**Delete 边界**：MVP 内仅作为 prompt stake + Memory Service ，本局淘汰 ≠ 永久 Delete，agent 跨游戏延续。测试 prompt 不要用"介绍你自己"（触发 PRD 失败模式 3 元意识反应）。
+
 ## 关键规则 (Critical rules)
 
 - DevLog 里的大多数步骤在本仓库里**已经就位**，机械地照搬会造成重复组件、断裂图。
@@ -80,16 +85,6 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 ### 关卡
 
 `Content/MyAssets/Levels/L_prison.umap`：通过 `DefaultEngine.ini` 中 `+GameModeMapPrefixes` 映射到 `GM_Sandbox`，玩家 Pawn = `SandboxCharacter_Mover_C`，PlayerController = `PC_Sandbox_C`。场景中有 10 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_10_C`，全部由 `AIController`（`AutoPossessAI=PlacedInWorld`）控制，挂有 `NavMoverComponent`（GASP Mover 2.0 AI 寻路接口）。
-
-## 参考 (References)
-
-- `@DevLog/2026-04-24_minimax_speech_a2f_metahuman.md` —— 首次接入 TTS + A2F，记录 hex 解码坑、provider 名坑、PIE input focus 问题。
-- `@DevLog/2026-04-25_gasp_mover_metahuman.md` —— GASP Mover 2.0 应用到 MetaHuman 身体。
-- `@DevLog/2026-04-25_npc_visual_override_fixed.md` —— NPC 固定 override 模式 + DefaultPawn 飞行摄像头。
-- `@DevLog/2026-04-26_npc_baseline_inventory.md` —— NPC / A2F / VisualOverride 基线盘点，若与实际资产冲突，以资产状态为准并更新 DevLog。
-- `@DevLog/2026-04-28_npc_movement_basic.md` —— NPC 移动基础能力（已 PIE 验证）：GASP Mover 2.0 + AIController.MoveToLocation，Level BP M 键触发，MCP class pin 绕过方案。
-
-每个里程碑新增一份 `DevLog/YYYY-MM-DD_<topic>.md`。
 
 ## 约定
 
