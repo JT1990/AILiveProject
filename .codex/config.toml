@@ -1,0 +1,2 @@
+[mcp_servers.monolith]
+command = "Plugins/Monolith/Binaries/monolith_proxy.exe"
