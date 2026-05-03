@@ -51,16 +51,14 @@
 
 ## 协作者审查吸收
 
-**第 1 轮 7 条 + 第 2 轮 3 条全部接受**（详见对应 plan 文件）。重点：
+**第 1 轮 7 条 + 第 2 轮 3 条 + 第 3 轮 3 条全部接受**（详见对应 plan 文件）。重点：
 
-- Provider 改 Qwen3（覆盖最初 GLM）
-- registry upsert 改幂等 + 移到 EventStoreSubsystem
-- 缺段/坏 JSON 走 raw text 预检
-- prompt path 返回相对字面量
-- v1.txt 不允许 `_parse_error` 备用 schema
-- SQLitePreparedStatement::Execute 是 bool 用法
-- `bRetriedWithoutResponseFormat=true` 视为失败
-- 缺 env 时不写 `<missing>` 占位
+- 第 1 轮：Provider 改 Qwen3 / registry upsert 改幂等 + 移到 EventStoreSubsystem / 缺段坏 JSON 走 raw text 预检 / prompt path 返回相对字面量 / v1.txt 不允许 `_parse_error` 备用 schema
+- 第 2 轮：SQLitePreparedStatement::Execute 是 bool 用法 / `bRetriedWithoutResponseFormat=true` 视为失败 / 缺 env 时不写 `<missing>` 占位
+- 第 3 轮（commit `bd30973` + Case E 主连接修订）：
+  - **输出 schema 类型校验**：`scratchpad` / `note_to_self` 必须 string（TryGetStringField 返回值不再忽略）；`intended.text` 必须 string；`bid.urgency` 必须 number。绕过 bid 协议必填字段的旧路径已关闭，`{"scratchpad":{},"intended":{"text":123},"bid":{},"note_to_self":[]}` 这类坏 schema 会在 Stage 3 失败而非被吞掉。
+  - **Stage 1 加 `<BID>` JSON 校验**：避免 `<BID>not json</BID>` 进 Parser LLM 后被 prompt 允许的空 `{}` 输出蒙混过关。错误短语 `"bid payload not valid JSON"`。
+  - **Case E 走子系统主连接**：暴露 `QueryMetaSchemaRegistry` 接口；最初 ReadOnly→ReadWrite 一行 patch 实测仍失败（详见下方 §"Case E 实测路径"）。
 
 ## 验收实证
 
@@ -117,7 +115,7 @@ LogAILiveMemory: [ParserSelfCheck:A_RealLLMSmoke] verdict=PASS intended_is_objec
 | 3 | `<INTENDED>` 非合法 JSON → reject + "intended payload not valid JSON" | C_InvalidIntendedJson（`ParseFourChannels` 整路径） | ✅ PASS — `FailedStage=raw_prevalidate / ErrorReason=intended payload not valid JSON` |
 | 4 | schema_meta SQL 三行精确 | 外部 sqlite3 CLI 直查 | ✅ PASS（详见下方 SQL 输出） |
 | 5 | `GetCurrentParserVersion()=='1'` + `GetCurrentParserPromptPath()` 展开等于实际文件 | D_ApiValues | ✅ PASS — 5/5 ok flags（ver_ok / reg_ok / rel_ok / model_ok / file_ok）；prompt 文件 3092 字节可读 |
-| 6 | runtime 拼 `registry + v + version + .txt` == `GetCurrentParserPromptPath()` | 外部 sqlite3 + D_ApiValues 联合验证 | ✅ PASS — `Content/Prompts/Parser/` + `v` + `1` + `.txt` = `Content/Prompts/Parser/v1.txt` = API 返回值 |
+| 6 | runtime 拼 `registry + v + version + .txt` == `GetCurrentParserPromptPath()` | E_RegistryConsistency（走子系统主连接，第 3 轮修订后）| ✅ PASS — `kvs=4 reconstructed='Content/Prompts/Parser/v1.txt' api='Content/Prompts/Parser/v1.txt'` |
 
 ### 验收 4：sqlite3 外部 CLI
 
@@ -134,21 +132,21 @@ schema_version|1
 
 3 行 parser_* 精确命中 + schema_version=1（T2 baseline 不变）。
 
-### in-process Case E 失败的解释
+### Case E 实测路径（已修复）
 
-`AILive.Test.ParserSelfCheck` 的 E_RegistryConsistency 用例失败：
+第 3 轮协作者审查指出 in-process E_RegistryConsistency 固定报 Error 误导验收。最初尝试 ReadOnly→ReadWrite 改一行（commit `bd30973`）实测仍回 SQLITE_IOERR——UE 5.7 SQLiteCore + WAL 同进程二次连接（**ReadOnly / ReadWrite 都不行**）拿不到 -shm 共享映射。
 
+**最终方案**：暴露 `UAILiveEventStoreSubsystem::QueryMetaSchemaRegistry(TMap<FString,FString>&)`，走子系统**主连接**读 schema_meta。SelfCheck 通过 `GetEventStoreForConsole()`（用 `GEngine->GetWorldContexts()` 找 PIE/Game world → GameInstance → Subsystem）拿子系统调用。
+
+实测输出（`parser_smoke_003`）：
 ```
-LogSQLiteDatabase: Failed to open database '.../_meta.db': disk I/O error
-LogAILiveMemory: [ParserSelfCheck:E_RegistryConsistency] verdict=FAIL
+LogAILiveMemory: [ParserSelfCheck:E_RegistryConsistency] kvs=4 reg='Content/Prompts/Parser/' ver='1' model='qwen3:qwen3.6-plus' reconstructed='Content/Prompts/Parser/v1.txt' api='Content/Prompts/Parser/v1.txt'
+LogAILiveMemory: [ParserSelfCheck:E_RegistryConsistency] verdict=PASS
 ```
 
-同症状 `AILive.Test.SchemaSelfCheck`（继承自 T2，未改动）也失败。
+`kvs=4` = schema_meta 当前 4 行（parser_prompt_registry_path / parser_version / parser_model / schema_version）。reconstructed == api == `Content/Prompts/Parser/v1.txt`，路径一致性闭环。
 
-**根因**：UE 5.7 SQLiteCore + WAL 模式下，主连接（writer）已打开且写过 -wal 之后，同进程内开第二个 `ESQLiteDatabaseOpenMode::ReadOnly` 连接获取 -shm 共享映射失败，回 SQLITE_IOERR。这是 plumbing 限制（T2 DevLog "副推" 段也提到二次执行未机械验证）。**不是契约违反**——schema_meta 数据正确（外部 CLI 已确认），路径拼接逻辑正确（D_ApiValues + 外部 CLI 的拼接结果一致）。
-
-**短期处置**：以外部 sqlite3 CLI 验证为权威。
-**长期 fix**（T9 范围）：要么改 SchemaSelfCheck/ParserSelfCheck 用 `ESQLiteDatabaseOpenMode::ReadWrite` 开第二连接（WAL 同进程多 RW 应可），要么暴露 `UAILiveEventStoreSubsystem::QueryMetaRegistry` 接口直接走主连接读。本步**不**改（避免任务卡范围蔓延）。
+**T2 SchemaSelfCheck 同症状**（继承自 T2 未改动）：仍打 ReadOnly 二次连接，依然会回 disk I/O error。T2.5 不顺手清理（任务卡硬约束）；T9 重做 SchemaSelfCheck 时建议改走子系统主连接同形 pattern。
 
 ## 风险点 / 后续
 

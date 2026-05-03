@@ -1,14 +1,16 @@
 #include "LLM/AILiveParserClient.h"
 #include "LLM/AILiveParserVersion.h"
 
+#include "Memory/AILiveEventStoreSubsystem.h"
 #include "Memory/AILiveEventTypes.h"
 
 #include "Async/Async.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "SQLiteDatabase.h"
-#include "SQLitePreparedStatement.h"
 
 namespace
 {
@@ -147,50 +149,64 @@ namespace
 			bVerOk?1:0, bRegOk?1:0, bRelOk?1:0, bModelOk?1:0, bFileOk?1:0);
 	}
 
+	UAILiveEventStoreSubsystem* GetEventStoreForConsole()
+	{
+		if (!GEngine)
+		{
+			return nullptr;
+		}
+		for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+		{
+			if ((Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game) && Ctx.World())
+			{
+				if (UGameInstance* GI = Ctx.World()->GetGameInstance())
+				{
+					return GI->GetSubsystem<UAILiveEventStoreSubsystem>();
+				}
+			}
+		}
+		if (GWorld)
+		{
+			if (UGameInstance* GI = GWorld->GetGameInstance())
+			{
+				return GI->GetSubsystem<UAILiveEventStoreSubsystem>();
+			}
+		}
+		return nullptr;
+	}
+
 	void RunCaseE_RegistryConsistency()
 	{
-		const FString MetaDbPath = FPaths::ProjectSavedDir() / TEXT("Games") / TEXT("_meta.db");
-		// 注意：用 ReadWrite 而非 ReadOnly 开第二连接 —— UE 5.7 SQLiteCore + WAL
-		// 同进程内若主连接已创建 -shm 共享映射，第二个 ReadOnly 连接会拿不到 -shm
-		// 共享、回 SQLITE_IOERR；ReadWrite 模式带 SQLITE_OPEN_READWRITE flag 可以
-		// attach 已存在的 -shm。本步只读 schema_meta，不写任何东西。
-		FSQLiteDatabase Reader;
-		if (!Reader.Open(*MetaDbPath, ESQLiteDatabaseOpenMode::ReadWrite))
+		// 走子系统主连接读 schema_meta —— UE 5.7 SQLiteCore + WAL 同进程二次
+		// 连接（ReadOnly 实测、ReadWrite 实测）都拿不到 -shm 共享映射，回 SQLITE_IOERR。
+		UAILiveEventStoreSubsystem* Sys = GetEventStoreForConsole();
+		if (!Sys || !Sys->IsGameOpen())
 		{
-			UE_LOG(LogAILiveMemory, Error,
-				TEXT("[ParserSelfCheck:E_RegistryConsistency] cannot open _meta.db ReadWrite: %s (%s)"),
-				*MetaDbPath, *Reader.GetLastError());
 			UE_LOG(LogAILiveMemory, Display,
-				TEXT("[ParserSelfCheck:E_RegistryConsistency] verdict=FAIL (no _meta.db; run AILive.Test.BeginGame first)"));
+				TEXT("[ParserSelfCheck:E_RegistryConsistency] verdict=FAIL (no game open; run AILive.Test.BeginGame first)"));
 			return;
 		}
 
-		FString RegFromDb;
-		FString VerFromDb;
-		FString ModelFromDb;
+		TMap<FString, FString> KVs;
+		if (!Sys->QueryMetaSchemaRegistry(KVs))
+		{
+			UE_LOG(LogAILiveMemory, Display,
+				TEXT("[ParserSelfCheck:E_RegistryConsistency] verdict=FAIL (QueryMetaSchemaRegistry error)"));
+			return;
+		}
 
-		const TCHAR* Sql = TEXT("SELECT key, value FROM schema_meta WHERE key IN ('parser_prompt_registry_path','parser_version','parser_model');");
-		const int64 Rows = Reader.Execute(Sql,
-			[&RegFromDb, &VerFromDb, &ModelFromDb](const FSQLitePreparedStatement& Stmt)
-			{
-				FString K, V;
-				Stmt.GetColumnValueByIndex(0, K);
-				Stmt.GetColumnValueByIndex(1, V);
-				if (K == TEXT("parser_prompt_registry_path")) RegFromDb = V;
-				else if (K == TEXT("parser_version"))         VerFromDb = V;
-				else if (K == TEXT("parser_model"))           ModelFromDb = V;
-				return ESQLitePreparedStatementExecuteRowResult::Continue;
-			});
-		Reader.Close();
+		const FString RegFromDb   = KVs.FindRef(TEXT("parser_prompt_registry_path"));
+		const FString VerFromDb   = KVs.FindRef(TEXT("parser_version"));
+		const FString ModelFromDb = KVs.FindRef(TEXT("parser_model"));
 
 		const FString PromptPathFromApi = AILiveParser::GetCurrentParserPromptPath();
 		const FString Reconstructed     = RegFromDb + TEXT("v") + VerFromDb + TEXT(".txt");
 
 		UE_LOG(LogAILiveMemory, Display,
-			TEXT("[ParserSelfCheck:E_RegistryConsistency] rows=%lld reg='%s' ver='%s' model='%s' reconstructed='%s' api='%s'"),
-			Rows, *RegFromDb, *VerFromDb, *ModelFromDb, *Reconstructed, *PromptPathFromApi);
+			TEXT("[ParserSelfCheck:E_RegistryConsistency] kvs=%d reg='%s' ver='%s' model='%s' reconstructed='%s' api='%s'"),
+			KVs.Num(), *RegFromDb, *VerFromDb, *ModelFromDb, *Reconstructed, *PromptPathFromApi);
 
-		const bool bPass = (Rows == 3)
+		const bool bPass = !RegFromDb.IsEmpty() && !VerFromDb.IsEmpty() && !ModelFromDb.IsEmpty()
 			&& Reconstructed == PromptPathFromApi
 			&& Reconstructed == TEXT("Content/Prompts/Parser/v1.txt")
 			&& VerFromDb == TEXT("1")

@@ -299,6 +299,33 @@ bool UAILiveEventStoreSubsystem::RunMigrations(FSQLiteDatabase& InDb, int32 From
 	return false;
 }
 
+bool UAILiveEventStoreSubsystem::QueryMetaSchemaRegistry(TMap<FString, FString>& OutKVs)
+{
+	OutKVs.Reset();
+	if (!MetaDb.IsValid())
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("QueryMetaSchemaRegistry: MetaDb 未打开（先 BeginGame）"));
+		return false;
+	}
+	const int64 Rows = MetaDb.Execute(
+		TEXT("SELECT key, value FROM schema_meta;"),
+		[&OutKVs](const FSQLitePreparedStatement& Stmt)
+		{
+			FString K, V;
+			Stmt.GetColumnValueByIndex(0, K);
+			Stmt.GetColumnValueByIndex(1, V);
+			OutKVs.Add(K, V);
+			return ESQLitePreparedStatementExecuteRowResult::Continue;
+		});
+	if (Rows == INDEX_NONE)
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("QueryMetaSchemaRegistry: SELECT failed: %s"), *MetaDb.GetLastError());
+		return false;
+	}
+	return true;
+}
+
 bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase& InMetaDb)
 {
 	const FString RegistryDir   = AILiveParser::GetCurrentParserPromptRegistryDir();

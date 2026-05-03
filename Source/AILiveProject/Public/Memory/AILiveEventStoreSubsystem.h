@@ -25,6 +25,11 @@ public:
 	TArray<FAILiveEvent> QueryEventsByActor(const FString& Actor, int32 LimitCount) const;
 	bool VerifyHashChain(int64& OutFirstBadSeq) const;
 
+	// 通过主连接读 _meta.db.schema_meta 全表。WAL 同进程二次连接会拿不到 -shm
+	// 共享映射（实测 ReadOnly / ReadWrite 都回 SQLITE_IOERR），故不开新连接，
+	// 走已 open 的 MetaDb。仅在 IsGameOpen() 时可调。
+	bool QueryMetaSchemaRegistry(TMap<FString, FString>& OutKVs);
+
 	static constexpr int32 kCurrentSchemaVersion = 1;
 	static const TCHAR* const kGenesisHash;
 
