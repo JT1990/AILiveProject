@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Memory/AILiveAgentTypes.h"
 #include "AILiveAgentRoster.generated.h"
 
 UENUM(BlueprintType)
@@ -17,22 +18,25 @@ struct AILIVEPROJECT_API FNPCAgentConfig
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
+	FAILiveAgentCore Core;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
+	FAILiveAgentIdentity Identity;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
+	FAILiveAgentBattleConfig Battle;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster|Runtime")
 	int32 NPCIndex = 1;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster|Runtime")
 	FName NPCActorLabel;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
-	FString DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster|Runtime")
+	FString VoicePresentationHint;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster|Runtime")
 	ELLMProvider Provider = ELLMProvider::DeepSeek;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
-	FString Voice;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AILive|Roster")
-	FString GenderHint;
 };
 
 namespace AILiveAgentRoster

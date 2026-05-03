@@ -525,7 +525,7 @@ void AAct02RuleReceiveDirector::DispatchLLMs(bool bSeed)
 	FString SpeakerName;
 	if (LastSpeakerIndex != INDEX_NONE && NPCs.IsValidIndex(LastSpeakerIndex))
 	{
-		SpeakerName = NPCs[LastSpeakerIndex].Config.DisplayName;
+		SpeakerName = NPCs[LastSpeakerIndex].Config.Identity.FullName;
 	}
 
 	for (FAct02NPCRuntime& N : NPCs)
@@ -858,7 +858,7 @@ void AAct02RuleReceiveDirector::StartSpeak(int32 NPCIndex, const FString& Text)
 
 	const bool bDispatched = UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnNative(
 		this, Pawn, Text, MinimaxKey,
-		N.Config.Voice, TEXT("https://api.minimaxi.com/v1/t2a_v2"),
+		N.Config.Identity.Voice, TEXT("https://api.minimaxi.com/v1/t2a_v2"),
 		A2FProviderName, Cb);
 
 	if (!bDispatched)
@@ -962,14 +962,14 @@ FString AAct02RuleReceiveDirector::BuildSeedSystemPrompt(
 		TEXT("  \"content\": \"<不超过 80 字的中文。如果 willingness=none 也可填空字符串>\"\n}\n")
 		TEXT("意愿语义对照：\n- extremely_strong: 强烈想说，必须说\n- strong: 想说\n- moderate: 一般\n- weak: 不太想说但可以\n- none: 不想说\n\n")
 		TEXT("只输出 JSON，不要任何前后缀文本。"),
-		*Cfg.DisplayName, *Cfg.GenderHint, *GameRule);
+		*Cfg.Identity.FullName, *Cfg.VoicePresentationHint, *GameRule);
 }
 
 FString AAct02RuleReceiveDirector::BuildSeedUserPrompt(const FNPCAgentConfig& Cfg) const
 {
 	return FString::Printf(
 		TEXT("你是 %s。请按 system 指示输出 JSON。"),
-		*Cfg.DisplayName);
+		*Cfg.Identity.FullName);
 }
 
 FString AAct02RuleReceiveDirector::BuildReactionSystemPrompt(
@@ -987,7 +987,7 @@ FString AAct02RuleReceiveDirector::BuildReactionSystemPrompt(
 		TEXT("{\n  \"want_to_speak\": true | false,\n  \"willingness\": \"extremely_strong\" | \"strong\" | \"moderate\" | \"weak\" | \"none\",\n  \"content\": \"<不超过 80 字的中文>\"\n}\n")
 		TEXT("意愿语义同前。如果 want_to_speak=false，content 可填空字符串。\n")
 		TEXT("只输出 JSON。"),
-		*Cfg.DisplayName, *Cfg.GenderHint,
+		*Cfg.Identity.FullName, *Cfg.VoicePresentationHint,
 		*SpeakerName, *InLastSentence, *MyUns);
 }
 
@@ -995,7 +995,7 @@ FString AAct02RuleReceiveDirector::BuildReactionUserPrompt(const FNPCAgentConfig
 {
 	return FString::Printf(
 		TEXT("你是 %s。请按 system 指示输出 JSON。"),
-		*Cfg.DisplayName);
+		*Cfg.Identity.FullName);
 }
 
 // ====== Logging ======

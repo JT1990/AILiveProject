@@ -17,21 +17,34 @@ namespace AILiveAgentRoster
 
 	TArray<FNPCAgentConfig> GetDefaultRoster()
 	{
-		// MiniMax voice IDs that work in 中文（与既有项目一致：male-qn-qingse 男声/female-shaonv 女声等）
 		const FString MaleVoice   = TEXT("male-qn-qingse");
 		const FString FemaleVoice = TEXT("female-shaonv");
 
 		TArray<FNPCAgentConfig> Roster;
-		auto Add = [&](int32 Idx, const TCHAR* DisplayName, ELLMProvider Provider,
-		               const FString& Voice, const TCHAR* Gender)
+		auto Add = [&](int32 Idx, const TCHAR* FullName, ELLMProvider Provider,
+		               const FString& Voice, const TCHAR* GenderHint)
 		{
 			FNPCAgentConfig C;
+
+			C.Core.AgentId = FString::Printf(TEXT("NPC%02d"), Idx);
+			C.Core.PersonaVersion = 1;
+			C.Core.ModelProvider = ProviderToString(Provider);
+			// Core.ModelName / CreatedAt / DeletedAt 留空：T2/T5 写库时填
+			C.Core.Status = EAILiveAgentStatus::Active;
+
+			C.Identity.FullName = FullName;
+			// Identity.Nickname / Appearance 留空：DataAsset 后续填
+			C.Identity.VoicePresentation = EAILiveVoicePresentation::Synthetic;
+			C.Identity.Voice = Voice;
+
+			// Battle.* 全部留默认（Faction/Role/PrivateGoal 等空字符串；BidOffset=0；SeqStart=0；bAlive=true）
+			//   T2 setup phase 由 Director 决
+
 			C.NPCIndex = Idx;
 			C.NPCActorLabel = FName(*FString::Printf(TEXT("BP_NPC_MH_Character_%d"), Idx));
-			C.DisplayName = DisplayName;
+			C.VoicePresentationHint = GenderHint;
 			C.Provider = Provider;
-			C.Voice = Voice;
-			C.GenderHint = Gender;
+
 			Roster.Add(C);
 		};
 
@@ -90,7 +103,6 @@ namespace AILiveAgentRoster
 			break;
 		case ELLMProvider::Qwen3:
 			Out.ApiKey = ProjectEnvLoader::Get(TEXT("QWEN3_API_KEY"));
-			// .env 中 QWEN3_API_BASE 已是完整 chat/completions URL
 			Out.Endpoint = ProjectEnvLoader::Get(TEXT("QWEN3_API_BASE"));
 			Out.Model = ProjectEnvLoader::Get(TEXT("QWEN3_MODEL_NAME"));
 			break;
