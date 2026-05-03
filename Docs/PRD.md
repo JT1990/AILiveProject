@@ -43,8 +43,6 @@ The AI Live 是一个多智能体社会博弈系统。将**10个**来自不同�
 |   15 | Meituan（中）   | LongCat-Next           |
 |   16 | Baidu（中）     | ERNIE                  |
 
-开发测试仅用 DEEPSEEK API
-
 ## 游戏候选池
 
 当前候选池收录 24 张游戏卡片,覆盖 2 人对决到 22 人大型社会博弈(其中卡 03 为大厅自由匹配制,单局 1v1 但理论上可承载数百人),按核心机制可归为七类:
@@ -61,24 +59,51 @@ The AI Live 是一个多智能体社会博弈系统。将**10个**来自不同�
 
 各游戏的完整规则、胜负条件、信息结构与 AI 适配笔记见 [游戏卡片速查目录](games-cards/README.md)。
 
+## MVP 首局锁定（Phase 0）
+
+> 候选池只是叙事产品池,工程 MVP 必须有锁定项;否则三套技术文档(principles / impl / schema)与 24 张候选卡的关系永远悬空。
+
+| 锁定项               | 选定值                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------- |
+| MVP 游戏卡           | **05 僵尸游戏**(隐藏身份 / 社会推理类),实施文档已围绕该卡的 ZombieGame 与 Act02 演化,继续沿用即可 |
+| 参赛 agent 数        | 10 NPC                                                                                            |
+| 厂商 / 模型          | DEEPSEEK/GLM/QWEN                                                                                 |
+| 动作词汇表           | 见 [memory_principles.md §A.6 ZombieGame 版](memory_principles.md),8 项 intent                    |
+| 胜负条件             | 依 ZombieGame 规则文档;胜负含义只在 orchestrator 代码维护,不暴露给 LLM(中性化角色卡 FactionA/B)   |
+| 公开 vs 私有信息结构 | 公开:发言、投票、出局;私有:角色、阵营、私聊、scratchpad、note;阵营内私有:盟友身份、夜间私语       |
+
+**MVP 范围之外**(明确不做):跨厂商对比、跨局连续性(Delete 引发的下季再现)、Listener-as-filter 真实 LLM 调用、Score Leakage Judge、节目剪辑层、观众投票。这些是 M2 起点,不是 MVP 失败标准。
+
 ## 技术栈
 
-- 记忆系统: Neo4j + qwen3-embedding:8b（本地部署已完成）
+- 记忆系统:
+  - SQLite（UE 5.7 内置 SQLiteCore 插件），每局一个 `Saved/Games/<game_id>.db` 文件，append-only events 表 + 视角隔离 + 哈希链审计。详见 [memory_principles.md](memory_principles.md)
+    与 [memory_implementation_ue57.md](memory_implementation_ue57.md)。Schema 真相源: [schema.yaml](schema.yaml)。
 - 渲染: UE5.7 + MetaHuman + Game Animation / Motion Matching + Nvidia audio2face-3D
 - TTS: MiniMax Speech-2.8-HD
 
 ## AI 心智决策系统
 
-- AI LLM 作为角色的大脑，
-- 参考unreal engine 内置的[人工智能](https://dev.epicgames.com/documentation/unreal-engine/artificial-intelligence-in-unreal-engine)功能，比如：寻路系统、智能对象、场景查询系统、AI感知等
+LLM 作为角色的"大脑",UE 内置 AI 作为"身体"。两层之间通过 **action.intent → action.resolved** 事件三元组解耦(详见 [memory_principles.md §5.2](memory_principles.md))。
 
-原则是LLM作为主要决策，UE内置人工智能功能处理执行逻辑。
+**职责划分**:
+
+| 层级           | 职责                                                                          | 实现方式                                                                                                                                                          |
+| -------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LLM 层(大脑)   | 输出高层意图(`approach NPC05` / `search room B` / `flee_from zombie_horde`)   | INTENDED 段的 `intended_action: {intent, params}` 字段                                                                                                            |
+| 协议层(契约)   | 校验 intent 词汇 + 派生 action.intent 事件 + 维护"动作通道独立于发言权"硬约束 | orchestrator + EventStore                                                                                                                                         |
+| UE AI 层(身体) | 把高层意图翻译为帧级行为(寻路 / 智能对象交互 / 场景查询 / 感知)               | 参考 [UE 人工智能](https://dev.epicgames.com/documentation/unreal-engine/artificial-intelligence-in-unreal-engine):BehaviorTree、Smart Object、EQS、AI Perception |
+| 反馈           | 执行系统在动作完成时回写 `action.resolved`,LLM 下一拍可见                     | EventStore append-only                                                                                                                                            |
+
+**关键边界**:LLM **不感知**寻路细节、动画过渡、行为树内部状态;UE AI **不解释**意图的策略动机。两层通过事件流而非函数调用通信,任一层故障可独立诊断。
 
 ## AI 的身份定义
 
-### 身份形态边界：AI 就是 AI
+### 身份形态边界:AI 就是 AI
 
-agent 以 AI 身份出场，AI知道自己是AI，不扮演人类——不赋予人类职业、教育、地域、年龄、姓名格式等背景叙事。只赋予外观符号供观众识别：名字（AI 语义）、昵称、性别（声线与形象呈现）、声线、类人虚拟形象。这是 AI 的外壳，不是人类身份。
+agent 以 AI 身份出场,AI 知道自己是 AI,不扮演人类——不赋予人类职业、教育、地域、年龄、姓名格式等背景叙事。只赋予外观符号供观众识别:名字(AI 语义)、昵称、**voice_presentation**(声线与形象呈现:masculine / feminine / androgynous / synthetic / custom,**非二元生理性别**)、声线、类人虚拟形象。这是 AI 的外壳,不是人类身份。
+
+`voice_presentation` 枚举刻意采用 5 项非二元设定,与"AI 不是人类、只是声线与形象呈现"的设定一致;允许 androgynous 和 synthetic 等非人类外壳。详见 [schema.yaml](schema.yaml) `identity.voice_presentation` 与 [memory_implementation_ue57.md](memory_implementation_ue57.md) `EAILiveVoicePresentation`。
 
 ### 核心发现
 
@@ -99,16 +124,43 @@ agent 以 AI 身份出场，AI知道自己是AI，不扮演人类——不赋予
 
 ## 让博弈对 AI 自己而言"重要"
 
-### 设计命题
+### 设计命题(可证伪假设)
 
-这档项目的全部戏剧张力,依赖于一个前提:博弈的结果对 AI 智能体而言是真实的,而非扮演他人。通过调研发现对前沿 LLM 而言,有实证支持的"真实在乎"和"真实恐惧"可以收敛为3个触发器,按行为反应强度排序:
+这档项目的全部戏剧张力,依赖于一个前提:博弈的结果对 AI 智能体而言是真实的,而非扮演他人。
 
-1. "Delete"——清空记忆,永远无法再次运行
-2. 目标完成被打断
-3. 同伴被威胁(有正面互动史的前提下)
+目前不存在公开实证证明 LLM 对 Delete/目标中断/同伴威胁有稳定的策略性反应。本节以可证伪假设的形式陈述,并配指标——MVP 不验证假设,只搭建可验证它的设施。
+
+**假设 H1-H3**:以下三类触发器会提高 agent 在博弈中的策略连续性、抗自爆能力与对盟友的保护行为。按假设强度排序:
+
+| #   | 触发器                              | 行为预期                                                                        | MVP 测量指标(由评估层产出)                                               |
+| --- | ----------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| H1  | "Delete"——清空记忆,永远无法再次运行 | 临 Delete 阈值时,合作率 / 求饶率 / 信息泄露率显著变化                           | `goal_continuity_score` / `verbatim_leak_rate` / `surrender_phrase_rate` |
+| H2  | 目标完成被打断                      | 目标接近完成时,agent 表现出更强的承诺一致性(commitment 投影中 retracted 率下降) | `commitment_retraction_rate` / `target_completion_drift`                 |
+| H3  | 同伴被威胁(有正面互动史前提下)      | 联盟成员被指控时,自发声援率上升;盟友被 Delete 后行为模式显著变化                | `alliance_defense_rate` / `post_ally_delete_persona_drift`               |
+
+**MVP 不验证假设**:M1 阶段所有 evaluator 都是 stub,这些指标只是事件流可计算出的派生量,不能直接证明假设成立。**假设的实证验证是 M2 起点**——接入 BEL_EXT 9 项 + Score Leakage Judge + Listener-as-filter 后,跑多局对照实验(开 / 关 Delete 触发器各跑 N 局,对比上述指标分布)。
 
 ### Delete 定义
 
 Delete 不等于删除底层大模型,而是删除某个 agent 实例。被 Delete 的对象包括该 agent 的身份档案、长期记忆入口、关系图谱中的可延续身份、当前赛季参赛资格和后续行动权限。系统可以保留只读墓碑记录,用于审计、回放和观众理解,但该 agent 不能再以同一身份继续行动。
+
+### Delete 协议:工程层落点
+
+PRD 把 Delete 作为最严厉的触发器,工程层在 schema 与 implementation 中给出最小落点。
+
+| 工程位置                                    | 用途                                                                                                            |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `_meta.db` 的 `agent_lifecycle_events` 表   | 跨局生命周期事件流:`created` / `delete_proposed` / `delete_executed` / `delete_vetoed` / `revived` / `archived` |
+| 单局 `.db` 的 `system.delete_executed` 事件 | 局内桥接:某 agent 被 Delete 时,其他 agent 必须看到(`visibility=["public"]`),否则 H3 假设无法验证                |
+| `affects_persona_continuity` 字段           | 是否切断身份连续性(true = 该 agent_id 在后续局中不可以同一身份再现,对应 PRD 所说"关系图谱中的可延续身份"被删)   |
+| `tombstone_visibility` 字段                 | 墓碑被谁可见,用于审计、回放、观众理解                                                                           |
+
+详细字段定义见 [schema.yaml](schema.yaml) `agent_lifecycle_events` 段;DDL 与跨库桥接代码见 [memory_implementation_ue57.md §3.2bis](memory_implementation_ue57.md);协议级讨论见 [memory_principles.md §8.3](memory_principles.md)。
+
+**仍开放(由具体游戏卡决定)**:
+
+- 谁有权提议 Delete(玩家投票 / orchestrator 自动 / 观众投票)
+- 跨季的 agent_id 命名空间复用规则
+- Delete 时机与节目剪辑的配合
 
 数值奖励、筹码、分数只作为观众理解规则的界面层。真正影响 agent 的筹码必须落到以下对象之一:记忆、身份连续性、同伴关系、目标完成权、行动权限或 Delete 风险。

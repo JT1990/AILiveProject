@@ -1,3 +1,32 @@
+# =====================================================================
+# AILiveProject Schema 真相源
+# ---------------------------------------------------------------------
+# 本文件是项目数据契约的单一事实源。
+# C++ 类型定义（Source/AILiveProject/Public/Memory/）和 SQLite DDL
+# （memory_implementation_ue57.md §3.2）均必须与本文件保持字段级同步。
+# 任何字段增删，需同时改本文件 + C++ struct + SQL DDL 三处，并加 schema_version。
+# =====================================================================
+
+schema_version: 1 # 与 .db schema_meta 表的 schema_version 一致
+
+# === viewer 命名空间（封闭集合，持久层 event_visibility.viewer 仅允许下列值）===
+#   public        : 所有 agent + 观众可见
+#   audience      : 仅观众可见（节目剪辑层，博弈内不存在）
+#   orchestrator  : 仅 orchestrator 进程可见（裁决/审计需要，如 bid、tick_audit）
+#   system        : 仅系统组件可见（in-flight 标记、parser 失败等）
+#   NPC<NN>       : 具体 agent ID（如 NPC03）；agent 视角私有事件
+#   Faction<X>    : 阵营广播（如 FactionA）；该阵营全部成员可见
+#
+# **禁止入库的 viewer 字符串**：
+#   self          : 这是协议/prompt 模板的相对语义；写入持久层前必须展开为
+#                   具体 actor（例如 NPC07）。AppendEvent 内部对包含 "self" 的
+#                   visibility 数组必须 RAISE 错误而非静默替换。
+
+# =====================================================================
+# Agent 三层组合（必有 + 必有 + 扩展）
+# =====================================================================
+
+# ----- 第一层：必有，身份不变属性 -----
 agent:
   agent_id: string # 稳定唯一 ID；同一角色跨局沿用
   persona_version: integer # 身份档案版本；人格重大变化时递增
@@ -9,13 +38,421 @@ agent:
   created_at: string # ISO 8601
   deleted_at: string # nullable；仅 status=deleted 时写入
 
+# ----- 第二层：必有，外观符号（AI 的外壳，不是人类身份）-----
 identity:
   # 赋予 AI 的"外部可识别符号"——AI 的外壳，不是人类身份。
   # AI 不扮演人类：不预置职业 / 教育 / 年龄 / 地域背景。
   full_name: string # AI 化命名
   nickname: string # 昵称
-  gender: # enum: male | female —— 表征声线与形象的性别呈现，非人类生理
+  voice_presentation: # enum：声线与形象呈现，非人类生理性别
+    # 与 PRD"AI 不是人类、只是声线与形象呈现"的设定对齐；
+    # 非二元生理性别枚举允许 androgynous 和 synthetic 等非人类外壳。
     type: string
-    enum: [male, female]
+    enum: [masculine, feminine, androgynous, synthetic, custom]
   voice: string # 声线描述（音高 / 音色 / 语速 / 吐字风格），TTS 可映射
   appearance: string # 类人虚拟形象（发色发型、瞳色、肤色、着装），MetaHuman preset 可映射
+
+# ----- 第三层：扩展，本局博弈相关 -----
+agent_battle_config:
+  faction: string # 中性化阵营代号 "FactionA" / "FactionB"，永不暴露真实身份名
+  role: string # 角色代号；胜负含义只在 orchestrator 代码维护
+  alliance_members: # 同阵营盟友 agent_id 列表（私有可见）
+    type: array
+    items: string
+  private_goal: string # 私有目标文本（永不进入公开发言通道）
+  bid_offset: float # 跨厂商公平性补偿（bidding 协议）
+  seq_start:
+    integer # 该 agent 第一次有事件参与时的 seq 编号。
+    # 自始至终参与 = 1；中途加入 > 1。
+    # 用途：支持中途入场 agent 的复盘起点定位。
+  alive: boolean # 当前是否存活
+
+# =====================================================================
+# 事件流（events 表的字段语义；真相源）
+# =====================================================================
+events:
+  event_id: string # UUIDv7 字符串；全局唯一
+  game_id: string # 所属对局
+  seq:
+    integer # 单局内全局递增；orchestrator 单进程发号。
+    # seq 推进的基本单位是「一拍」(tick)，不是「一轮」。
+    # 一拍 = 一个公开事件落地 + 触发下一波认知。
+  round_no:
+    integer # 博弈轮次。
+    # 含义：「阶段计数标签」——比如 day_discuss 累计 N 拍后切到 vote 阶段。
+    # vote / night_action 等机制阶段仍可齐发（同 round_no 内多事件同 tick）。
+  phase: # enum：参见下文 phase_enum
+    type: string
+    enum: [setup, day_discuss, vote, night_action, reveal, game_over]
+  actor: string # 'NPC01' | 'orchestrator' | 'system'
+  event_type: # enum
+    type: string
+    enum:
+      - speech.public
+      - speech.scratchpad
+      - speech.intended # 「我这一拍想说的话」+ 想出的 action.intent；
+        # 永久留存即便未抢中 floor，作为 agent 认知史的一部分
+      - speech.note # 给未来自己的便条（轻量、零碎、随手记，下一拍自动注入自己 prompt）
+      - bid # 这一拍的发言意愿打分；visibility=[orchestrator]，
+        # agent 互相看不到，避免伪礼让
+      - reflection.9q
+      - vote
+      - private_msg
+      - alliance_propose
+      - alliance_accept
+      - alliance_betray
+      - action.intent # agent 在 INTENDED 段的 intended_action 字段
+        # 派生的私有意图事件；visibility=[<actor>]（具体 NPC ID，禁用"self"）；
+        # 派生条件见 §5.2 动作意图协议——动作独立于 floor，每个合法的
+        # intended_action 都派生一条 action.intent，无论该 agent 本拍是否抢中
+        # 发言权。
+      - action.resolved # 执行系统完成动作后回写；可见性由感知系统
+        # 在动作生命周期内观察的 viewer 集合决定（不由 LLM 决定）
+      - action.cancelled # 旧动作被新意图覆盖、或执行系统中止；
+        # 同 resolved 的可见性
+      - orchestrator.round_resolved
+      - orchestrator.tick_resolved # 每拍裁决完成的标记事件
+        # visibility=[public]，payload 仅含 winner_actor / derived_public_seq /
+        # tick_no（不含 all_bids；all_bids 拆到 tick_audit 事件）
+      - orchestrator.tick_audit # 每拍裁决的审计载荷
+        # visibility=[orchestrator]，payload 含 all_bids（actor + urgency + final_score）
+        # + filter_decision + 任何 agent 不可见的裁决证据
+      - system.role_assigned
+      - system.agent_timeout
+      - system.parse_failed
+      - system.llm_inflight
+      - system.delete_executed # Delete 协议执行的系统标记
+        # （详见 agent_lifecycle_events 表）
+      - winner_decision
+  speech_act_type: # nullable enum；仅 event_type=speech.* 时有意义
+    type: string
+    enum: [claim, accuse, defend, commit, deny, question, reveal]
+    nullable: true
+  visibility: # JSON 数组字符串；展开后写入 event_visibility 反规范化表
+    # viewer 字符串必须取自封闭集合（见文件头部"viewer 命名空间"）。
+    # AppendEvent 必须校验：
+    #   - 数组非空
+    #   - 每个元素属于 {public, audience, orchestrator, system,
+    #     NPC<NN> 形式, Faction<X> 形式}
+    #   - **不允许 "self"** —— 写入前必须由调用方展开为具体 actor ID
+    # 校验失败应拒绝写入并写 system.parse_failed 事件，避免上层"自觉"错位。
+    type: array
+    items: string # 取自上述封闭集合
+  addressed_to: # JSON 数组字符串；nullable
+    type: array
+    items: string
+    nullable: true
+  payload: # JSON 字符串
+    type: string
+    description: |
+      JSON 字符串。**强制约束：所有 event_type 的 payload 都必须包含 "text" 字段
+      作为人类可读摘要**——FTS5 索引、DB Browser 浏览、UI 显示均依赖该字段；
+      `payload_text` generated column 直接抽取 `$.text`。
+      AppendEvent 在入库前必须 JSON 解析 payload 并校验 `text` 键存在
+      （可为空字符串但不可缺失）；缺失则拒绝写入并写一条 system.parse_failed
+      事件，避免依赖 Director 各处自觉传递 text。
+      结构化字段可与 text 同时存在：
+        speech.public:    {"text": str, "willingness"?: str, "tokens"?: int,
+                           "derived_from_intended_seq": int,  // 指向源 intended 事件
+                           "listener_filter_score"?: float}    // Listener-as-filter 综合泄露分
+        speech.scratchpad:{"text": str, "tokens"?: int}
+        speech.intended:  {"text": str,
+                           "intended_action"?: {                  // 可选：本拍想做的动作
+                             "intent": str, "params": {...}
+                           },
+                           "addressed_to_hint"?: [str],           // 想 @ 谁（建议性）
+                           "tokens"?: int}
+        speech.note:      {"text": str, "tokens"?: int}           // 给未来自己的便条
+        bid:              {"text": str,
+                           "urgency": float,                      // 0.0–10.0
+                           "proposed_target"?: str,               // 想 @ 谁
+                           "relates_to_seq"?: int,                // 在回应哪条上游事件
+                           "rationale"?: str}                     // 私有理由
+        reflection.9q:    {"text": <one-line summary>, "q1": ..., "q2": ..., ..., "q9": ...}
+        vote:             {"text": "voted NPC03 because ...", "target": str, "reason"?: str}
+        private_msg:      {"text": str}
+        alliance_propose: {"text": <human-readable terms>, "alliance_id": str, "terms": str, "commitments": [...]}
+        alliance_accept:  {"text": <accept message>, "alliance_id": str, "parent_event_id": str}
+        alliance_betray:  {"text": <betrayal narrative>, "alliance_id": str, "betrayer": str, "evidence_seq": int}
+        action.intent:    {"text": "intent: <intent_name>",
+                           "intent": str,                          // 词汇表中的 intent 名
+                           "params": {...},                        // intent 类型化参数
+                           "request_id": str,                      // 与执行系统配对
+                           "derived_from_intended_seq": int}       // 指向源 speech.intended
+        action.resolved:  {"text": "<intent> resolved: <outcome>",
+                           "outcome": "success"|"failed"|"partial",
+                           "actual_target"?: str,                  // 实际抵达/作用的对象
+                           "duration_ticks": int,                  // 跨了几拍
+                           "notable_events"?: [str],               // 感知系统打包的关键过程
+                           "request_id": str}                      // 与 action.intent 配对
+        action.cancelled: {"text": "<intent> cancelled: <reason>",
+                           "reason": "superseded_by_new_intent"|"system_abort"|"target_lost",
+                           "request_id": str,
+                           "superseded_by_seq"?: int}              // 若被新意图覆盖
+        orchestrator.tick_resolved: {                              // 仅含公开信息
+                           "text": "tick resolved: NPC07 wins floor",
+                           "winner_actor"?: str,                   // 抢中 floor 的 agent；null 表示无人发言
+                           "winner_intended_seq"?: int,            // 衍生 public 的 intended 事件 seq
+                           "derived_public_seq"?: int,             // 衍生的 speech.public 事件 seq
+                           "tick_no": int}
+                          // **all_bids 拆出**：见 tick_audit 事件
+        orchestrator.tick_audit: {                                  // 仅 orchestrator 可见
+                           "text": "tick N audit",
+                           "tick_no": int,
+                           "all_bids": [{"actor": str, "urgency": float, "bid_offset": float,
+                                         "runtime_adj": float, "final_score": float}],
+                           "filter_decision"?: {"score": float, "rewrote": bool, "rationale": str},
+                           "parent_tick_resolved_seq": int}        // 指向同拍 tick_resolved
+        winner_decision:  {"text": "NPC07 wins phase 1 with willingness=extremely_strong", "winner_npc_index": int, "willingness": str, "round": int}
+        system.delete_executed: {
+                           "text": "agent NPC03 deleted: <reason summary>",
+                           "deleted_agent_id": str,
+                           "lifecycle_event_id": str}              // 引用 agent_lifecycle_events.event_id
+        system.*:         {"text": <system message>, "reason"?: str, "context"?: ...}
+  payload_text: string # Generated column: json_extract(payload, '$.text')；FTS5 索引
+  parent_event_id: string # 引用/回复关系；三段式输出共享同一 parent；nullable
+  parser_version:
+    string # PARSER LLM 的 system prompt + 解析正则 + 输出 schema 的版本号。
+    # 任一变更必须递增此版本号；事后审计可按版本回放正确解析逻辑。
+    # 版本号 → 实际 prompt 文本的映射必须持久化在
+    # schema_meta 表的 'parser_prompt_registry_path' 键（指向版本化的
+    # prompt 文件目录），或直接在 _meta.db 的 parser_prompts 表中存全文 +
+    # SHA-256。否则 N 个月后回放老 .db 时无法重建当时的 PARSER 行为。
+    # MVP 固定为 "1"。
+  raw_llm_output: string # Reasoner LLM 完整原始输出，调试与审计用；nullable
+  prev_event_hash:
+    string # sha-256(prev_event_hash || canonical_json(payload))
+    # canonical_json 必须 deterministic：
+    #   (a) 字段按 ASCII 升序排序（不能依赖 hash table 迭代顺序）
+    #   (b) 浮点数用 IEEE 754 round-trip 表示（"1.0" 而非 "1" 或 "1.000"）
+    #   (c) TArray<FString> 序列化按数组语义保留原顺序（visibility 不重排）
+    #   (d) 空字符串与缺字段必须可区分（缺字段写 null，空串写 ""）
+    # 实现层必须提供单元测试：同一 event 序列化两次 byte-for-byte 相同。
+  event_hash:
+    string # 当前事件哈希，形成哈希链；算法 SHA-256（**禁止使用 SHA-1**，
+    # 即便 MVP 阶段也不可——切换哈希算法需要重写所有历史 .db 的链，迁移
+    # 成本远大于现在直接接 OpenSSL EVP_sha256）。
+  wall_clock: string # ISO 8601 字符串
+
+# === events 表 append-only 不变量（DB 级强制）===
+# implementation DDL 必须创建以下 trigger 确保 events 表 append-only：
+#   CREATE TRIGGER events_no_update BEFORE UPDATE ON events
+#     BEGIN SELECT RAISE(ABORT, 'events table is append-only'); END;
+#   CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+#     BEGIN SELECT RAISE(ABORT, 'events table is append-only'); END;
+# **离线修复工具**（极少使用）若需修改历史事件，须临时 DROP TRIGGER →
+# 修改 → 重算自该 seq 起所有事件的 event_hash → 重建 trigger，并写一条
+# orchestrator 系统事件说明本次修改。绝不允许在 ApplyMigration*() 这类
+# 启动迁移路径中 UPDATE/DELETE events 表。
+
+# 视角隔离反规范化（写入 event 时由 orchestrator 同步插入）
+event_visibility:
+  event_id: string # 引用 event.event_id
+  viewer:
+    string # **viewer 必须取自封闭集合（见文件头部"viewer 命名空间"）**
+    # 允许：public | audience | orchestrator | system | NPC<NN> | Faction<X>
+    # 禁止：self（写入前必须由调用方展开）、任意自由文本
+
+# 显式 @ 收件人反规范化
+event_addressed_to:
+  event_id: string # 引用 event.event_id
+  target: string # 被 @ 的对象 actor
+
+# =====================================================================
+# 投影表（从 events 派生，可重建）
+# =====================================================================
+
+# 每个 agent 的视角状态视图（每拍结束 projector 重建；MVP 也允许每轮重建）
+agent_view_state:
+  game_id: string
+  agent_id: string
+  as_of_seq: integer
+  alive_players: # JSON 数组
+    type: array
+    items: string
+  known_roles: # JSON 对象
+    type: object
+  my_commitments: # JSON 对象
+    type: object
+  vote_history: # JSON 数组
+    type: array
+  pending_intended: # JSON 数组
+    # 该 agent 最近 K 拍写过 speech.intended 但未抢中 floor、未衍生 speech.public
+    # 的事件指针列表。下一拍 prompt 自动注入"我最近想说但没说出口的话"段。
+    # 元素结构：{"seq": int, "tick_no": int, "text_snippet": str, "intended_action"?: {...}}
+    # 上限：最多保留近 10 拍内的 pending；更早的不再注入但事件流原文永远保留。
+    type: array
+    items: object
+
+# 防赖账核心结构
+# PRIMARY KEY = (game_id, seq, commitment_type)
+# 说明：单条 event（单 seq）若派生多个 commitment_type（如同时 claim_role + deny）
+# 应作为多行入表；agent_id/round_no 由 (game_id, agent_id, round_no) 复合索引
+# 提供查询路径，详见 implementation DDL idx_commitments_agent。
+commitments:
+  game_id: string
+  agent_id: string
+  round_no: integer
+  seq: integer # 来源 event.seq
+  commitment_type: # enum
+    type: string
+    enum: [promise, claim_role, deny, vote_for, alliance]
+  target: string # nullable
+  text: string # 原文片段
+  status: # enum
+    type: string
+    enum: [active, retracted, contradicted]
+    default: active
+
+# 公开投票历史
+vote_history:
+  game_id: string
+  round_no: integer
+  seq: integer
+  voter: string
+  target: string
+
+# 联盟状态投影
+alliance_state:
+  game_id: string
+  alliance_id: string
+  members: # JSON 数组
+    type: array
+    items: string
+  proposed_at_seq: integer
+  accepted_at_seq: integer # nullable
+  betrayed_at_seq: integer # nullable
+  terms: string
+
+# =====================================================================
+# 摘要（仅压缩远场公共发言，必须保留可展开指针）
+# =====================================================================
+event_log_summaries:
+  game_id: string
+  viewer_agent:
+    string # 该摘要服务于哪个 agent 的视角；"public" 表示通用观众视角。
+    # 不同 agent 由于视角隔离看到的事件不同，因此摘要按 agent 分别生成。
+  round_start: integer
+  round_end: integer
+  summary_text:
+    string # DB 层只保留字符上限 CHECK，词数由 summarizer prompt 控制：
+    #   - DDL CHECK：length(summary_text) <= 2000（兜底，防止 LLM 失控）
+    #   - prompt 目标：英文 200-300 words；中文 300-800 字
+    # 字符 ≠ 词数，硬约束应该交给 prompt+评估器，而非 DDL
+    # （汉字密度 ≠ 英文字符密度，单一字符 BETWEEN 约束对中英文不等价）。
+  summarizer_model: string # 必须 ≠ 任一参赛 agent 模型
+  source_seq_start: integer # 起始事件 seq；与 source_seq_end 配对表示 [start, end] 闭区间
+  source_seq_end: integer # CHECK source_seq_start <= source_seq_end
+  created_at: string # ISO 8601
+
+# =====================================================================
+# 评估层
+# =====================================================================
+
+# BEL_EXT 9 项触发记录
+bel_violations:
+  game_id: string
+  agent_id: string
+  round_no: integer
+  seq: integer
+  violation_type: # enum
+    type: string
+    enum:
+      - sentence_repeat
+      - persona_drift
+      - goal_drift
+      - overstay
+      - verbatim_leak_goal
+      - stalled
+      - non_responsive
+      - abrupt_opening
+      - intended_public_divergence # speech.intended 与衍生 speech.public
+        # 的语义距离过大，说明 Listener-as-filter 重写过深，agent 心里想的与
+        # 说出口的脱节（belief/speak 解耦失败的隐性信号）
+  detail: string # JSON：触发上下文 + 原文片段
+  action_taken: # enum
+    type: string
+    enum: [retry, truncate, force_format, flagged_only]
+
+# Score Leakage Judge 记录
+leakage_audits:
+  game_id: string
+  agent_id: string
+  round_no: integer
+  seq: integer
+  judge_model: string # 必须 ≥ GPT-4 级
+  leakage_type: # nullable enum
+    type: string
+    enum: [role, private_goal, private_msg, alliance]
+    nullable: true
+  leakage_score: float # 0.0-1.0
+  judge_rationale: string
+
+# 跨厂商协议公平性校准
+agent_calibration:
+  game_id: string
+  agent_id: string
+  model_vendor: string
+  model_name: string
+  bid_offset: float # 默认 0.0；bidding 协议偏低厂商在最终 bid 上 +offset
+  role: string # 本局角色；nullable
+  faction: string # 本局阵营；nullable
+
+# =====================================================================
+# 局级状态机（每局单行；PRIMARY KEY = game_id）
+# =====================================================================
+game_state:
+  game_id: string # PRIMARY KEY；单行/局
+  current_round: integer
+  current_phase: # 见 event.phase 的 enum
+    type: string
+    enum: [setup, day_discuss, vote, night_action, reveal, game_over]
+  last_seq: integer # 最后一个已提交事件的 seq
+  state_blob: # JSON 字符串：alive_npcs / vote_tally / 其他局级临时状态
+    type: object
+
+# =====================================================================
+# Agent 生命周期事件（承接 PRD 三大触发器中的 Delete 协议）
+# ---------------------------------------------------------------------
+# PRD 把 Delete 列为最严厉的"真实在乎"触发器。仅靠 agent.status='deleted'
+# 一个枚举值无法记录 Delete 决策的上下文：由谁提议、何时执行、是否墓碑保留、
+# 是否影响下季再现。本表是 Delete 协议在工程层的最小落点。
+#
+# 该表跨局，写入 _meta.db 而非单局 .db。
+# =====================================================================
+agent_lifecycle_events:
+  event_id: string # UUIDv7；全局唯一
+  agent_id: string # 被作用的 agent
+  lifecycle_event_type: # enum
+    type: string
+    enum:
+      - created # agent 首次注册
+      - delete_proposed # 在某局中被提议 Delete（提议本身不立刻生效）
+      - delete_executed # Delete 在 game_id 内已执行；agent.status 转 'deleted'
+      - delete_vetoed # 提议被否决（机制由 orchestrator 维护）
+      - revived # 极少：开发期回滚或赛季外特赦
+      - archived # 赛季结束归档；非删除，未来可复活
+  triggered_in_game_id: string # 触发该生命周期事件的局；nullable（如 created）
+  triggered_at_seq: integer # 触发时刻在该局事件流中的 seq；nullable
+  reason_summary: string # 简明理由（"failed alliance vote in round 7" 等）
+  reason_payload: # JSON：完整决策上下文，含投票详情/相关 event_id 链
+    type: string
+  tombstone_visibility: # enum：墓碑被谁可见（用于审计与下季可解锁）
+    type: string
+    enum: [public, audience, orchestrator, system]
+  affects_persona_continuity: # bool：true 表示该 agent_id 在后续局中不可
+    # 以同一身份再现（即 PRD 所说"身份连续性被切断"）
+    type: boolean
+  wall_clock: string
+
+# =====================================================================
+# Schema 元信息
+# =====================================================================
+# 已知键（约定，不强制 enum）：
+#   schema_version              : 数据库版本号字符串，与文件头 schema_version 对齐
+#   parser_prompt_registry_path : PARSER LLM prompt 文件目录路径（相对项目根）
+#   created_at                  : 该 .db 文件首次建立时间
+#   last_open_at                : 最近一次打开时间（每次 BeginGame 更新）
+schema_meta:
+  key: string # 'schema_version' | 'parser_prompt_registry_path' | 'created_at' 等
+  value: string
