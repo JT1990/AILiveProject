@@ -1,5 +1,7 @@
 #include "Memory/AILiveEventStoreSubsystem.h"
 
+#include "LLM/AILiveParserVersion.h"
+
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -158,6 +160,12 @@ bool UAILiveEventStoreSubsystem::BeginGame(const FString& InGameId)
 		Db.Close();
 		return false;
 	}
+	if (!EnsureMetaRegistry(MetaDb))
+	{
+		MetaDb.Close();
+		Db.Close();
+		return false;
+	}
 
 	CurrentGameId = InGameId;
 	UE_LOG(LogAILiveMemory, Log, TEXT("BeginGame('%s') OK: %s + %s"), *CurrentGameId, *GameDbPath, *MetaDbPath);
@@ -289,6 +297,48 @@ bool UAILiveEventStoreSubsystem::RunMigrations(FSQLiteDatabase& InDb, int32 From
 	}
 	UE_LOG(LogAILiveMemory, Error, TEXT("RunMigrations: unsupported %d -> %d"), FromVersion, ToVersion);
 	return false;
+}
+
+bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase& InMetaDb)
+{
+	const FString RegistryDir   = AILiveParser::GetCurrentParserPromptRegistryDir();
+	const FString ParserVersion = AILiveParser::GetCurrentParserVersion();
+	const FString ParserModel   = AILiveParser::GetCurrentParserModel();
+
+	if (RegistryDir.IsEmpty() || ParserVersion.IsEmpty() || ParserModel.IsEmpty())
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("EnsureMetaRegistry: missing registry field(s) (dir='%s' ver='%s' model='%s')"),
+			*RegistryDir, *ParserVersion, *ParserModel);
+		return false;
+	}
+
+	const TPair<FString, FString> Pairs[] = {
+		{ TEXT("parser_prompt_registry_path"), RegistryDir },
+		{ TEXT("parser_version"),              ParserVersion },
+		{ TEXT("parser_model"),                ParserModel },
+	};
+
+	const TCHAR* Sql = TEXT("INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, ?2);");
+
+	for (const TPair<FString, FString>& KV : Pairs)
+	{
+		FSQLitePreparedStatement Stmt;
+		if (!Stmt.Create(InMetaDb, Sql) ||
+			!Stmt.SetBindingValueByIndex(1, KV.Key) ||
+			!Stmt.SetBindingValueByIndex(2, KV.Value) ||
+			!Stmt.Execute())
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("EnsureMetaRegistry upsert '%s' failed: %s"),
+				*KV.Key, *InMetaDb.GetLastError());
+			return false;
+		}
+	}
+	UE_LOG(LogAILiveMemory, Log,
+		TEXT("EnsureMetaRegistry OK: parser_version=%s parser_model=%s"),
+		*ParserVersion, *ParserModel);
+	return true;
 }
 
 // ---------------------------------------------------------------

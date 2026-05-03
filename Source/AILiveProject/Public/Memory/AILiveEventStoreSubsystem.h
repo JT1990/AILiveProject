@@ -32,6 +32,7 @@ private:
 	void ApplyPragmas(FSQLiteDatabase& InDb);
 	bool EnsureSchema(FSQLiteDatabase& InDb, bool bIsMetaDb);
 	bool RunMigrations(FSQLiteDatabase& InDb, int32 FromVersion, int32 ToVersion, bool bIsMetaDb, const TCHAR* FtsTokenizer);
+	bool EnsureMetaRegistry(FSQLiteDatabase& InMetaDb);
 
 	FString DetectFtsTokenizer(FSQLiteDatabase& InDb);
 
