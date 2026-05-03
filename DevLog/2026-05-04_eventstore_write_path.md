@@ -216,3 +216,21 @@ rows=148 bad=0 first_bad=None
 - DevLog 入库 ✓
 
 **不**意味着读 API（T4）/ Director 改造（T5）/ bid 协议（T7）—— 那是后续任务。
+
+---
+
+## 提交后修订（吸收协作者第 4 轮审查）
+
+3 项修正全部纳入：
+
+| 严重度 | 修正 | 位置 |
+| --- | --- | --- |
+| **High** | `AppendSystemParseFailure` 改用 `TJsonWriter` 构造整个 payload。原实现把 `InOriginalActor` / `InOriginalEventTypeStr` 直接拼进 `"text"` 段没转义——若 Actor 含 `"` / 换行 / `\` 会生成非法 JSON → `events.payload_text` GENERATED column 解析失败 → INSERT 失败 → `UE_LOG(Fatal)` 崩溃。改用 writer 后所有字段（含 text 摘要）都自动转义 | `EventStoreSubsystem.cpp` |
+| **Medium** | 新增 `IsAddressedToSubsetOfVisibility` 静态校验 + `AppendEventsAtomically` 的软警告分支。`addressed_to` 不在 `visibility` 集合时记 `UE_LOG(Warning)` + 写一条 `system.parse_failed` 审计行，但**不**拒绝原事件写入（schema.yaml line 308 + impl §5.2 line 2338 的"暗中点名"用例需要保留）。`'public'` 视为通配；Faction 在 T3 范围视为不透明（不展开成员） | `EventStoreSubsystem.h/.cpp` |
+| **Medium** | 删 `AILiveSha256.h:10` 注释里的 `FSHA1` 字样——它让任务卡的 "CI grep `Sha1`/`FSHA1` 零结果" 验收形式上失败。改写为"SHA-1 helpers are forbidden project-wide"。重新跑 grep 确认零匹配 | `AILiveSha256.h` |
+
+**侧记 UUIDv7 同 ms 递增**（拒绝）：principles 的"事件标识符严格递增"约束指 schema.yaml line 111 的 `seq: integer # 单局内全局递增`，不是 line 113 的 `event_id: string # 唯一事件 UUID`。我们用 seq 严格单调（`CachedLastSeq + 1`），event_id 只要求"唯一字符串"——UUIDv7 ms-precision + 80-bit random 满足唯一性。
+
+新增 console 命令 `AILive.Test.AppendAddressedToOutsideVis` 验收 `addressed_to` 软警告路径（visibility=`["NPC03"]` + addressed_to=`["NPC07"]` → 期望 seq>0 + 多一条 parse_failed 审计行）。
+
+修订后 UBT 全量重建通过、`grep -ri 'Sha1\|FSHA1' Source/` 零结果。

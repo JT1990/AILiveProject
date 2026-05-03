@@ -98,6 +98,20 @@ public:
 	static bool ValidateVisibility(const TArray<FString>& InVisibility, FString& OutError);
 	static bool ValidatePayloadJson(const FString& InPayloadJson, FString& OutError);
 
+	/**
+	 * Soft check: every addressed_to target should be in the expanded visibility
+	 * set. Per schema.yaml the violation must NOT reject the write (some
+	 * legitimate "暗中点名" cases exist) — caller logs Warning + writes a
+	 * system.parse_failed audit row, then proceeds with the original write.
+	 *
+	 * Limitation: visibility containing a Faction<X> tag is treated as opaque
+	 * (no member lookup in T3); 'public' viewer is treated as a wildcard.
+	 */
+	static bool IsAddressedToSubsetOfVisibility(
+		const TArray<FString>& InAddressedTo,
+		const TArray<FString>& InVisibility,
+		FString& OutError);
+
 	// === Canonical JSON / hash (exposed for debug console commands).
 	static FString CanonicalJsonOf(const FAILiveEvent& InEvent);
 	FString ComputeEventHash(const FString& PrevHash, const FString& CanonicalPayload) const;

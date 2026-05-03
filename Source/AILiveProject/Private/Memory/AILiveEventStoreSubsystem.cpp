@@ -624,6 +624,33 @@ bool UAILiveEventStoreSubsystem::ValidatePayloadJson(const FString& InPayloadJso
 	return true;
 }
 
+bool UAILiveEventStoreSubsystem::IsAddressedToSubsetOfVisibility(
+	const TArray<FString>& InAddressedTo,
+	const TArray<FString>& InVisibility,
+	FString& OutError)
+{
+	if (InAddressedTo.Num() == 0)
+	{
+		return true;
+	}
+	if (InVisibility.Contains(TEXT("public")))
+	{
+		return true;
+	}
+	TSet<FString> VisSet;
+	VisSet.Append(InVisibility);
+	for (const FString& Target : InAddressedTo)
+	{
+		if (!VisSet.Contains(Target))
+		{
+			OutError = FString::Printf(
+				TEXT("addressed_to target '%s' not present in visibility set"), *Target);
+			return false;
+		}
+	}
+	return true;
+}
+
 // ---------------------------------------------------------------
 // T3 — Canonical JSON
 //
@@ -940,6 +967,26 @@ int64 UAILiveEventStoreSubsystem::AppendSystemParseFailure(
 {
 	const FString Snippet = InOriginalPayloadSnippet.Left(256);
 
+	// Build payload through TJsonWriter so every field — including the human-readable
+	// `text` summary — gets correctly escaped. A literal `"` or newline in the actor
+	// name used to break the JSON, which then failed `events.payload_text`'s
+	// `json_extract(payload,'$.text')` GENERATED column on INSERT and tripped
+	// InsertEventBypassValidation's UE_LOG(Fatal).
+	FString PayloadJson;
+	{
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&PayloadJson);
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("text"), FString::Printf(
+			TEXT("parse failed for actor=%s event_type=%s"),
+			*InOriginalActor, *InOriginalEventTypeStr));
+		Writer->WriteValue(TEXT("original_actor"), InOriginalActor);
+		Writer->WriteValue(TEXT("original_event_type"), InOriginalEventTypeStr);
+		Writer->WriteValue(TEXT("reason"), InErrorReason);
+		Writer->WriteValue(TEXT("original_payload_snippet"), Snippet);
+		Writer->WriteObjectEnd();
+		Writer->Close();
+	}
+
 	FAILiveEvent Sys;
 	Sys.Actor = TEXT("system");
 	Sys.EventType = EAILiveEventType::SystemParseFailed;
@@ -947,17 +994,7 @@ int64 UAILiveEventStoreSubsystem::AppendSystemParseFailure(
 	Sys.Phase = EAILivePhase::Setup;
 	Sys.RoundNo = 0;
 	Sys.Visibility = { TEXT("system") };
-	Sys.PayloadJson = FString::Printf(TEXT(
-		"{\"text\":\"parse failed for actor=%s event_type=%s\","
-		"\"original_actor\":%s,"
-		"\"original_event_type\":%s,"
-		"\"reason\":%s,"
-		"\"original_payload_snippet\":%s}"),
-		*InOriginalActor, *InOriginalEventTypeStr,
-		*AILiveUtil::EscapeJsonString(InOriginalActor),
-		*AILiveUtil::EscapeJsonString(InOriginalEventTypeStr),
-		*AILiveUtil::EscapeJsonString(InErrorReason),
-		*AILiveUtil::EscapeJsonString(Snippet));
+	Sys.PayloadJson = PayloadJson;
 
 	return InsertEventBypassValidation(Sys);
 }
@@ -1018,6 +1055,25 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 				Err,
 				InOutEvents[i].PayloadJson);
 			return -1;
+		}
+		// Soft check (schema.yaml): addressed_to should be a subset of expanded
+		// visibility. Failure logs Warning + writes an audit parse_failed row,
+		// but the original event is still written — the protocol allows
+		// "暗中点名" use cases where a target is whispered but not visible.
+		FString AddrErr;
+		if (!IsAddressedToSubsetOfVisibility(
+				InOutEvents[i].AddressedTo, InOutEvents[i].Visibility, AddrErr))
+		{
+			UE_LOG(LogAILiveMemory, Warning,
+				TEXT("AppendEventsAtomically event[%d] (actor=%s): %s "
+					 "(proceeding with write per schema policy)"),
+				i, *InOutEvents[i].Actor, *AddrErr);
+			AppendSystemParseFailure(
+				InOutEvents[i].Actor,
+				AILiveEvent::EventTypeToString(InOutEvents[i].EventType),
+				AddrErr,
+				InOutEvents[i].PayloadJson);
+			// No early return — the event still gets written.
 		}
 	}
 
@@ -1554,6 +1610,30 @@ static FAutoConsoleCommand GAILiveTestAppendBadPayloadNoText(
 		const int64 Seq = Sys->AppendEvent(Ev);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("AppendBadPayloadNoText -> seq=%lld (expect -1)"), Seq);
+	}));
+
+static FAutoConsoleCommand GAILiveTestAppendAddressedToOutsideVis(
+	TEXT("AILive.Test.AppendAddressedToOutsideVis"),
+	TEXT("AILive.Test.AppendAddressedToOutsideVis — append with addressed_to=[NPC07], visibility=[NPC03]; expect Warning + parse_failed but event STILL gets written"),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("AppendAddressedToOutsideVis: no game open"));
+			return;
+		}
+		FAILiveEvent Ev;
+		Ev.Actor = TEXT("NPC03");
+		Ev.EventType = EAILiveEventType::SpeechIntended;
+		Ev.Phase = EAILivePhase::DayDiscuss;
+		Ev.Visibility = { TEXT("NPC03") };
+		Ev.AddressedTo = { TEXT("NPC07") };  // not in visibility — should warn but not reject
+		Ev.PayloadJson = TEXT("{\"text\":\"whispered to NPC07 but only NPC03 sees this\"}");
+		const int64 Seq = Sys->AppendEvent(Ev);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("AppendAddressedToOutsideVis -> seq=%lld (expect >0; one parse_failed audit row should also exist)"),
+			Seq);
 	}));
 
 static FAutoConsoleCommand GAILiveTestBeginTickCmd(
