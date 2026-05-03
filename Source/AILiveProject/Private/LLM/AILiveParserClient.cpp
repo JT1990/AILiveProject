@@ -177,6 +177,7 @@ namespace AILiveParser
 		};
 
 		FString IntendedBody;
+		FString BidBody;
 
 		for (const FTagSpec& T : Tags)
 		{
@@ -192,6 +193,10 @@ namespace AILiveParser
 			{
 				IntendedBody = Body;
 			}
+			else if (FCString::Strcmp(T.Open, TEXT("<BID>")) == 0)
+			{
+				BidBody = Body;
+			}
 		}
 
 		TSharedPtr<FJsonObject> IntendedObj;
@@ -199,6 +204,17 @@ namespace AILiveParser
 		{
 			R.bOk = false;
 			R.ErrorReason = TEXT("intended payload not valid JSON");
+			R.FailedStage = TEXT("raw_prevalidate");
+			return R;
+		}
+
+		// principles §5.2bis：bid 必须是 JSON object（urgency 必填，由 Stage 3 校验数值）。
+		// 这里只做结构性校验，避免 <BID>not json</BID> 进 Parser LLM。
+		TSharedPtr<FJsonObject> BidObj;
+		if (!TryParseJsonObject(BidBody, BidObj))
+		{
+			R.bOk = false;
+			R.ErrorReason = TEXT("bid payload not valid JSON");
 			R.FailedStage = TEXT("raw_prevalidate");
 			return R;
 		}
@@ -221,7 +237,7 @@ namespace AILiveParser
 			return R;
 		}
 
-		FString Scratchpad;
+		// scratchpad: 必须存在且是 string（TryGetStringField 仅在 string 时返回 true）
 		if (!Root->HasField(TEXT("scratchpad")))
 		{
 			R.bOk = false;
@@ -229,8 +245,16 @@ namespace AILiveParser
 			R.FailedStage = TEXT("output_validate");
 			return R;
 		}
-		Root->TryGetStringField(TEXT("scratchpad"), Scratchpad);
+		FString Scratchpad;
+		if (!Root->TryGetStringField(TEXT("scratchpad"), Scratchpad))
+		{
+			R.bOk = false;
+			R.ErrorReason = TEXT("scratchpad must be string");
+			R.FailedStage = TEXT("output_validate");
+			return R;
+		}
 
+		// intended: 必须 object + intended.text 必须 string
 		const TSharedPtr<FJsonObject>* IntendedPtr = nullptr;
 		if (!Root->HasField(TEXT("intended")))
 		{
@@ -246,14 +270,16 @@ namespace AILiveParser
 			R.FailedStage = TEXT("output_validate");
 			return R;
 		}
-		if (!(*IntendedPtr)->HasField(TEXT("text")))
+		FString IntendedText;
+		if (!(*IntendedPtr)->TryGetStringField(TEXT("text"), IntendedText))
 		{
 			R.bOk = false;
-			R.ErrorReason = TEXT("intended.text missing");
+			R.ErrorReason = TEXT("intended.text missing or not string");
 			R.FailedStage = TEXT("output_validate");
 			return R;
 		}
 
+		// bid: 必须 object + bid.urgency 必须 number（principles §5.2bis 必填）
 		const TSharedPtr<FJsonObject>* BidPtr = nullptr;
 		if (!Root->HasField(TEXT("bid")))
 		{
@@ -269,8 +295,16 @@ namespace AILiveParser
 			R.FailedStage = TEXT("output_validate");
 			return R;
 		}
+		double BidUrgency = 0.0;
+		if (!(*BidPtr)->TryGetNumberField(TEXT("urgency"), BidUrgency))
+		{
+			R.bOk = false;
+			R.ErrorReason = TEXT("bid.urgency missing or not number");
+			R.FailedStage = TEXT("output_validate");
+			return R;
+		}
 
-		FString NoteText;
+		// note_to_self: 必须存在且是 string
 		if (!Root->HasField(TEXT("note_to_self")))
 		{
 			R.bOk = false;
@@ -278,7 +312,14 @@ namespace AILiveParser
 			R.FailedStage = TEXT("output_validate");
 			return R;
 		}
-		Root->TryGetStringField(TEXT("note_to_self"), NoteText);
+		FString NoteText;
+		if (!Root->TryGetStringField(TEXT("note_to_self"), NoteText))
+		{
+			R.bOk = false;
+			R.ErrorReason = TEXT("note_to_self must be string");
+			R.FailedStage = TEXT("output_validate");
+			return R;
+		}
 
 		R.bOk = true;
 		R.Scratchpad   = Scratchpad;

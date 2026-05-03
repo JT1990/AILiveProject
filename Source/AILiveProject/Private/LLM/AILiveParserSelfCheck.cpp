@@ -150,11 +150,15 @@ namespace
 	void RunCaseE_RegistryConsistency()
 	{
 		const FString MetaDbPath = FPaths::ProjectSavedDir() / TEXT("Games") / TEXT("_meta.db");
+		// 注意：用 ReadWrite 而非 ReadOnly 开第二连接 —— UE 5.7 SQLiteCore + WAL
+		// 同进程内若主连接已创建 -shm 共享映射，第二个 ReadOnly 连接会拿不到 -shm
+		// 共享、回 SQLITE_IOERR；ReadWrite 模式带 SQLITE_OPEN_READWRITE flag 可以
+		// attach 已存在的 -shm。本步只读 schema_meta，不写任何东西。
 		FSQLiteDatabase Reader;
-		if (!Reader.Open(*MetaDbPath, ESQLiteDatabaseOpenMode::ReadOnly))
+		if (!Reader.Open(*MetaDbPath, ESQLiteDatabaseOpenMode::ReadWrite))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("[ParserSelfCheck:E_RegistryConsistency] cannot open _meta.db ReadOnly: %s (%s)"),
+				TEXT("[ParserSelfCheck:E_RegistryConsistency] cannot open _meta.db ReadWrite: %s (%s)"),
 				*MetaDbPath, *Reader.GetLastError());
 			UE_LOG(LogAILiveMemory, Display,
 				TEXT("[ParserSelfCheck:E_RegistryConsistency] verdict=FAIL (no _meta.db; run AILive.Test.BeginGame first)"));
@@ -211,5 +215,5 @@ namespace
 
 static FAutoConsoleCommand CCmdParserSelfCheck(
 	TEXT("AILive.Test.ParserSelfCheck"),
-	TEXT("Run T2.5 Parser self-check: 6 acceptance cases (D/E sync, A/B/C async)."),
+	TEXT("Run T2.5 Parser self-check: 5 cases A/B/C/D/E (D/E sync, A/B/C async; A calls real Parser LLM)."),
 	FConsoleCommandDelegate::CreateStatic(&RunParserSelfCheck));
