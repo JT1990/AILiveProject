@@ -151,6 +151,10 @@
 		{
 			"Name": "GameplayBehaviorSmartObjects",
 			"Enabled": true
+		},
+		{
+			"Name": "SQLiteCore",
+			"Enabled": true
 		}
 	],
 	"EpicSampleNameHash": "1673045636"

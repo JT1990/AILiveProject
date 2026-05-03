@@ -23,6 +23,8 @@ public class AILiveProject : ModuleRules
 			"GameplayTags",
 			"MediaAssets",
 			"MediaPlate",
+			"SQLiteCore",
+			"OpenSSL",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
