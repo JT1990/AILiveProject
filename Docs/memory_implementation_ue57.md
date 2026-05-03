@@ -17,7 +17,7 @@
 | 数据库模块  | `SQLiteCore`（`Engine/Plugins/Runtime/Database/SQLiteCore`） | 见下方"启用方式"——`Build.cs` 添加依赖 + `.uproject` 显式启用插件，避免引擎升级时默认值变化导致编译失败 |
 | HTTP 客户端 | **UE `HTTP` 模块**                                           | 已在 `Build.cs` 中                                                                                     |
 | JSON        | **UE `Json` + `JsonUtilities`**                              | 已在 `Build.cs` 中                                                                                     |
-| 哈希        | UE `FSHA1` 或 `OpenSSL`（通过 `OpenSSL` 模块）               | 哈希链使用 SHA-256，UE 已内置 OpenSSL                                                                  |
+| 哈希        | OpenSSL `EVP_sha256`（通过 `OpenSSL` 模块）唯一               | 哈希链 + prompt 指纹均使用 SHA-256；**禁用 `FSHA1`**——CI 应 grep `Sha1` / `FSHA1` 确认工程内零结果   |
 | 异步并发    | `TFuture<T>` + `Async()`                                     | 沿用现有 `Act02RuleReceiveDirector` 模式                                                               |
 | 日志        | `UE_LOG` + 新建 `LogAILiveMemory` category                   | 沿用 UE 标准                                                                                           |
 | 审查工具    | **DB Browser for SQLite**（外部 GUI）                        | 团队成员桌面安装，零集成成本                                                                           |
@@ -164,11 +164,17 @@ CREATE TABLE events (
     game_id         TEXT NOT NULL,
     seq             INTEGER NOT NULL,                    -- SQLite INTEGER 原生 64 位
                                                           -- seq 推进的基本单位是「一拍」(tick)
+    tick_no         INTEGER NOT NULL DEFAULT 0,          -- 协议层索引列：BeginTick(N) 后该拍所有事件 tick_no=N
+                                                          -- ListBidsForTick / ResolveFloor / Resume 同拍重建
+                                                          --   按该列直读，不依赖脆弱的 seq 范围分组
+                                                          -- **不参与 canonical_json**——它是协议层索引，
+                                                          --   不是博弈语义
     round_no        INTEGER NOT NULL,                    -- 含义为「阶段计数标签」
     phase           TEXT NOT NULL,                       -- 见 EAILivePhase
     actor           TEXT NOT NULL,                       -- 'NPC01' | 'orchestrator' | 'system'
     event_type      TEXT NOT NULL,                       -- 见 EAILiveEventType
                                                           -- 含 speech.intended / bid /
+                                                          --     orchestrator.tick_anchor /
                                                           --     orchestrator.tick_resolved /
                                                           --     action.intent / action.resolved /
                                                           --     action.cancelled / orchestrator.tick_audit /
@@ -189,6 +195,7 @@ CREATE TABLE events (
                                                           -- action.intent.parent_event_id
                                                           --     指向其源 speech.intended 的 event_id；
                                                           -- tick_audit.parent_event_id 指向同拍 tick_resolved
+                                                          -- 同拍其它事件可选指向 tick_anchor 用于因果链回溯
     parser_version  TEXT NOT NULL DEFAULT '1',
     raw_llm_output  TEXT,
     prev_event_hash TEXT NOT NULL,                       -- SHA-256
@@ -200,6 +207,7 @@ CREATE TABLE events (
 CREATE INDEX idx_events_game_round ON events (game_id, round_no, seq);
 CREATE INDEX idx_events_actor      ON events (game_id, actor, seq);
 CREATE INDEX idx_events_type       ON events (game_id, event_type, round_no);
+CREATE INDEX idx_events_game_tick  ON events (game_id, tick_no, seq);
 
 -- ============================================================
 -- append-only DB-level 强制（trigger）
@@ -373,15 +381,19 @@ CREATE TABLE leakage_audits (
     PRIMARY KEY (game_id, seq)
 );
 
--- 跨厂商协议校准
+-- 跨厂商协议校准 + 局内博弈状态（schema.yaml agent_battle_config 的 game_db 落点）
 CREATE TABLE agent_calibration (
-    game_id       TEXT NOT NULL,
-    agent_id      TEXT NOT NULL,
-    model_vendor  TEXT NOT NULL,
-    model_name    TEXT NOT NULL,
-    bid_offset    REAL DEFAULT 0.0,
-    role          TEXT,
-    faction       TEXT,
+    game_id              TEXT NOT NULL,
+    agent_id             TEXT NOT NULL,
+    model_vendor         TEXT NOT NULL,
+    model_name           TEXT NOT NULL,
+    bid_offset           REAL DEFAULT 0.0,
+    role                 TEXT,                            -- agent_battle_config.role
+    faction              TEXT,                            -- agent_battle_config.faction
+    private_goal         TEXT,                            -- agent_battle_config.private_goal
+    alliance_members_json TEXT NOT NULL DEFAULT '[]',     -- agent_battle_config.alliance_members
+    seq_start            INTEGER NOT NULL DEFAULT 1,      -- agent_battle_config.seq_start
+    -- alive 不在此表——存于 game_state.state_blob 高频更新（见 schema.yaml 注释）
     PRIMARY KEY (game_id, agent_id)
 );
 
@@ -441,12 +453,36 @@ CREATE TRIGGER lifecycle_no_delete BEFORE DELETE ON agent_lifecycle_events
 BEGIN
     SELECT RAISE(ABORT, 'agent_lifecycle_events is append-only');
 END;
+
+-- ============================================================
+-- agent_registry：agent_lifecycle_events 的"当前状态"投影
+-- 详见 schema.yaml 同名段。持久化 schema.yaml `agent.status` /
+-- `agent.deleted_at` / `agent.created_at` 等动态身份字段。
+-- 静态身份（FullName / Nickname / VoicePresentation / Voice / Appearance）
+-- 不入本表——它们的真相源是 DataAsset。
+-- ============================================================
+CREATE TABLE agent_registry (
+    agent_id           TEXT PRIMARY KEY,
+    persona_version    INTEGER NOT NULL DEFAULT 1,
+    status             TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'deleted' | 'archived'
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    deleted_at         TEXT,                            -- nullable
+    last_seen_game_id  TEXT,                            -- nullable
+    last_updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_registry_status ON agent_registry (status);
+
+-- agent_registry 是投影，可 UPDATE（不像 events / agent_lifecycle_events 是 append-only）
+-- 但 UPDATE 必须走 EventStore 内部 SyncRegistryFromLifecycle()，业务层不可直接 UPDATE
 ```
 
-**与单局 .db 的桥接**：当某局触发 `delete_executed` 时，orchestrator 必须做两件事，按下列顺序：
+**与单局 .db 的桥接 + agent_registry 同步**：当某局触发 `delete_executed` 时，orchestrator 必须做三件事，按下列顺序：
 
-1. 在 `_meta.db` 写一条 `agent_lifecycle_events`（拿到 `event_id`）
-2. 在该局 `.db` 写一条 `events` 事件，`event_type='system.delete_executed'`，payload 含 `lifecycle_event_id` 字段引用 1 的 event_id，`visibility=["public"]`（其他 agent 必须知道某 agent 被 Delete——这是 PRD 第三触发器"同伴被威胁"的载体）。
+1. 在 `_meta.db.agent_lifecycle_events` 写一条 lifecycle 事件（拿到 `event_id`）
+2. 在 `_meta.db.agent_registry` `UPDATE` 对应 agent_id：`status='deleted'`、`deleted_at=<wall_clock>`、`last_updated_at=<wall_clock>`（由 EventStore 内部 `SyncRegistryFromLifecycle()` 封装，业务层不感知）
+3. 在该局 `.db` 写一条 `events` 事件，`event_type='system.delete_executed'`，payload 含 `lifecycle_event_id` 字段引用 1 的 event_id，`visibility=["public"]`（其他 agent 必须知道某 agent 被 Delete——这是 PRD 第三触发器"同伴被威胁"的载体）。
+
+`created` / `revived` / `archived` 等其他 lifecycle 事件类型的同步规则同理：lifecycle 写入后 EventStore 自动 UPDATE registry 对应字段，保持 registry 始终是 lifecycle 的当前状态投影。
 
 ### 3.3 视角隔离的写入契约
 
@@ -478,9 +514,9 @@ C++ 实现见 §5.2。
 2. **读取层 alias**：旧字面值由 PromptAssembler / Quote 路径在读取时识别并解释为新语义，不修改原始事件。
 3. **离线工具**（极少用）：手工 `DROP TRIGGER` → 修改 → 重算自该 seq 起所有事件 `event_hash` → 重建 trigger，并写一条 system 事件说明本次修改。**绝不允许在启动迁移函数中走这条路径**。
 
-**当前版本**：`kCurrentSchemaVersion = 1`。本文档对应初始 schema，无历史迁移函数。后续 schema 演化以 `ApplyMigrationV1ToV2()` 等函数承接，必须遵守上述三条不变量。
+**当前版本**：`kCurrentSchemaVersion = 1`。Schema 演化函数（`ApplyMigrationVNToVNplus1`）必须遵守上述三条不变量。
 
-**`_meta.db` 建表**：`agent_lifecycle_events` 表 + 其 append-only trigger，详见 §3.2bis。这是一次性建表脚本（在 `EnsureSchema()` 内通过 `CREATE TABLE IF NOT EXISTS` 幂等化）。
+**`_meta.db` 建表**：`agent_lifecycle_events` + `agent_registry` 表 + 其 append-only trigger，详见 §3.2bis。这是一次性建表脚本（在 `EnsureSchema()` 内通过 `CREATE TABLE IF NOT EXISTS` 幂等化）。
 
 ---
 
@@ -679,6 +715,15 @@ namespace AILiveAgentRoster
 
 **对调用方的影响**：调用方访问 `Cfg.Identity.FullName` / `Cfg.Identity.Voice` / `Cfg.VoicePresentationHint`（不再使用 `Cfg.DisplayName` / `Cfg.Voice` / `Cfg.GenderHint` 这类扁平字段）。`AILiveAgentRoster.cpp::GetDefaultRoster()` 按此结构装配。`Act02RuleReceiveDirector.cpp` 中所有 `NPCs[i].Config.DisplayName` 写为 `NPCs[i].Config.Identity.FullName`。`Identity.VoicePresentation`(`EAILiveVoicePresentation`) 是表征 AI 外壳的字段，五项枚举详见 §4.1 与 schema.yaml `identity.voice_presentation`。
 
+**装配同步约束（双轨字段一致性）**：`FNPCAgentConfig` 同时含 `Core.ModelProvider`（`FString`，schema.yaml `agent.model_provider` 真相源）与 `Provider`（`ELLMProvider`，runtime endpoint resolve 用）。两者必须保持同步，约定如下：
+
+```cpp
+// AILiveAgentRoster::GetDefaultRoster() / DataAsset 加载路径必须保证：
+Cfg.Core.ModelProvider = ProviderToString(Cfg.Provider);  // "deepseek" / "glm" / "qwen3"
+```
+
+写入 events 表 / agent_calibration 表时一律用 `Core.ModelProvider` 字符串；`Provider` enum 仅用于 `ResolveProviderEndpoint(Provider)`。CI 应加单元测试遍历 Roster 校验两者匹配，避免装配漂移。
+
 ### 4.2 事件相关类型
 
 `Source/AILiveProject/Public/Memory/AILiveEventTypes.h`：
@@ -718,6 +763,11 @@ enum class EAILiveEventType : uint8
     ActionResolved       UMETA(DisplayName = "action.resolved"),     // 执行系统完成动作
     ActionCancelled      UMETA(DisplayName = "action.cancelled"),    // 旧动作被新意图覆盖/系统中止
     OrchestratorResolved UMETA(DisplayName = "orchestrator.round_resolved"),
+    OrchestratorTickAnchor UMETA(DisplayName = "orchestrator.tick_anchor"),       // 一拍开始的锚点事件
+                                                                                  // BeginTick(N) 写入；同拍其它事件
+                                                                                  // 可选 parent_event_id 指向它做因果链回溯
+                                                                                  // visibility=["public"]
+                                                                                  // 写入时 tick_no=N（与该拍后续事件一致）
     OrchestratorTickResolved UMETA(DisplayName = "orchestrator.tick_resolved"),  // 拍裁决标记
                                                                                   // 仅含 winner/cold 信息，不含 all_bids
     OrchestratorTickAudit UMETA(DisplayName = "orchestrator.tick_audit"),         // 审计载荷（all_bids 等）
@@ -957,8 +1007,15 @@ public:
     /** 追加单条事件。返回分配的 seq；失败返回 -1。
      *  内部用 FCriticalSection 串行化（多线程并发调用安全），
      *  且会校验 visibility 封闭集合（禁止 "self"）+ payload 含 "text" 字段。
-     *  Visibility 校验失败、payload 缺 text 字段、JSON 解析失败均返回 -1
-     *  并写一条 system.parse_failed 事件供审计。 */
+     *
+     *  失败兜底契约（schema.yaml line 138 / 152 硬约束）：
+     *    Visibility 校验失败、payload 缺 text 字段、JSON 解析失败时：
+     *      1) 返回 -1
+     *      2) 通过 AppendSystemParseFailure() 写一条 system.parse_failed 事件
+     *         （payload 由 EventStore 内部构造，永远合法 → 无递归失败可能）
+     *      3) UE_LOG(Error) 同步打印
+     *    极罕见情况（磁盘满 / .db 损坏）AppendSystemParseFailure 自身失败时，
+     *    才允许只 UE_LOG(Fatal)——此时已超出 EventStore 责任边界。 */
     int64 AppendEvent(FAILiveEvent& InOutEvent);
 
     /** 原子提交多条事件，常用于把同一 agent 同一拍的四通道
@@ -970,6 +1027,18 @@ public:
 
     /** 启动时自动从 events 表 replay 重建 game_state。 */
     bool ResumeFromGameId(const FString& InGameId);
+
+    // === Tick 锚定 ===
+
+    /** 标记新一拍开始：写一条 orchestrator.tick_anchor 事件 + 缓存 InTickNo。
+     *  之后所有 AppendEvent / AppendEventsAtomically / InsertEventBypassValidation
+     *  自动用 InTickNo 填 events.tick_no 列。
+     *  返回 anchor 事件的 seq；失败返回 -1。 */
+    UFUNCTION(BlueprintCallable, Category = "AILive|Memory|Tick")
+    int64 BeginTick(int32 InTickNo);
+
+    UFUNCTION(BlueprintCallable, BlueprintPure, Category = "AILive|Memory|Tick")
+    int32 GetCurrentTickNo() const { return CachedCurrentTickNo; }
 
     // === 读取 ===
 
@@ -1033,6 +1102,8 @@ private:
     bool bOpen = false;
     int64 CachedLastSeq = 0;
     FString CachedLastHash;
+    int32 CachedCurrentTickNo = 0;  // BeginTick(N) 后写到 events.tick_no 列
+                                     // BeginGame() 时 reset 为 0
 
     /** 写入互斥。AppendEvent / AppendEventsAtomically 入口先取此锁，
      *  保证 CachedLastSeq + CachedLastHash + SQLite 连接的串行访问。
@@ -1043,6 +1114,21 @@ private:
     bool ApplyPragmas();
     bool EnsureSchema();
     bool RunMigrations();
+
+    /** EventStore 内部专用：跳过 ValidateVisibility / ValidatePayloadJson 静态校验，
+     *  直接 INSERT 一条事件。仅供 AppendSystemParseFailure 等内部兜底路径调用——
+     *  CI 应 grep 检查业务层零调用。仍持有 WriteMutex + BEGIN IMMEDIATE 事务 +
+     *  哈希链 + seq 分配，append-only 不变量不破。 */
+    int64 InsertEventBypassValidation(FAILiveEvent& InOutEvent);
+
+    /** AppendEvent / AppendEventsAtomically 静态校验失败时的兜底：写一条
+     *  event_type='system.parse_failed' 事件到真相源。payload 由本方法内部构造，
+     *  visibility=["system"] + 含 "text" 字段——保证不会触发再次校验失败。
+     *  返回 parse_failed 事件的 seq；失败返回 -1（极罕见）。 */
+    int64 AppendSystemParseFailure(const FString& InOriginalActor,
+                                    const FString& InOriginalEventTypeStr,
+                                    const FString& InErrorReason,
+                                    const FString& InOriginalPayloadSnippet);
 
     /** visibility 数组的封闭集合校验。
      *  允许：public | audience | orchestrator | system | NPC<NN> | Faction<X>
@@ -1273,7 +1359,10 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(
     if (!bOpen || !Db.IsValid()) return -1;
     if (InOutEvents.Num() == 0) return -1;
 
-    // 先做静态校验，所有事件都通过才进入事务（避免事务内回滚的资源浪费）
+    // 先做静态校验，所有事件都通过才进入事务（避免事务内回滚的资源浪费）。
+    // 任一校验失败：(a) 返回 -1；(b) 写一条 system.parse_failed 事件到真相源。
+    // 这是 schema.yaml line 138/152 硬约束——失败本身是博弈历史的一部分，
+    // 必须可审计；不能只 UE_LOG 就吞掉。
     for (int32 i = 0; i < InOutEvents.Num(); ++i)
     {
         FString Err;
@@ -1282,6 +1371,11 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(
             UE_LOG(LogAILiveMemory, Error,
                 TEXT("AppendEventsAtomically rejected event[%d] (actor=%s): %s"),
                 i, *InOutEvents[i].Actor, *Err);
+            AppendSystemParseFailure(
+                InOutEvents[i].Actor,
+                EventTypeToString(InOutEvents[i].EventType),
+                Err,
+                InOutEvents[i].PayloadJson);
             return -1;
         }
         if (!ValidatePayloadJson(InOutEvents[i].PayloadJson, Err))
@@ -1289,6 +1383,11 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(
             UE_LOG(LogAILiveMemory, Error,
                 TEXT("AppendEventsAtomically rejected event[%d] (actor=%s): %s"),
                 i, *InOutEvents[i].Actor, *Err);
+            AppendSystemParseFailure(
+                InOutEvents[i].Actor,
+                EventTypeToString(InOutEvents[i].EventType),
+                Err,
+                InOutEvents[i].PayloadJson);
             return -1;
         }
     }
@@ -1326,8 +1425,8 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(
                 "INSERT INTO events ("
                 "  event_id, game_id, seq, round_no, phase, actor, event_type,"
                 "  speech_act_type, visibility, addressed_to, payload, parent_event_id,"
-                "  parser_version, raw_llm_output, prev_event_hash, event_hash"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+                "  parser_version, raw_llm_output, prev_event_hash, event_hash, tick_no"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
             Ins.SetBindingValueByIndex(1,  Ev.EventId);
             Ins.SetBindingValueByIndex(2,  Ev.GameId);
             Ins.SetBindingValueByIndex(3,  Ev.Seq);
@@ -1344,6 +1443,7 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(
             Ins.SetBindingValueByIndex(14, Ev.RawLLMOutput);
             Ins.SetBindingValueByIndex(15, LocalLastHash);
             Ins.SetBindingValueByIndex(16, NewHash);
+            Ins.SetBindingValueByIndex(17, CachedCurrentTickNo);
             // 短路求值要从 bOk 开始：写成 `(Ins.Execute() && bOk)` 时
             // 即便 bOk 已经 false，Ins.Execute() 仍会执行（多余 SQL 工作）。
             // 写成 `bOk && Ins.Execute()`：bOk 一旦 false，后续短路不再执行。
@@ -1415,6 +1515,114 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(
 }
 
 // ============================================================
+// AppendSystemParseFailure：校验失败时的真相源兜底
+//   - payload 由本方法内部构造，保证 visibility=["system"] 永远合法、
+//     payload 含 "text" 字段永远合法 → 不会触发再次校验失败
+//   - 仍走 InsertEventBypassValidation → BEGIN IMMEDIATE + 哈希链 + seq 分配
+// ============================================================
+int64 UAILiveEventStoreSubsystem::AppendSystemParseFailure(
+    const FString& InOriginalActor,
+    const FString& InOriginalEventTypeStr,
+    const FString& InErrorReason,
+    const FString& InOriginalPayloadSnippet)
+{
+    // 截断到 256 字符防 fuzzing 输入引发"parse_failed payload 自己过大"
+    const FString Snippet = InOriginalPayloadSnippet.Left(256);
+
+    FAILiveEvent Sys;
+    Sys.Actor       = TEXT("system");
+    Sys.EventType   = EAILiveEventType::SystemParseFailed;
+    Sys.Visibility  = { TEXT("system") };  // 内部构造，永远合法
+    Sys.PayloadJson = FString::Printf(TEXT(
+        "{\"text\":\"parse failed for actor=%s event_type=%s\","
+        "\"original_actor\":\"%s\","
+        "\"original_event_type\":\"%s\","
+        "\"reason\":%s,"
+        "\"original_payload_snippet\":%s}"),
+        *InOriginalActor, *InOriginalEventTypeStr,
+        *InOriginalActor, *InOriginalEventTypeStr,
+        *EscapeJsonString(InErrorReason),
+        *EscapeJsonString(Snippet));
+    return InsertEventBypassValidation(Sys);
+}
+
+// ============================================================
+// InsertEventBypassValidation：跳过静态校验的内部 INSERT 路径
+//   - 仅供 AppendSystemParseFailure 等 EventStore 内部兜底调用
+//   - 业务层调用 = bug；CI 应 grep 检查工程内零业务层调用
+//   - 仍持有 WriteMutex + BEGIN IMMEDIATE 事务 + 哈希链 + seq 分配
+//   - 最低保证：调用方自己确保 payload 合法（visibility 封闭集合 + 含 text 字段）
+// ============================================================
+int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation(FAILiveEvent& InOutEvent)
+{
+    if (!bOpen || !Db.IsValid()) return -1;
+
+    FScopeLock Lock(&WriteMutex);
+    if (!Db->Execute(TEXT("BEGIN IMMEDIATE;"))) return -1;
+
+    InOutEvent.GameId  = CurrentGameId;
+    InOutEvent.Seq     = CachedLastSeq + 1;
+    InOutEvent.EventId = GenerateUuidV7();
+
+    const FString CanonicalPayload = CanonicalJsonOf(InOutEvent);
+    const FString NewHash = ComputeEventHash(CachedLastHash, CanonicalPayload);
+
+    bool bOk = true;
+    {
+        FSQLitePreparedStatement Ins(*Db, TEXT(
+            "INSERT INTO events ("
+            "  event_id, game_id, seq, round_no, phase, actor, event_type,"
+            "  speech_act_type, visibility, addressed_to, payload, parent_event_id,"
+            "  parser_version, raw_llm_output, prev_event_hash, event_hash, tick_no"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+        Ins.SetBindingValueByIndex(1,  InOutEvent.EventId);
+        Ins.SetBindingValueByIndex(2,  InOutEvent.GameId);
+        Ins.SetBindingValueByIndex(3,  InOutEvent.Seq);
+        Ins.SetBindingValueByIndex(4,  InOutEvent.RoundNo);
+        Ins.SetBindingValueByIndex(5,  PhaseToString(InOutEvent.Phase));
+        Ins.SetBindingValueByIndex(6,  InOutEvent.Actor);
+        Ins.SetBindingValueByIndex(7,  EventTypeToString(InOutEvent.EventType));
+        Ins.SetBindingValueByIndex(8,  SpeechActToString(InOutEvent.SpeechActType));
+        Ins.SetBindingValueByIndex(9,  ArrayToJsonString(InOutEvent.Visibility));
+        Ins.SetBindingValueByIndex(10, ArrayToJsonString(InOutEvent.AddressedTo));
+        Ins.SetBindingValueByIndex(11, InOutEvent.PayloadJson);
+        Ins.SetBindingValueByIndex(12, InOutEvent.ParentEventId);
+        Ins.SetBindingValueByIndex(13, InOutEvent.ParserVersion);
+        Ins.SetBindingValueByIndex(14, InOutEvent.RawLLMOutput);
+        Ins.SetBindingValueByIndex(15, CachedLastHash);
+        Ins.SetBindingValueByIndex(16, NewHash);
+        Ins.SetBindingValueByIndex(17, GetCurrentTickNo());  // 内部缓存
+        bOk = bOk && Ins.Execute();
+    }
+    if (bOk)
+    {
+        FSQLitePreparedStatement Vis(*Db, TEXT(
+            "INSERT INTO event_visibility(event_id, viewer) VALUES (?, ?)"));
+        for (const FString& V : InOutEvent.Visibility)
+        {
+            if (!bOk) break;
+            Vis.Reset();
+            Vis.SetBindingValueByIndex(1, InOutEvent.EventId);
+            Vis.SetBindingValueByIndex(2, V);
+            bOk = bOk && Vis.Execute();
+        }
+    }
+    if (bOk)
+    {
+        Db->Execute(TEXT("COMMIT;"));
+        CachedLastSeq  = InOutEvent.Seq;
+        CachedLastHash = NewHash;
+        return InOutEvent.Seq;
+    }
+    Db->Execute(TEXT("ROLLBACK;"));
+    UE_LOG(LogAILiveMemory, Fatal,
+        TEXT("InsertEventBypassValidation failed (game=%s, actor=%s) — "
+             "EventStore is past its responsibility boundary."),
+        *CurrentGameId, *InOutEvent.Actor);
+    return -1;
+}
+
+// ============================================================
 // ComputeEventHash：SHA-256（OpenSSL EVP_sha256）
 // ============================================================
 FString UAILiveEventStoreSubsystem::ComputeEventHash(
@@ -1445,6 +1653,9 @@ FString UAILiveEventStoreSubsystem::ComputeEventHash(
 > 3. 数组保留写入顺序，不重排
 > 4. 空字符串 `""` 与缺字段 `null` 必须可区分
 > 5. 必须提供单元测试：同一 `FAILiveEvent` 序列化两次 byte-for-byte 完全相同
+> 6. **`tick_no` 字段必须显式跳过**——它是协议层索引列，不是博弈语义；
+>    跳过后所有 schema 版本的事件使用相同 canonical 算法，跨 schema 升级时
+>    无需重算 event_hash
 >
 > 哈希算法固定 SHA-256，**禁止使用 SHA-1**——切换哈希算法需要重写所有历史 .db 的链，迁移成本远大于现在直接接 OpenSSL。schema 里 `event_hash` 字段为 TEXT(64 hex chars)。
 
@@ -1520,7 +1731,7 @@ const FString RequestId = FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
         "\"system_prompt_hash\":\"%s\",\"user_prompt_hash\":\"%s\","
         "\"started_at\":\"%s\"}"),
         NPCIndex, NPCIndex, *RequestId,
-        *Sha1Hex(SystemPrompt), *Sha1Hex(UserPrompt),
+        *Sha256Fingerprint(SystemPrompt), *Sha256Fingerprint(UserPrompt),
         *FDateTime::UtcNow().ToIso8601());
     Store->AppendEvent(Pre);
 }
@@ -1572,9 +1783,9 @@ OpenAIChat::FResult R = OpenAIChat::RequestBlocking(Req);
 - 每次 LLM 请求都必须写 in-flight，无例外（即便是 dry-run 或 mock 也要写——保证 Resume 协议的统一性）。
 - **wall_clock 不参与排序**——它是信息性字段，只用于"是否过期"分类；事件顺序仍由 `seq` 决定。
 
-#### Sha1Hex / EscapeJsonString 来源
+#### Sha256Fingerprint / EscapeJsonString 来源
 
-这两个辅助函数同样是 `Act02RuleReceiveDirector` 的私有静态方法。**注**：方法名 `Sha1Hex` 是历史命名；实施时按需要选 SHA-1（仅用于非安全的 prompt 哈希指纹用途）或 SHA-256（参与哈希链的字段必须 SHA-256）。也可下沉到 `Source/AILiveProject/Public/Util/` 的通用工具库供其他 Director 复用。
+这两个辅助函数下沉到 `Source/AILiveProject/Public/Util/` 通用工具库，供 EventStore 与所有 Director 复用。`Sha256Fingerprint(const FString&)` 内部走 OpenSSL `EVP_sha256`，与哈希链算法一致——避免开发者看到字面量 `Sha1` 时误用到 event_hash 字段。**禁止再引入任何 SHA-1 路径**（包括 `FSHA1`）。
 
 ---
 
@@ -1739,7 +1950,11 @@ FString AppendPendingIntendedSection(
         a) orchestrator triggers scene push
                                   │
                                   v
-   5) Write orchestrator.tick_resolved with all_bids manifest
+   5) Write TWO events (visibility 必须分开，绝不允许把 all_bids 塞进 public payload):
+        a) orchestrator.tick_resolved   (visibility=["public"])
+              — winner_actor / winner_intended_seq / derived_public_seq / tick_no
+        b) orchestrator.tick_audit      (visibility=["orchestrator"])
+              — all_bids manifest + filter_decision + parent_tick_resolved_seq
                                   │
                                   v
    6) Refresh agent_view_state.pending_intended for all losers
@@ -1794,16 +2009,19 @@ struct AILIVEPROJECT_API FAILiveTickResolution
 
 ```cpp
 UFUNCTION(BlueprintCallable, Category = "AILive|Memory|Bid")
-TArray<FAILiveBid> ListBidsForTick(int64 InTickAnchorSeq) const;
-// 实现：扫 event_type='bid'，按 parent_event_id 或同拍 anchor 分组。
-// MVP：直接按 seq 范围 [TickStartSeq, TickEndSeq) 过滤。
+TArray<FAILiveBid> ListBidsForTick(int32 InTickNo) const;
+// 实现：SELECT ... FROM events WHERE game_id=? AND tick_no=? AND event_type='bid'
+//   - 使用 idx_events_game_tick 索引列直读，O(log n)
+//   - 不依赖 seq 范围或 parent_event_id 分组——多 LLM 并发返回 + in-flight +
+//     action.intent 派生交叉时 seq 必然被穿插，纯 seq 范围切不出"一拍"
+//   - Resume 后无歧义：tick_no 是 events 表持久列，不依赖运行时计数器
 
 UFUNCTION(BlueprintCallable, Category = "AILive|Memory|Bid")
-FAILiveTickResolution ResolveFloor(int64 InTickAnchorSeq,
+FAILiveTickResolution ResolveFloor(int32 InTickNo,
                                     const TArray<FString>& InEligibleAgents,
                                     float InColdThreshold = 3.0f) const;
 // 纯函数：读 bids，应用 bid_offset / 反霸麦衰减 / 被 @ 加权，返回裁决结果。
-// 不写任何事件——orchestrator 拿到结果后自己写 speech.public + tick_resolved。
+// 不写任何事件——orchestrator 拿到结果后自己写 speech.public + tick_resolved + tick_audit。
 ```
 
 ### 7bis.4 反霸麦衰减算法
@@ -1861,6 +2079,12 @@ float ComputeRuntimeAdjustment(
 ```cpp
 void AAct02RuleReceiveDirector::RunTick()
 {
+    // 0) 开拍：写一条 orchestrator.tick_anchor 事件 + 缓存 tick_no
+    //    之后 RunTick 内所有 AppendEvent 自动用 CurrentTickNo 填 events.tick_no 列；
+    //    ListBidsForTick / ResolveFloor 按该列直读
+    const int32 ThisTickNo = ++CurrentTickNo;
+    Store->BeginTick(ThisTickNo);
+
     // 1) 并行调每个在场 agent 的 LLM
     TArray<TFuture<FAgentTickOutput>> Futures;
     for (const FNPCAgentConfig& Cfg : InSceneAgents)
@@ -1871,14 +2095,14 @@ void AAct02RuleReceiveDirector::RunTick()
     for (auto& F : Futures) { F.Wait(); }
 
     // 2) 各 agent 的 RunAgentTick 内部已用 AppendEventsAtomically 把
-    //    scratchpad / intended / bid / note 四条作为一个事务一次性写入。
+    //    scratchpad / intended / bid / note 四条作为一个事务一次性写入；
+    //    四条事件 events.tick_no 都 = ThisTickNo（由 EventStore 自动填）。
     //    （见 §7bis.5——四通道必须原子提交，避免中间态被裁决器看到）
 
-    // 3) 裁决 floor
-    int64 TickAnchorSeq = ComputeTickAnchorSeq();
+    // 3) 裁决 floor（按 tick_no 列直读，不再用 seq 范围）
     TArray<FString> EligibleIds;
     for (const auto& Cfg : InSceneAgents) { EligibleIds.Add(Cfg.Core.AgentId); }
-    FAILiveTickResolution Res = Store->ResolveFloor(TickAnchorSeq, EligibleIds, 3.0f);
+    FAILiveTickResolution Res = Store->ResolveFloor(ThisTickNo, EligibleIds, 3.0f);
 
     // 4) 衍生 speech.public（如果非冷场）
     if (!Res.WinnerActor.IsEmpty())
@@ -1905,10 +2129,9 @@ void AAct02RuleReceiveDirector::RunTick()
 
     // 5) 派生 action.intent —— 对所有写过合法 intended_action 的 agent，
     //    无论是否抢中 floor。这与协议契约 §5.2.4 "动作通道独立于发言权"对齐。
-    //    遍历本拍所有 speech.intended 事件（不只 winner）。
+    //    遍历本拍所有 speech.intended 事件（按 tick_no 列直读，不只 winner）。
     TArray<FAILiveEvent> AllIntendedThisTick =
-        Store->QuoteByEventTypeInSeqRange(EAILiveEventType::SpeechIntended,
-                                           TickAnchorSeq, /*end*/ Store->GetLastSeq());
+        Store->QuoteByEventTypeAndTick(EAILiveEventType::SpeechIntended, ThisTickNo);
     for (const FAILiveEvent& Intended : AllIntendedThisTick)
     {
         FString IntendedActionJson = ExtractJsonField(
@@ -1992,8 +2215,9 @@ void AAct02RuleReceiveDirector::RunTick()
 | **新增**：`Memory/AILiveBidTypes.h/.cpp`            | `FAILiveBid` / `FAILiveTickResolution` 数据结构                                                                                                                                                                                                                                                                      |
 | **新增**：`Memory/AILiveEventStoreSubsystem.h/.cpp` | 子系统 + AppendEvent + AppendEventsAtomically + 读 API + 哈希链；含 `ListMyPendingIntended` / `ListBidsForTick` / `ResolveFloor`                                                                                                                                                                                     |
 | **新增**：`Memory/AILivePromptAssembler.h/.cpp`     | 按 §7 拼装；含 pending_intended 段                                                                                                                                                                                                                                                                                   |
-| **新增**：`Memory/AILiveSchemaMigration.h/.cpp`     | DDL 字符串 + version 管理（初始 schema_version = 1）                                                                                                                                                                                                                                                                 |
+| **新增**：`Memory/AILiveSchemaMigration.h/.cpp`     | DDL 字符串 + version 管理（初始 schema_version = 1）；DDL 字符串包含 `events.tick_no` / `idx_events_game_tick` / `agent_registry` / `agent_calibration` 扩列字段                                                                                                                                                     |
 | **新增**：`Memory/AILiveListenerFilter.h/.cpp`      | Listener-as-filter 兜底实现（MVP 直通，下阶段引入真 LLM 调用）                                                                                                                                                                                                                                                       |
+| **新增**：`Memory/AILiveAgentRegistry.h/.cpp`       | `_meta.db.agent_registry` 同步层：`SyncRegistryFromLifecycle(EventId)` —— lifecycle 事件写入后由 EventStore 调用，UPDATE registry 行；业务层不可直接 UPDATE 此表                                                                                                                                                      |
 
 **实现步骤建议**（按这个顺序提交，每步可独立测试）：
 
@@ -2078,7 +2302,9 @@ POC 分三级，按博弈规模递进。每级是上级的子集，先跑低级�
 | 级别        | 规模                                                                   | 验收标准                                                                                                                                                   |
 | ----------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **L0 单元** | `BeginGame("test001")` 后 `Saved/Games/test001.db` 存在                | DB Browser 打开能看到 `events` / `event_visibility` / `events_fts` 等 14 个表 / 虚表                                                                       |
-| **L0 单元** | `AppendEvent` 写入 100 条合成事件                                      | events 表 100 行；event_visibility 行数 = sum(visibility 数组长度)；seq 严格递增；hash chain 可验证                                                        |
+| **L0 单元** | `BeginGame()` 后 schema_version 启动校验                                 | `SELECT value FROM schema_meta WHERE key='schema_version'` 返回 `kCurrentSchemaVersion` 字符串；`PRAGMA table_info(events)` 列数与 `FAILiveEvent` UPROPERTY 数 + 内部列（`tick_no` / `payload_text` 等）总和对齐 |
+| **L0 单元** | `AppendEvent` 写入 100 条合成事件                                      | events 表 100 行；event_visibility 行数 = sum(visibility 数组长度)；seq 严格递增；hash chain 可验证；所有事件 `tick_no=0`（未调 BeginTick） |
+| **L0 单元** | `BeginTick(N) → AppendEvent × M`                                       | 写入的 M 条事件 `tick_no` 列均 = N；`SELECT * FROM events WHERE tick_no=N` 返回精确 M 行                                                                  |
 | **L1 烟测** | 10 NPC × 3 轮 ACT02（沿用工程当前默认 ReactionRoundCount=3，~60 事件） | 全链路打通；events 无丢失；按 game_id+seq 唯一性约束零冲突                                                                                                 |
 | **L1 烟测** | 第 N 轮原文质问                                                        | `QuoteByRound(N, "NPC03", "self")` 返回准确原文                                                                                                            |
 | **L1 烟测** | 视角隔离                                                               | NPC04 调 `Quote(seq, "NPC04")` 取一个 visibility=`["NPC07"]` 的事件返回不可见标记                                                                          |
@@ -2101,9 +2327,16 @@ POC 分三级，按博弈规模递进。每级是上级的子集，先跑低级�
 | **L2 回归** | append-only DB-level 强制                                              | 直接 SQL `UPDATE events SET payload='x' WHERE seq=1` → 报错 `events table is append-only`；DELETE 同样报错                                                 |
 | **L2 回归** | append-only 与离线工具路径                                             | 离线工具 `DROP TRIGGER` 后 UPDATE/DELETE → 必须重算从该 seq 起所有事件 hash；重新建 trigger 后 VerifyHashChain 通过；启动迁移函数中拒绝 `UPDATE events`    |
 | **L2 回归** | 并发写入互斥                                                           | 10 个线程同时各调 `AppendEventsAtomically(4 events)` → events 表 40 行；seq 1..40 严格递增；hash chain 连续；无 SQLite misuse                              |
-| **L2 回归** | visibility self 拒绝                                                   | 调用方传 `Visibility = {"self", "NPC03"}` → AppendEvent 返回 -1；UE_LOG 含 "must be expanded to a concrete actor"                                          |
-| **L2 回归** | visibility 自由文本拒绝                                                | 调用方传 `Visibility = {"random_string"}` → AppendEvent 返回 -1                                                                                            |
-| **L2 回归** | payload text 缺失拒绝                                                  | 调用方传 `PayloadJson = "{\"foo\":\"bar\"}"`（无 text 字段）→ AppendEvent 返回 -1                                                                          |
+| **L2 回归** | visibility self 拒绝                                                   | 调用方传 `Visibility = {"self", "NPC03"}` → AppendEvent 返回 -1；UE_LOG 含 "must be expanded to a concrete actor"；events 表新增 1 条 `event_type='system.parse_failed'`，payload 含原 actor / event_type / reason |
+| **L2 回归** | visibility 自由文本拒绝                                                | 调用方传 `Visibility = {"random_string"}` → AppendEvent 返回 -1；events 表新增 1 条 `system.parse_failed` 事件 |
+| **L2 回归** | payload text 缺失拒绝                                                  | 调用方传 `PayloadJson = "{\"foo\":\"bar\"}"`（无 text 字段）→ AppendEvent 返回 -1；events 表新增 1 条 `system.parse_failed` 事件 |
+| **L2 回归** | parse_failed 不递归失败                                                | 故意构造一个会让 `AppendSystemParseFailure` 自身调用失败的场景（如 .db 只读），验证 `UE_LOG(Fatal)` 触发，无无限递归                                       |
+| **L2 回归** | 同拍 tick_no 切片                                                      | 单拍内 10 个 agent 各写 4 条事件 + 3 条 system.llm_inflight 穿插 → `SELECT * FROM events WHERE tick_no=N AND event_type='bid'` 精确返回 10 条 bid          |
+| **L2 回归** | tick_no 不参与 canonical_json                                          | 同一 `FAILiveEvent` 一次 `tick_no=0` 一次 `tick_no=42`，`CanonicalJsonOf()` 输出 byte-for-byte 一致；`event_hash` 与 tick_no 无关                          |
+| **L2 回归** | Sha256Fingerprint 一致性                                                | `Sha256Fingerprint("hello")` 输出 64 hex chars，与 OpenSSL CLI `echo -n hello \| openssl dgst -sha256` 输出一致；CI grep `Sha1` / `FSHA1` 工程内零结果    |
+| **L2 回归** | agent_registry 同步                                                    | 写一条 `delete_executed` lifecycle 事件后，`SELECT status, deleted_at FROM agent_registry WHERE agent_id=?` 返回 `'deleted'` + 非空 ISO 8601 时间戳        |
+| **L2 回归** | addressed_to ⊆ visibility 校验                                          | 调用方传 `addressed_to=["NPC07"], visibility=["NPC03"]` → AppendEvent 仍写入但记 UE_LOG(Warning) + 1 条 `system.parse_failed`（非拒绝写入）              |
+| **L2 回归** | 装配双轨同步                                                            | 遍历 `GetDefaultRoster()` 所有项验证 `Cfg.Core.ModelProvider == ProviderToString(Cfg.Provider)`                                                            |
 | **L2 回归** | tick_resolved / tick_audit 拆分                                        | 任一 NPC 调 `Quote(tick_audit_seq, "NPC03")` 返回不可见标记；`Quote(tick_resolved_seq, "NPC03")` 返回事件且 payload 不含 all_bids                          |
 | **L2 回归** | action.intent 对所有 agent 派生                                        | 一拍中 3 个 agent 写 intended_action 但只 1 人抢中 floor → action.intent 表写入 3 条；3 条 visibility 各为各自 actor                                       |
 | **L2 回归** | canonical JSON 不变性                                                  | 同一 `FAILiveEvent` 调 `CanonicalJsonOf()` 两次，byte-for-byte 完全相同；浮点字段 `1.0` 序列化稳定                                                         |

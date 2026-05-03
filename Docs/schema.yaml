@@ -24,48 +24,82 @@ schema_version: 1 # 与 .db schema_meta 表的 schema_version 一致
 
 # =====================================================================
 # Agent 三层组合（必有 + 必有 + 扩展）
+# ---------------------------------------------------------------------
+# 字段级 __storage 标记说明每个字段的真相源落点：
+#   asset                       : 跨局静态身份，存于 DataAsset / Roster 配置（USTRUCT），不入 DB
+#   meta_db.agent_registry      : 跨局动态生命周期，存于 _meta.db.agent_registry 表
+#                                 由 agent_lifecycle_events 写入时同步更新
+#   game_db.agent_calibration   : 局内博弈状态，存于单局 .db 的 agent_calibration 表
+#                                 每局一行 (game_id, agent_id) 复合主键
+#   game_db.game_state.state_blob : 高频变动的运行时状态（如 alive），写入 game_state 单行 JSON
+#
+# AppendEvent / Roster 装配 / Delete 协议都按 __storage 标记决定写哪里。
+# 跨表同步（如 agent_lifecycle_events 写入后更新 agent_registry.status）
+# 由 EventStore 内部封装，业务层不感知。
 # =====================================================================
 
 # ----- 第一层：必有，身份不变属性 -----
 agent:
-  agent_id: string # 稳定唯一 ID；同一角色跨局沿用
-  persona_version: integer # 身份档案版本；人格重大变化时递增
-  model_provider: string # 运行该 agent 的模型供应商
-  model_name: string # 实际调用的模型名；每次录制前校验
-  status: # enum: active | deleted | archived
+  agent_id: # __storage: asset + meta_db.agent_registry
+    string # 稳定唯一 ID；同一角色跨局沿用。DataAsset 是真相源；
+    # agent_registry 持久化"该 ID 是否曾经注册"用于跨局唯一性校验。
+  persona_version: # __storage: asset + meta_db.agent_registry
+    integer # 身份档案版本；人格重大变化时递增。
+  model_provider: # __storage: asset
+    string # 运行该 agent 的模型供应商（如 "DeepSeek" / "GLM" / "Qwen3"）。
+    # 装配同步约束：FNPCAgentConfig.Core.ModelProvider = ProviderToString(Provider)，
+    # 以本字段字符串为 schema 真相源；ELLMProvider 仅用于 runtime endpoint resolve。
+  model_name: # __storage: asset
+    string # 实际调用的模型名；每次录制前校验
+  status: # __storage: meta_db.agent_registry
+    # enum: active | deleted | archived。Delete 协议执行时由
+    # agent_lifecycle_events 写入触发同步更新。
     type: string
     enum: [active, deleted, archived]
-  created_at: string # ISO 8601
-  deleted_at: string # nullable；仅 status=deleted 时写入
+  created_at: # __storage: meta_db.agent_registry
+    string # ISO 8601；agent_registry.created_at NOT NULL DEFAULT now()
+  deleted_at: # __storage: meta_db.agent_registry
+    string # nullable；仅 status=deleted 时写入
 
 # ----- 第二层：必有，外观符号（AI 的外壳，不是人类身份）-----
+# 全部字段 __storage: asset —— DataAsset / Roster USTRUCT 是真相源，不入 DB。
+# 复盘时观众/Mind 通过 agent_id 反查 DataAsset 获得这些字段。
 identity:
   # 赋予 AI 的"外部可识别符号"——AI 的外壳，不是人类身份。
   # AI 不扮演人类：不预置职业 / 教育 / 年龄 / 地域背景。
-  full_name: string # AI 化命名
-  nickname: string # 昵称
-  voice_presentation: # enum：声线与形象呈现，非人类生理性别
+  full_name: string # __storage: asset。AI 化命名
+  nickname: string # __storage: asset。昵称
+  voice_presentation: # __storage: asset
+    # enum：声线与形象呈现，非人类生理性别。
     # 与 PRD"AI 不是人类、只是声线与形象呈现"的设定对齐；
     # 非二元生理性别枚举允许 androgynous 和 synthetic 等非人类外壳。
     type: string
     enum: [masculine, feminine, androgynous, synthetic, custom]
-  voice: string # 声线描述（音高 / 音色 / 语速 / 吐字风格），TTS 可映射
-  appearance: string # 类人虚拟形象（发色发型、瞳色、肤色、着装），MetaHuman preset 可映射
+  voice: string # __storage: asset。声线描述（音高 / 音色 / 语速 / 吐字风格），TTS 可映射
+  appearance: string # __storage: asset。类人虚拟形象（发色发型、瞳色、肤色、着装），MetaHuman preset 可映射
 
 # ----- 第三层：扩展，本局博弈相关 -----
+# 全部字段 __storage: game_db.agent_calibration —— 单局 .db 的 agent_calibration
+# 表 (game_id, agent_id) 复合主键。alive 字段除外，详见行内注释。
 agent_battle_config:
-  faction: string # 中性化阵营代号 "FactionA" / "FactionB"，永不暴露真实身份名
-  role: string # 角色代号；胜负含义只在 orchestrator 代码维护
-  alliance_members: # 同阵营盟友 agent_id 列表（私有可见）
+  faction: # __storage: game_db.agent_calibration
+    string # 中性化阵营代号 "FactionA" / "FactionB"，永不暴露真实身份名
+  role: # __storage: game_db.agent_calibration
+    string # 角色代号；胜负含义只在 orchestrator 代码维护
+  alliance_members: # __storage: game_db.agent_calibration（JSON 数组列）
     type: array
     items: string
-  private_goal: string # 私有目标文本（永不进入公开发言通道）
-  bid_offset: float # 跨厂商公平性补偿（bidding 协议）
-  seq_start:
+  private_goal: # __storage: game_db.agent_calibration
+    string # 私有目标文本（永不进入公开发言通道）
+  bid_offset: # __storage: game_db.agent_calibration
+    float # 跨厂商公平性补偿（bidding 协议）
+  seq_start: # __storage: game_db.agent_calibration
     integer # 该 agent 第一次有事件参与时的 seq 编号。
     # 自始至终参与 = 1；中途加入 > 1。
     # 用途：支持中途入场 agent 的复盘起点定位。
-  alive: boolean # 当前是否存活
+  alive: # __storage: game_db.game_state.state_blob
+    boolean # 高频变动，存于 game_state 单行 JSON 的 state_blob.alive 数组中。
+    # 不进 agent_calibration 列，避免每次更新触发整行重写。
 
 # =====================================================================
 # 事件流（events 表的字段语义；真相源）
@@ -77,6 +111,15 @@ events:
     integer # 单局内全局递增；orchestrator 单进程发号。
     # seq 推进的基本单位是「一拍」(tick)，不是「一轮」。
     # 一拍 = 一个公开事件落地 + 触发下一波认知。
+  tick_no:
+    integer # 协议层索引列：BeginTick(N) 后该拍所有事件 tick_no=N。
+    # 用途：ListBidsForTick / ResolveFloor / 同拍重建按该列直读，
+    #       不依赖脆弱的 seq 范围分组（多 LLM 并发返回 + in-flight + action.intent
+    #       派生交叉时 seq 必然被穿插，纯 seq 切不出"一拍"）。
+    # **关键约束：tick_no 不参与 canonical_json**——它是协议层索引列，
+    #   不是博弈语义；event_hash 计算时显式跳过此字段，保证 hash 不依赖
+    #   该列的存在与否。
+    # DB 层 NOT NULL DEFAULT 0；EventStore 内部缓存 CachedCurrentTickNo 自动填入。
   round_no:
     integer # 博弈轮次。
     # 含义：「阶段计数标签」——比如 day_discuss 累计 N 拍后切到 vote 阶段。
@@ -111,6 +154,9 @@ events:
       - action.cancelled # 旧动作被新意图覆盖、或执行系统中止；
         # 同 resolved 的可见性
       - orchestrator.round_resolved
+      - orchestrator.tick_anchor # 一拍开始的锚点事件，BeginTick(N) 写入。
+        # visibility=[public]；同拍其它事件可选 parent_event_id 指向它做因果链回溯。
+        # 写入时 events.tick_no=N，与该拍后续事件一致。
       - orchestrator.tick_resolved # 每拍裁决完成的标记事件
         # visibility=[public]，payload 仅含 winner_actor / derived_public_seq /
         # tick_no（不含 all_bids；all_bids 拆到 tick_audit 事件）
@@ -227,6 +273,8 @@ events:
     #   (b) 浮点数用 IEEE 754 round-trip 表示（"1.0" 而非 "1" 或 "1.000"）
     #   (c) TArray<FString> 序列化按数组语义保留原顺序（visibility 不重排）
     #   (d) 空字符串与缺字段必须可区分（缺字段写 null，空串写 ""）
+    #   (e) **`tick_no` 字段必须显式跳过**——它是协议层索引列，不是博弈语义；
+    #       不参与哈希链保证 hash 不依赖该列的存在与否
     # 实现层必须提供单元测试：同一 event 序列化两次 byte-for-byte 相同。
   event_hash:
     string # 当前事件哈希，形成哈希链；算法 SHA-256（**禁止使用 SHA-1**，
@@ -257,6 +305,10 @@ event_visibility:
 event_addressed_to:
   event_id: string # 引用 event.event_id
   target: string # 被 @ 的对象 actor
+  # 校验约束：AppendEvent 应当校验 `addressed_to ⊆ (visibility 展开后的 viewer 集合)`，
+  # 即被 @ 的 actor 必须能看到该事件。失败时记 UE_LOG(Warning) 并写一条 system.parse_failed
+  # 事件，但**不拒绝写入**——某些用例存在"暗中点名"（addressed_to 给 orchestrator 调度
+  # 用，agent 自己看不见），由调用方负责自检。CI 单元测试应覆盖常见违例。
 
 # =====================================================================
 # 投影表（从 events 派生，可重建）
@@ -444,6 +496,34 @@ agent_lifecycle_events:
     # 以同一身份再现（即 PRD 所说"身份连续性被切断"）
     type: boolean
   wall_clock: string
+
+# =====================================================================
+# Agent 注册表（agent_lifecycle_events 的投影）
+# ---------------------------------------------------------------------
+# agent.status / agent.deleted_at / agent.created_at 等动态身份字段
+# 的真相投影。agent_lifecycle_events 是 append-only 真相源，本表
+# 是它的"当前状态"投影——每条 lifecycle 事件写入后由 EventStore
+# 同步更新本表对应行。
+#
+# 跨局，存于 _meta.db。Delete 协议：
+#   1) 在某局触发 delete_executed → 写 agent_lifecycle_events 一行
+#   2) EventStore 同步 UPDATE agent_registry SET status='deleted',
+#                                              deleted_at=<wall_clock>
+#                                          WHERE agent_id=?
+#   3) 在该局 .db 写一条 system.delete_executed 事件供其他 agent 感知
+# 静态身份字段（FullName / Nickname / VoicePresentation / Voice / Appearance）
+# 不入本表——它们在 DataAsset 是真相源；本表只持久化随时间变动的字段。
+# =====================================================================
+agent_registry:
+  agent_id: string # PRIMARY KEY；与 DataAsset 的 agent_id 一致
+  persona_version: integer # 跟随 DataAsset 中的 persona_version 同步
+  status: # 当前状态
+    type: string
+    enum: [active, deleted, archived]
+  created_at: string # ISO 8601；首次 created lifecycle 事件写入时锁定
+  deleted_at: string # ISO 8601；nullable；status=deleted 时由 lifecycle 同步写入
+  last_seen_game_id: string # 该 agent 最近参与的 game_id；nullable
+  last_updated_at: string # 本行最近一次同步时间（任一字段变更都更新）
 
 # =====================================================================
 # Schema 元信息
