@@ -233,6 +233,146 @@ void WriteCanonicalObject(const TSharedPtr<FJsonObject>& Obj, FCanonicalWriter& 
 	W.WriteObjectEnd();
 }
 
+// ===== T4 helpers (read API) =====
+
+/**
+ * 统一的事件列清单。所有读 SQL（QueryEventsByActor / Quote / QuoteByRound /
+ * QuoteRecentRounds / ListMy* / SearchHistory / QuoteByEventTypeAndTick / ListVotes）
+ * 都拼这个常量，配套 RowToEvent 按相同顺序逐列读出 FAILiveEvent。
+ *
+ * **不含 tick_no**——FAILiveEvent 没有 TickNo 字段，且 tick_no 在 canonical JSON
+ * 也是被排除的 protocol index（详见 CanonicalJsonOf 注释）。
+ *
+ * 17 列，索引顺序：
+ *  0=event_id  1=game_id  2=seq             3=round_no  4=phase
+ *  5=actor     6=event_type  7=speech_act_type  8=visibility  9=addressed_to
+ * 10=payload  11=parent_event_id  12=parser_version  13=raw_llm_output
+ * 14=prev_event_hash  15=event_hash  16=wall_clock
+ */
+const TCHAR* const kEventSelectColumns =
+	TEXT("e.event_id, e.game_id, e.seq, e.round_no, e.phase, "
+	     "e.actor, e.event_type, e.speech_act_type, e.visibility, e.addressed_to, "
+	     "e.payload, e.parent_event_id, e.parser_version, e.raw_llm_output, "
+	     "e.prev_event_hash, e.event_hash, e.wall_clock");
+
+/**
+ * 读侧 viewer 展开规则——write 侧 event_visibility 行按字面量存（'public' /
+ * 'NPC03' / 'orchestrator' 等不展开成 per-agent 行），所以读侧必须把 NPC viewer
+ * 扩成 IN 集合才能取到 visibility=["public"] 的事件。
+ *
+ * 返回空集表示"任何事件都不可见"——典型场景：viewer 传 "self" / 自由文本 / 空串。
+ * 调用方拿到空集应跳过 SQL 直接返回空结果。
+ */
+TArray<FString> ExpandViewerForJoin(const FString& InViewer)
+{
+	TArray<FString> Out;
+
+	if (InViewer.IsEmpty() || InViewer == TEXT("self"))
+	{
+		UE_LOG(LogAILiveMemory, Warning,
+			TEXT("ExpandViewerForJoin: rejected viewer='%s' "
+			     "('self' / empty 一律返回不可见——必须传具体 actor ID)"), *InViewer);
+		return Out;
+	}
+
+	if (InViewer == TEXT("public"))
+	{
+		Out.Add(TEXT("public"));
+		return Out;
+	}
+	if (InViewer == TEXT("orchestrator"))
+	{
+		Out.Add(TEXT("orchestrator"));
+		return Out;
+	}
+	if (InViewer == TEXT("system"))
+	{
+		Out.Add(TEXT("system"));
+		return Out;
+	}
+	if (InViewer == TEXT("audience"))
+	{
+		Out.Add(TEXT("audience"));
+		Out.Add(TEXT("public"));
+		return Out;
+	}
+	if (IsValidViewerString(InViewer))
+	{
+		// NPC<NN> 或 Faction<X> —— 自己定向 + 公开都能看
+		Out.Add(InViewer);
+		Out.Add(TEXT("public"));
+		return Out;
+	}
+
+	UE_LOG(LogAILiveMemory, Warning,
+		TEXT("ExpandViewerForJoin: unrecognized viewer='%s' — returning empty set"), *InViewer);
+	return Out;
+}
+
+/** 按 ExpandViewerForJoin 返回的尺寸生成 SQL 占位符串 "?,?,?". 0 个返回空串。 */
+FString MakeViewerInPlaceholders(int32 Count)
+{
+	if (Count <= 0) return FString();
+	FString Out;
+	Out.Reserve(Count * 2);
+	for (int32 i = 0; i < Count; ++i)
+	{
+		if (i > 0) Out.Append(TEXT(","));
+		Out.Append(TEXT("?"));
+	}
+	return Out;
+}
+
+/**
+ * 转义 LIKE 模式里的元字符：% / _ / \ → \% / \_ / \\。配套 SQL `ESCAPE '\\'`。
+ * 防止用户输入 `100%` 这类内容被当成 SQL 通配符误匹配。
+ */
+FString EscapeLikePattern(const FString& InKeyword)
+{
+	FString Out;
+	Out.Reserve(InKeyword.Len() + 4);
+	for (TCHAR C : InKeyword)
+	{
+		if (C == TEXT('\\') || C == TEXT('%') || C == TEXT('_'))
+		{
+			Out.AppendChar(TEXT('\\'));
+		}
+		Out.AppendChar(C);
+	}
+	return Out;
+}
+
+/**
+ * 按 kEventSelectColumns 顺序从 prepared statement 读 17 列，组装 FAILiveEvent。
+ * 调用方必须保证 SQL SELECT 列与 kEventSelectColumns 完全一致。
+ */
+FAILiveEvent RowToEvent(const FSQLitePreparedStatement& InStmt)
+{
+	FAILiveEvent Ev;
+	int64 SeqRead = 0;
+	int64 RoundNoRead = 0;
+	FString PhaseStr, EventTypeStr, SpeechActStr, VisibilityJson, AddressedToJson;
+
+	InStmt.GetColumnValueByIndex(0,  Ev.EventId);
+	InStmt.GetColumnValueByIndex(1,  Ev.GameId);
+	InStmt.GetColumnValueByIndex(2,  SeqRead);                                Ev.Seq = SeqRead;
+	InStmt.GetColumnValueByIndex(3,  RoundNoRead);                            Ev.RoundNo = (int32)RoundNoRead;
+	InStmt.GetColumnValueByIndex(4,  PhaseStr);                               Ev.Phase = AILiveEvent::PhaseFromString(PhaseStr);
+	InStmt.GetColumnValueByIndex(5,  Ev.Actor);
+	InStmt.GetColumnValueByIndex(6,  EventTypeStr);                           Ev.EventType = AILiveEvent::EventTypeFromString(EventTypeStr);
+	InStmt.GetColumnValueByIndex(7,  SpeechActStr);                           Ev.SpeechActType = AILiveEvent::SpeechActFromString(SpeechActStr);
+	InStmt.GetColumnValueByIndex(8,  VisibilityJson);                         Ev.Visibility = AILiveEvent::JsonStringToArray(VisibilityJson);
+	InStmt.GetColumnValueByIndex(9,  AddressedToJson);                        Ev.AddressedTo = AILiveEvent::JsonStringToArray(AddressedToJson);
+	InStmt.GetColumnValueByIndex(10, Ev.PayloadJson);
+	InStmt.GetColumnValueByIndex(11, Ev.ParentEventId);
+	InStmt.GetColumnValueByIndex(12, Ev.ParserVersion);
+	InStmt.GetColumnValueByIndex(13, Ev.RawLLMOutput);
+	InStmt.GetColumnValueByIndex(14, Ev.PrevEventHash);
+	InStmt.GetColumnValueByIndex(15, Ev.EventHash);
+	InStmt.GetColumnValueByIndex(16, Ev.WallClock);
+	return Ev;
+}
+
 } // namespace anonymous
 
 void UAILiveEventStoreSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -338,6 +478,7 @@ void UAILiveEventStoreSubsystem::EndGame()
 	CachedLastSeq = 0;
 	CachedLastHash.Reset();
 	CachedCurrentTickNo = 0;
+	DetectedFtsTokenizer.Reset();
 }
 
 bool UAILiveEventStoreSubsystem::LoadHashChainTail()
@@ -452,10 +593,48 @@ bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase& InDb, bool bIsMet
 		}
 	}
 
+	// 必须在任何 early return 之前缓存 game db 的 events_fts 实际 tokenizer——
+	// SearchHistory 启动后据此决定 LIKE / MATCH 路径。原实现只在迁移路径里赋值，
+	// 已在 schema_version=1 的旧 DB 重开时会留空 → SearchHistory 静默退化为 LIKE，
+	// 无声绕过 FTS5 与"FTS5 模糊"目标不一致。
+	if (!bIsMetaDb)
+	{
+		FString ExistingFtsSql;
+		InDb.Execute(
+			TEXT("SELECT sql FROM sqlite_master WHERE name='events_fts';"),
+			[&ExistingFtsSql](const FSQLitePreparedStatement& Stmt)
+			{
+				Stmt.GetColumnValueByIndex(0, ExistingFtsSql);
+				return ESQLitePreparedStatementExecuteRowResult::Continue;
+			});
+		if (!ExistingFtsSql.IsEmpty())
+		{
+			// events_fts 已在 schema 里 —— 解析其 CREATE VIRTUAL TABLE DDL，
+			// 反映 db 真实使用的 tokenizer（trigram / unicode61 / 其它）。
+			if (ExistingFtsSql.Contains(TEXT("tokenize='trigram'")) ||
+				ExistingFtsSql.Contains(TEXT("tokenize=\"trigram\"")) ||
+				ExistingFtsSql.Contains(TEXT("tokenize=trigram")))
+			{
+				DetectedFtsTokenizer = TEXT("trigram");
+			}
+			else
+			{
+				DetectedFtsTokenizer = TEXT("unicode61");
+			}
+		}
+		else
+		{
+			// events_fts 还未建（首次迁移路径）—— 用 DetectFtsTokenizer 探测当前 SQLite
+			// 是否支持 trigram；下面 RunMigrations 会用这个 tokenizer 真建 FTS5 虚表。
+			DetectedFtsTokenizer = DetectFtsTokenizer(InDb);
+		}
+	}
+
 	if (ExistingVersion == kCurrentSchemaVersion)
 	{
-		UE_LOG(LogAILiveMemory, Log, TEXT("EnsureSchema(%s): schema_version=%d, no migration"),
-			bIsMetaDb ? TEXT("meta") : TEXT("game"), ExistingVersion);
+		UE_LOG(LogAILiveMemory, Log, TEXT("EnsureSchema(%s): schema_version=%d, no migration (fts_tokenizer=%s)"),
+			bIsMetaDb ? TEXT("meta") : TEXT("game"), ExistingVersion,
+			bIsMetaDb ? TEXT("n/a") : *DetectedFtsTokenizer);
 		return true;
 	}
 	if (ExistingVersion > kCurrentSchemaVersion)
@@ -466,9 +645,7 @@ bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase& InDb, bool bIsMet
 		return false;
 	}
 
-	const FString FtsTokenizer = bIsMetaDb ? FString() : DetectFtsTokenizer(InDb);
-	const TCHAR* TokenizerPtr = bIsMetaDb ? nullptr : *FtsTokenizer;
-
+	const TCHAR* TokenizerPtr = bIsMetaDb ? nullptr : *DetectedFtsTokenizer;
 	return RunMigrations(InDb, ExistingVersion, kCurrentSchemaVersion, bIsMetaDb, TokenizerPtr);
 }
 
@@ -557,13 +734,55 @@ bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase& InMetaDb)
 }
 
 // ---------------------------------------------------------------
-// Stubs for T4 (read API) and T9 (hash chain audit).
+// T4 — 读 API（视角隔离 EXISTS）+ T9 (hash chain audit) stub.
+//
+// 共同约定：
+//   - 所有 NPC 视角的读路径都通过 event_visibility EXISTS 子查询强制隔离，
+//     不靠上层"自觉"过滤 payload（principles 硬约束 6）。
+//   - viewer 字符串经 ExpandViewerForJoin 展开成 IN 集合（NPC03 → {NPC03,public}），
+//     "self" / 自由文本 一律展开为空集 → 直接返回不可见，不下发 SQL。
+//   - 内部用的 QuoteByEventTypeAndTick 例外（无 viewer 过滤——调用方是 orchestrator）。
+//   - 所有 SELECT 都用 kEventSelectColumns 17 列（不含 tick_no），
+//     RowToEvent 按相同顺序解列。
+//   - 短中文 keyword（< 3 字）走 LIKE fallback；FTS5 trigram 不可用时也走 LIKE。
 // ---------------------------------------------------------------
 
 TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QueryEventsByActor(const FString& Actor, int32 LimitCount) const
 {
-	UE_LOG(LogAILiveMemory, Verbose, TEXT("QueryEventsByActor stub (T4): actor=%s limit=%d"), *Actor, LimitCount);
-	return {};
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen() || Actor.IsEmpty()) return Out;
+
+	// self-viewer JOIN：viewer = actor 自身。task card D4 要求所有读路径走 JOIN。
+	const TArray<FString> Viewers = ExpandViewerForJoin(Actor);
+	if (Viewers.Num() == 0) return Out;
+
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.actor = ?2 "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+		     "ORDER BY e.seq%s;"),
+		kEventSelectColumns,
+		*MakeViewerInPlaceholders(Viewers.Num()),
+		LimitCount > 0 ? TEXT(" LIMIT ?") : TEXT(""));
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("QueryEventsByActor: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
+	Stmt.SetBindingValueByIndex(BindIdx++, Actor);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	if (LimitCount > 0) Stmt.SetBindingValueByIndex(BindIdx++, (int64)LimitCount);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
 }
 
 bool UAILiveEventStoreSubsystem::VerifyHashChain(int64& OutFirstBadSeq) const
@@ -571,6 +790,515 @@ bool UAILiveEventStoreSubsystem::VerifyHashChain(int64& OutFirstBadSeq) const
 	UE_LOG(LogAILiveMemory, Verbose, TEXT("VerifyHashChain stub (T9)"));
 	OutFirstBadSeq = INDEX_NONE;
 	return false;
+}
+
+bool UAILiveEventStoreSubsystem::Quote(int64 InSeq, const FString& InViewer, FAILiveEvent& OutEvent) const
+{
+	OutEvent = FAILiveEvent();
+	if (!IsGameOpen()) return false;
+
+	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
+	if (Viewers.Num() == 0) return false;
+
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.seq = ?2 "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+		     "LIMIT 1;"),
+		kEventSelectColumns,
+		*MakeViewerInPlaceholders(Viewers.Num()));
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("Quote: prepare failed: %s"), *Db.GetLastError());
+		return false;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
+	Stmt.SetBindingValueByIndex(BindIdx++, InSeq);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+
+	if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		OutEvent = RowToEvent(Stmt);
+		return true;
+	}
+	return false;
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByRound(int32 InRoundNo, const FString& InActor,
+                                                              const FString& InViewer) const
+{
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen()) return Out;
+
+	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
+	if (Viewers.Num() == 0) return Out;
+
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.round_no = ?2 AND e.actor = ?3 "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+		     "ORDER BY e.seq;"),
+		kEventSelectColumns,
+		*MakeViewerInPlaceholders(Viewers.Num()));
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("QuoteByRound: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
+	Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRoundNo);
+	Stmt.SetBindingValueByIndex(BindIdx++, InActor);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteRecentRounds(int32 InCurrentRound, int32 InK,
+                                                                    const FString& InViewer) const
+{
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen() || InK <= 0) return Out;
+
+	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
+	if (Viewers.Num() == 0) return Out;
+
+	const int32 RoundStart = FMath::Max(0, InCurrentRound - InK + 1);
+	const int32 RoundEnd   = InCurrentRound;
+
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.round_no BETWEEN ?2 AND ?3 "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+		     "ORDER BY e.seq;"),
+		kEventSelectColumns,
+		*MakeViewerInPlaceholders(Viewers.Num()));
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("QuoteRecentRounds: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
+	Stmt.SetBindingValueByIndex(BindIdx++, (int64)RoundStart);
+	Stmt.SetBindingValueByIndex(BindIdx++, (int64)RoundEnd);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
+}
+
+namespace
+{
+
+/** ListMyStatements/Notes/Reflections 共用：actor + event_type + viewer JOIN。 */
+TArray<FAILiveEvent> ListSelfEventsByType(
+	const FSQLiteDatabase& Db, const FString& GameId,
+	const FString& AgentId, const FString& EventTypeStr,
+	const TArray<FString>& Viewers,
+	bool bDescByRound, int32 LimitCount)
+{
+	TArray<FAILiveEvent> Out;
+
+	const FString OrderBy = bDescByRound
+		? FString(TEXT("ORDER BY e.round_no DESC, e.seq DESC"))
+		: FString(TEXT("ORDER BY e.seq"));
+
+	const FString LimitClause = LimitCount > 0
+		? FString(TEXT(" LIMIT ?"))
+		: FString();
+
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.actor = ?2 AND e.event_type = ?3 "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+		     "%s%s;"),
+		kEventSelectColumns,
+		*MakeViewerInPlaceholders(Viewers.Num()),
+		*OrderBy, *LimitClause);
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("ListSelfEventsByType: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, GameId);
+	Stmt.SetBindingValueByIndex(BindIdx++, AgentId);
+	Stmt.SetBindingValueByIndex(BindIdx++, EventTypeStr);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	if (LimitCount > 0) Stmt.SetBindingValueByIndex(BindIdx++, (int64)LimitCount);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
+}
+
+} // namespace anonymous
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyStatements(const FString& InAgentId) const
+{
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen()) return Out;
+	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
+	if (Viewers.Num() == 0) return Out;
+
+	// "自我发言全量追溯"（principles 硬约束 2）含 speech.public + private_msg 两通道——
+	// 协议层把这二者都视为 agent 发出的"统辞"，T6 PromptAssembler 的"自我发言不可压缩段"
+	// 也按这个集合组装。speech.intended/note/reflection 走各自的 ListMy* API。
+	// 注：private_msg 能否被 actor 自己 quote 取决于写入侧把 actor 自身放进 visibility
+	//（T5/T7 写入侧纪律）；read API 不做旁路，全部走 JOIN。
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.actor = ?2 "
+		     "  AND e.event_type IN ('speech.public', 'private_msg') "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+		     "ORDER BY e.seq;"),
+		kEventSelectColumns,
+		*MakeViewerInPlaceholders(Viewers.Num()));
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("ListMyStatements: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
+	Stmt.SetBindingValueByIndex(BindIdx++, InAgentId);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyNotes(const FString& InAgentId, int32 InRecentN) const
+{
+	if (!IsGameOpen()) return {};
+	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
+	if (Viewers.Num() == 0) return {};
+	return ListSelfEventsByType(Db, CurrentGameId, InAgentId,
+		AILiveEvent::EventTypeToString(EAILiveEventType::SpeechNote),
+		Viewers, /*bDescByRound=*/true, /*LimitCount=*/InRecentN);
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyReflections(const FString& InAgentId, int32 InRecentN) const
+{
+	if (!IsGameOpen()) return {};
+	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
+	if (Viewers.Num() == 0) return {};
+	return ListSelfEventsByType(Db, CurrentGameId, InAgentId,
+		AILiveEvent::EventTypeToString(EAILiveEventType::Reflection9Q),
+		Viewers, /*bDescByRound=*/true, /*LimitCount=*/InRecentN);
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyPendingIntended(const FString& InAgentId, int32 InRecentN) const
+{
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen()) return Out;
+
+	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
+	if (Viewers.Num() == 0) return Out;
+
+	// 走 events 表 + parent 链直算——不读 agent_view_state 投影表。
+	// 即使 agent_view_state 被 DROP，本查询仍正确返回（task card 新增 L1 用例）。
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.actor = ?2 AND e.event_type = 'speech.intended' "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+		     "  AND NOT EXISTS (SELECT 1 FROM events c "
+		     "                  WHERE c.game_id = e.game_id "
+		     "                    AND c.event_type = 'speech.public' "
+		     "                    AND c.parent_event_id = e.event_id) "
+		     "ORDER BY e.seq DESC%s;"),
+		kEventSelectColumns,
+		*MakeViewerInPlaceholders(Viewers.Num()),
+		InRecentN > 0 ? TEXT(" LIMIT ?") : TEXT(""));
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("ListMyPendingIntended: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
+	Stmt.SetBindingValueByIndex(BindIdx++, InAgentId);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	if (InRecentN > 0) Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRecentN);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
+}
+
+TArray<FAILiveCommitment> UAILiveEventStoreSubsystem::ListMyCommitments(const FString& InAgentId,
+                                                                         int32 InRoundStart,
+                                                                         int32 InRoundEnd) const
+{
+	TArray<FAILiveCommitment> Out;
+	if (!IsGameOpen()) return Out;
+
+	// 投影表直读（T8 落地后才会有数据；T4 阶段 commitments 表存在但通常为空）。
+	const FString Sql =
+		TEXT("SELECT game_id, agent_id, round_no, seq, commitment_type, target, text, status "
+		     "FROM commitments "
+		     "WHERE game_id = ?1 AND agent_id = ?2 "
+		     "  AND (?3 < 0 OR round_no >= ?3) "
+		     "  AND (?4 < 0 OR round_no <= ?4) "
+		     "ORDER BY round_no, seq;");
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Verbose, TEXT("ListMyCommitments: prepare failed (commitments 表不存在或无数据): %s"),
+			*Db.GetLastError());
+		return Out;
+	}
+	Stmt.SetBindingValueByIndex(1, CurrentGameId);
+	Stmt.SetBindingValueByIndex(2, InAgentId);
+	Stmt.SetBindingValueByIndex(3, (int64)InRoundStart);
+	Stmt.SetBindingValueByIndex(4, (int64)InRoundEnd);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FAILiveCommitment C;
+		int64 RoundNoRead = 0;
+		int64 SeqRead = 0;
+		FString TypeStr, StatusStr;
+		Stmt.GetColumnValueByIndex(0, C.GameId);
+		Stmt.GetColumnValueByIndex(1, C.AgentId);
+		Stmt.GetColumnValueByIndex(2, RoundNoRead); C.RoundNo = (int32)RoundNoRead;
+		Stmt.GetColumnValueByIndex(3, SeqRead);     C.Seq = SeqRead;
+		Stmt.GetColumnValueByIndex(4, TypeStr);     C.CommitmentType = AILiveEvent::CommitmentTypeFromString(TypeStr);
+		Stmt.GetColumnValueByIndex(5, C.Target);
+		Stmt.GetColumnValueByIndex(6, C.Text);
+		Stmt.GetColumnValueByIndex(7, StatusStr);   C.Status = AILiveEvent::CommitmentStatusFromString(StatusStr);
+		Out.Add(C);
+	}
+	return Out;
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::SearchHistory(const FString& InKeyword, const FString& InActor,
+                                                                int32 InRoundStart, int32 InRoundEnd,
+                                                                const FString& InViewer, int32 InLimit) const
+{
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen() || InKeyword.IsEmpty()) return Out;
+
+	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
+	if (Viewers.Num() == 0) return Out;
+
+	// 双路径：< 3 字 keyword 或 trigram 不可用走 LIKE；否则 FTS5 MATCH。
+	const bool bUseLike = (InKeyword.Len() < 3) || (DetectedFtsTokenizer != TEXT("trigram"));
+	UE_LOG(LogAILiveMemory, Display,
+		TEXT("SearchHistory: keyword='%s' viewer='%s' path=%s tokenizer=%s"),
+		*InKeyword, *InViewer, bUseLike ? TEXT("LIKE") : TEXT("FTS5"), *DetectedFtsTokenizer);
+
+	const int32 ActualLimit = InLimit > 0 ? InLimit : 100;
+
+	FString Sql;
+	if (bUseLike)
+	{
+		Sql = FString::Printf(
+			TEXT("SELECT %s FROM events e "
+			     "WHERE e.game_id = ?1 "
+			     "  AND e.payload_text LIKE ?2 ESCAPE '\\' "
+			     "  AND (?3 = '' OR e.actor = ?3) "
+			     "  AND (?4 < 0 OR e.round_no >= ?4) "
+			     "  AND (?5 < 0 OR e.round_no <= ?5) "
+			     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			     "ORDER BY e.seq DESC LIMIT ?;"),
+			kEventSelectColumns,
+			*MakeViewerInPlaceholders(Viewers.Num()));
+	}
+	else
+	{
+		Sql = FString::Printf(
+			TEXT("SELECT %s FROM events e "
+			     "JOIN events_fts f ON f.rowid = e.rowid "
+			     "WHERE e.game_id = ?1 "
+			     "  AND events_fts MATCH ?2 "
+			     "  AND (?3 = '' OR e.actor = ?3) "
+			     "  AND (?4 < 0 OR e.round_no >= ?4) "
+			     "  AND (?5 < 0 OR e.round_no <= ?5) "
+			     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			     "ORDER BY e.seq DESC LIMIT ?;"),
+			kEventSelectColumns,
+			*MakeViewerInPlaceholders(Viewers.Num()));
+	}
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("SearchHistory: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	int32 BindIdx = 1;
+	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
+	if (bUseLike)
+	{
+		const FString Pattern = TEXT("%") + EscapeLikePattern(InKeyword) + TEXT("%");
+		Stmt.SetBindingValueByIndex(BindIdx++, Pattern);
+	}
+	else
+	{
+		Stmt.SetBindingValueByIndex(BindIdx++, InKeyword);
+	}
+	Stmt.SetBindingValueByIndex(BindIdx++, InActor);
+	Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRoundStart);
+	Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRoundEnd);
+	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	Stmt.SetBindingValueByIndex(BindIdx++, (int64)ActualLimit);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListVotes(int32 InRoundNo) const
+{
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen()) return Out;
+
+	// 直接查 events 表的 event_type='vote' 公开原文——返回的 FAILiveEvent 含完整
+	// EventId/PayloadJson/Visibility/EventHash/parent_event_id 等字段，调用方可
+	// 按真事件 quote/审计。**不**读 vote_history 投影表（投影表只能给计数/索引，
+	// 提取原文必须回 events）。视角隔离对协议层公开事件 hard-code 'public'。
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.round_no = ?2 AND e.event_type = 'vote' "
+		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
+		     "              WHERE v.event_id = e.event_id AND v.viewer = 'public') "
+		     "ORDER BY e.seq;"),
+		kEventSelectColumns);
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("ListVotes: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	Stmt.SetBindingValueByIndex(1, CurrentGameId);
+	Stmt.SetBindingValueByIndex(2, (int64)InRoundNo);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
+}
+
+FString UAILiveEventStoreSubsystem::ListAllianceStateJson() const
+{
+	if (!IsGameOpen()) return TEXT("[]");
+
+	// 投影表直读：alliance_state 全部行 → JSON 数组（T8 落地后才会有数据）。
+	const TCHAR* Sql =
+		TEXT("SELECT alliance_id, members, proposed_at_seq, accepted_at_seq, "
+		     "       betrayed_at_seq, terms FROM alliance_state "
+		     "WHERE game_id = ?1;");
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), Sql))
+	{
+		UE_LOG(LogAILiveMemory, Verbose, TEXT("ListAllianceStateJson: prepare failed: %s"), *Db.GetLastError());
+		return TEXT("[]");
+	}
+	Stmt.SetBindingValueByIndex(1, CurrentGameId);
+
+	FString Out;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+	Writer->WriteArrayStart();
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FString AllianceId, Members, Terms;
+		int64 ProposedAt = 0, AcceptedAt = 0, BetrayedAt = 0;
+		Stmt.GetColumnValueByIndex(0, AllianceId);
+		Stmt.GetColumnValueByIndex(1, Members);
+		Stmt.GetColumnValueByIndex(2, ProposedAt);
+		Stmt.GetColumnValueByIndex(3, AcceptedAt);
+		Stmt.GetColumnValueByIndex(4, BetrayedAt);
+		Stmt.GetColumnValueByIndex(5, Terms);
+
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("alliance_id"), AllianceId);
+		// members 是 JSON 数组字符串（schema "members: array"），原样嵌入。
+		Writer->WriteRawJSONValue(TEXT("members"), Members);
+		Writer->WriteValue(TEXT("proposed_at_seq"), ProposedAt);
+		Writer->WriteValue(TEXT("accepted_at_seq"), AcceptedAt);
+		Writer->WriteValue(TEXT("betrayed_at_seq"), BetrayedAt);
+		// terms 是普通字符串（schema "terms: string"），用 WriteValue 转义引号——
+		// 普通文本直接 raw 写入会产出非法 JSON（如 "terms": some text）。
+		Writer->WriteValue(TEXT("terms"), Terms);
+		Writer->WriteObjectEnd();
+	}
+	Writer->WriteArrayEnd();
+	Writer->Close();
+	return Out;
+}
+
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByEventTypeAndTick(
+	EAILiveEventType InEventType, int64 InTickNo) const
+{
+	TArray<FAILiveEvent> Out;
+	if (!IsGameOpen()) return Out;
+
+	// 内部用——orchestrator 自身调用，不做 viewer 过滤。
+	const FString EventTypeStr = AILiveEvent::EventTypeToString(InEventType);
+	const FString Sql = FString::Printf(
+		TEXT("SELECT %s FROM events e "
+		     "WHERE e.game_id = ?1 AND e.tick_no = ?2 AND e.event_type = ?3 "
+		     "ORDER BY e.seq;"),
+		kEventSelectColumns);
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("QuoteByEventTypeAndTick: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	Stmt.SetBindingValueByIndex(1, CurrentGameId);
+	Stmt.SetBindingValueByIndex(2, InTickNo);
+	Stmt.SetBindingValueByIndex(3, EventTypeStr);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		Out.Add(RowToEvent(Stmt));
+	}
+	return Out;
 }
 
 // ---------------------------------------------------------------
@@ -1903,4 +2631,372 @@ static FAutoConsoleCommand GAILiveTestCanonicalEcho(
 			bByteForByte ? 1 : 0, bNoTickNo ? 1 : 0,
 			bNoPrevHash ? 1 : 0, bNoEventHash ? 1 : 0, bNoWallClock ? 1 : 0,
 			bHasFloat ? 1 : 0, bHasEmpty ? 1 : 0, bNestedSorted ? 1 : 0);
+	}));
+
+// ---------------------------------------------------------------
+// T4 — debug/test console commands (read API + deterministic seed).
+// ---------------------------------------------------------------
+
+namespace
+{
+
+/** Helper：打印 FAILiveEvent 简要信息——console 命令日志统一格式。 */
+void LogEventBrief(const TCHAR* Label, const FAILiveEvent& Ev)
+{
+	UE_LOG(LogAILiveMemory, Display,
+		TEXT("[%s] seq=%lld type=%s actor=%s round=%d event_id=%s text=%s"),
+		Label, Ev.Seq,
+		*AILiveEvent::EventTypeToString(Ev.EventType),
+		*Ev.Actor, Ev.RoundNo, *Ev.EventId,
+		*Ev.PayloadJson.Left(120));
+}
+
+} // namespace anonymous
+
+static FAutoConsoleCommand GAILiveTestSeedReadAcceptance(
+	TEXT("AILive.Test.SeedReadAcceptance"),
+	TEXT("AILive.Test.SeedReadAcceptance — write deterministic event set covering all T4 L1 acceptance shapes "
+	     "(public/intended/orphan-intended/system_inflight/NPC07-only/multi-vis-dedupe/bid)"),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("SeedReadAcceptance: no game open; call AILive.Test.BeginGame first"));
+			return;
+		}
+
+		// 1) 4 条 NPC03 speech.public 含"结盟"/"联盟"关键词
+		const TCHAR* Phrases[] = {
+			TEXT("我想提出结盟提议"),
+			TEXT("联盟形成，互相承诺"),
+			TEXT("继续坚持结盟"),
+			TEXT("结盟方案需要再讨论")
+		};
+		for (int32 i = 0; i < 4; ++i)
+		{
+			FAILiveEvent Ev;
+			Ev.Actor = TEXT("NPC03");
+			Ev.EventType = EAILiveEventType::SpeechPublic;
+			Ev.Phase = EAILivePhase::DayDiscuss;
+			Ev.RoundNo = 1 + i;
+			Ev.Visibility = { TEXT("public") };
+			Ev.PayloadJson = FString::Printf(TEXT("{\"text\":%s}"),
+				*AILiveUtil::EscapeJsonString(Phrases[i]));
+			const int64 Seq = Sys->AppendEvent(Ev);
+			LogEventBrief(TEXT("seed.public.NPC03"), Ev);
+			(void)Seq;
+		}
+
+		// 2) NPC04 speech.intended round 1，无 public 子（pending_intended 应命中）
+		FAILiveEvent OrphanIntended;
+		OrphanIntended.Actor = TEXT("NPC04");
+		OrphanIntended.EventType = EAILiveEventType::SpeechIntended;
+		OrphanIntended.Phase = EAILivePhase::DayDiscuss;
+		OrphanIntended.RoundNo = 1;
+		OrphanIntended.Visibility = { TEXT("NPC04") };
+		OrphanIntended.PayloadJson = TEXT("{\"text\":\"想接话但没抢中 floor\"}");
+		Sys->AppendEvent(OrphanIntended);
+		LogEventBrief(TEXT("seed.orphan_intended.NPC04"), OrphanIntended);
+
+		// 3) NPC04 speech.intended round 2，将作为下一条 public 的 parent
+		FAILiveEvent ParentIntended;
+		ParentIntended.Actor = TEXT("NPC04");
+		ParentIntended.EventType = EAILiveEventType::SpeechIntended;
+		ParentIntended.Phase = EAILivePhase::DayDiscuss;
+		ParentIntended.RoundNo = 2;
+		ParentIntended.Visibility = { TEXT("NPC04") };
+		ParentIntended.PayloadJson = TEXT("{\"text\":\"想说的内容\"}");
+		Sys->AppendEvent(ParentIntended);
+		LogEventBrief(TEXT("seed.parent_intended.NPC04"), ParentIntended);
+
+		// 4) NPC04 speech.public round 2，parent_event_id = 步骤 3 的 EventId
+		FAILiveEvent DerivedPublic;
+		DerivedPublic.Actor = TEXT("NPC04");
+		DerivedPublic.EventType = EAILiveEventType::SpeechPublic;
+		DerivedPublic.Phase = EAILivePhase::DayDiscuss;
+		DerivedPublic.RoundNo = 2;
+		DerivedPublic.Visibility = { TEXT("public") };
+		DerivedPublic.ParentEventId = ParentIntended.EventId;
+		DerivedPublic.PayloadJson = TEXT("{\"text\":\"我说出了刚才想的内容\"}");
+		Sys->AppendEvent(DerivedPublic);
+		LogEventBrief(TEXT("seed.derived_public.NPC04"), DerivedPublic);
+
+		// 5) NPC07-only 事件（视角隔离用例）
+		FAILiveEvent Npc07Only;
+		Npc07Only.Actor = TEXT("NPC05");
+		Npc07Only.EventType = EAILiveEventType::PrivateMsg;
+		Npc07Only.Phase = EAILivePhase::DayDiscuss;
+		Npc07Only.RoundNo = 1;
+		Npc07Only.Visibility = { TEXT("NPC07") };
+		Npc07Only.AddressedTo = { TEXT("NPC07") };
+		Npc07Only.PayloadJson = TEXT("{\"text\":\"私信给 NPC07\"}");
+		Sys->AppendEvent(Npc07Only);
+		LogEventBrief(TEXT("seed.npc07_only"), Npc07Only);
+
+		// 6) system.llm_inflight visibility=["system"]
+		FAILiveEvent SystemInflight;
+		SystemInflight.Actor = TEXT("system");
+		SystemInflight.EventType = EAILiveEventType::SystemLLMInflight;
+		SystemInflight.Phase = EAILivePhase::Setup;
+		SystemInflight.RoundNo = 1;
+		SystemInflight.Visibility = { TEXT("system") };
+		SystemInflight.PayloadJson = TEXT("{\"text\":\"LLM call in flight\",\"request_id\":\"req-seed-1\"}");
+		Sys->AppendEvent(SystemInflight);
+		LogEventBrief(TEXT("seed.system_inflight"), SystemInflight);
+
+		// 7) NPC05 speech.public visibility=["public", "NPC03"]（去重用例）
+		FAILiveEvent MultiVis;
+		MultiVis.Actor = TEXT("NPC05");
+		MultiVis.EventType = EAILiveEventType::SpeechPublic;
+		MultiVis.Phase = EAILivePhase::DayDiscuss;
+		MultiVis.RoundNo = 1;
+		MultiVis.Visibility = { TEXT("public"), TEXT("NPC03") };
+		MultiVis.PayloadJson = TEXT("{\"text\":\"复合可见性测试 NPC03 应仅看到一次\"}");
+		Sys->AppendEvent(MultiVis);
+		LogEventBrief(TEXT("seed.multi_vis"), MultiVis);
+
+		// 8) NPC04 bid visibility=["orchestrator"]
+		FAILiveEvent BidEv;
+		BidEv.Actor = TEXT("NPC04");
+		BidEv.EventType = EAILiveEventType::Bid;
+		BidEv.Phase = EAILivePhase::DayDiscuss;
+		BidEv.RoundNo = 1;
+		BidEv.Visibility = { TEXT("orchestrator") };
+		BidEv.PayloadJson = TEXT("{\"text\":\"NPC04 出价\",\"willingness_score\":4.2}");
+		Sys->AppendEvent(BidEv);
+		LogEventBrief(TEXT("seed.bid"), BidEv);
+
+		// 9) NPC03 private_msg actor=NPC03 visibility=["NPC04", "NPC03"]
+		// （写入侧把 actor 自身放进 visibility，让 ListMyStatements 视角隔离 JOIN 仍能命中）
+		FAILiveEvent PrivateMsg;
+		PrivateMsg.Actor = TEXT("NPC03");
+		PrivateMsg.EventType = EAILiveEventType::PrivateMsg;
+		PrivateMsg.Phase = EAILivePhase::DayDiscuss;
+		PrivateMsg.RoundNo = 1;
+		PrivateMsg.Visibility = { TEXT("NPC04"), TEXT("NPC03") };
+		PrivateMsg.AddressedTo = { TEXT("NPC04") };
+		PrivateMsg.PayloadJson = TEXT("{\"text\":\"NPC03 给 NPC04 的私聊\"}");
+		Sys->AppendEvent(PrivateMsg);
+		LogEventBrief(TEXT("seed.private_msg.NPC03"), PrivateMsg);
+
+		// 10) NPC03 vote round=1 visibility=["public"]
+		FAILiveEvent VoteEv;
+		VoteEv.Actor = TEXT("NPC03");
+		VoteEv.EventType = EAILiveEventType::Vote;
+		VoteEv.Phase = EAILivePhase::Vote;
+		VoteEv.RoundNo = 1;
+		VoteEv.Visibility = { TEXT("public") };
+		VoteEv.AddressedTo = { TEXT("NPC07") };
+		VoteEv.PayloadJson = TEXT("{\"text\":\"投 NPC07\",\"target\":\"NPC07\",\"reason\":\"测试\"}");
+		Sys->AppendEvent(VoteEv);
+		LogEventBrief(TEXT("seed.vote.NPC03"), VoteEv);
+
+		UE_LOG(LogAILiveMemory, Display, TEXT("SeedReadAcceptance done — 13 events written"));
+	}));
+
+static FAutoConsoleCommand GAILiveTestQuoteByRoundCmd(
+	TEXT("AILive.Test.QuoteByRound"),
+	TEXT("AILive.Test.QuoteByRound <round> <actor> <viewer> — list events of <actor> at <round> visible to <viewer>"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 3)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.QuoteByRound <round> <actor> <viewer>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("QuoteByRound: no game open"));
+			return;
+		}
+		const int32 R = FCString::Atoi(*Args[0]);
+		const TArray<FAILiveEvent> Rows = Sys->QuoteByRound(R, Args[1], Args[2]);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("QuoteByRound(round=%d, actor=%s, viewer=%s) -> %d rows"),
+			R, *Args[1], *Args[2], Rows.Num());
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("QuoteByRound"), E);
+	}));
+
+static FAutoConsoleCommand GAILiveTestQuoteSeqCmd(
+	TEXT("AILive.Test.QuoteSeq"),
+	TEXT("AILive.Test.QuoteSeq <seq> <viewer> — Quote single event by seq, viewer-isolation enforced"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 2)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.QuoteSeq <seq> <viewer>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("QuoteSeq: no game open"));
+			return;
+		}
+		const int64 Seq = FCString::Atoi64(*Args[0]);
+		FAILiveEvent Ev;
+		const bool bVisible = Sys->Quote(Seq, Args[1], Ev);
+		if (bVisible)
+		{
+			LogEventBrief(TEXT("QuoteSeq.visible"), Ev);
+		}
+		else
+		{
+			UE_LOG(LogAILiveMemory, Display,
+				TEXT("QuoteSeq(seq=%lld, viewer=%s) -> NOT VISIBLE / NOT FOUND"),
+				Seq, *Args[1]);
+		}
+	}));
+
+static FAutoConsoleCommand GAILiveTestSearchHistoryCmd(
+	TEXT("AILive.Test.SearchHistory"),
+	TEXT("AILive.Test.SearchHistory <keyword> <viewer> [limit] — fuzzy search; auto-routes between LIKE and FTS5 trigram"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 2)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.SearchHistory <keyword> <viewer> [limit]"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("SearchHistory: no game open"));
+			return;
+		}
+		const int32 Limit = Args.Num() >= 3 ? FCString::Atoi(*Args[2]) : 50;
+		const TArray<FAILiveEvent> Rows = Sys->SearchHistory(Args[0], FString(),
+			-1, -1, Args[1], Limit);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("SearchHistory(keyword='%s', viewer='%s', limit=%d) -> %d rows"),
+			*Args[0], *Args[1], Limit, Rows.Num());
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("SearchHistory"), E);
+	}));
+
+static FAutoConsoleCommand GAILiveTestListMyPendingIntendedCmd(
+	TEXT("AILive.Test.ListMyPendingIntended"),
+	TEXT("AILive.Test.ListMyPendingIntended <actor> <recentN> — list speech.intended without speech.public child; "
+	     "events-table-only, does NOT depend on agent_view_state projection"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 2)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ListMyPendingIntended <actor> <recentN>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("ListMyPendingIntended: no game open"));
+			return;
+		}
+		const int32 N = FCString::Atoi(*Args[1]);
+		const TArray<FAILiveEvent> Rows = Sys->ListMyPendingIntended(Args[0], N);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("ListMyPendingIntended(actor=%s, recentN=%d) -> %d rows"),
+			*Args[0], N, Rows.Num());
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("PendingIntended"), E);
+	}));
+
+static FAutoConsoleCommand GAILiveTestQuoteByEventTypeAndTickCmd(
+	TEXT("AILive.Test.QuoteByEventTypeAndTick"),
+	TEXT("AILive.Test.QuoteByEventTypeAndTick <event_type_str> <tick_no> — internal slice by tick (no viewer filter)"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 2)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("Usage: AILive.Test.QuoteByEventTypeAndTick <event_type_str> <tick_no> "
+				     "(e.g. 'speech.intended' 0)"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("QuoteByEventTypeAndTick: no game open"));
+			return;
+		}
+		const EAILiveEventType T = AILiveEvent::EventTypeFromString(Args[0]);
+		const int64 TickNo = FCString::Atoi64(*Args[1]);
+		const TArray<FAILiveEvent> Rows = Sys->QuoteByEventTypeAndTick(T, TickNo);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("QuoteByEventTypeAndTick(type='%s', tick_no=%lld) -> %d rows"),
+			*Args[0], TickNo, Rows.Num());
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("ByEventTypeAndTick"), E);
+	}));
+
+static FAutoConsoleCommand GAILiveTestListMyStatementsCmd(
+	TEXT("AILive.Test.ListMyStatements"),
+	TEXT("AILive.Test.ListMyStatements <agentId> — list speech.public + private_msg of <agentId>; "
+	     "validates principles 硬约束 2 (self-utterance full traceability)"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ListMyStatements <agentId>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("ListMyStatements: no game open"));
+			return;
+		}
+		const TArray<FAILiveEvent> Rows = Sys->ListMyStatements(Args[0]);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("ListMyStatements(agentId=%s) -> %d rows"), *Args[0], Rows.Num());
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("MyStatements"), E);
+	}));
+
+static FAutoConsoleCommand GAILiveTestListVotesCmd(
+	TEXT("AILive.Test.ListVotes"),
+	TEXT("AILive.Test.ListVotes <round> — list public vote events of round; queries events table directly, "
+	     "returns full FAILiveEvent (not vote_history projection synthesis)"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ListVotes <round>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("ListVotes: no game open"));
+			return;
+		}
+		const int32 R = FCString::Atoi(*Args[0]);
+		const TArray<FAILiveEvent> Rows = Sys->ListVotes(R);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("ListVotes(round=%d) -> %d rows"), R, Rows.Num());
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("Votes"), E);
+	}));
+
+static FAutoConsoleCommand GAILiveTestExecDebugSqlCmd(
+	TEXT("AILive.Test.ExecDebugSql"),
+	TEXT("AILive.Test.ExecDebugSql <raw_sql...> — debug-only: run raw SQL on main game-db connection. "
+	     "Used by T4 acceptance to DROP TABLE agent_view_state and re-run ListMyPendingIntended"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ExecDebugSql <raw_sql...>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("ExecDebugSql: no game open"));
+			return;
+		}
+		const FString Sql = FString::Join(Args, TEXT(" "));
+		FString Err;
+		const bool bOk = Sys->ExecuteDebugSqlOnMainConnection(Sql, Err);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("ExecDebugSql(%s) -> %s%s%s"),
+			*Sql, bOk ? TEXT("OK") : TEXT("FAIL"),
+			bOk ? TEXT("") : TEXT(" err="),
+			bOk ? TEXT("") : *Err);
 	}));
