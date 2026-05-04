@@ -1306,6 +1306,239 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByEventTypeAndTick(
 }
 
 // ---------------------------------------------------------------
+// T7 — Bid 协议 + Floor control（principles §5.2bis / §5.4）
+// ---------------------------------------------------------------
+
+namespace
+{
+	// 解 bid payload：{ "urgency": float, "proposed_target"?: str, "rationale"?: str }
+	bool ParseBidPayload(const FString& InPayloadJson, float& OutUrgency,
+	                     FString& OutProposedTarget, FString& OutRationale)
+	{
+		OutUrgency = 0.f;
+		TSharedPtr<FJsonObject> Obj;
+		const auto R = TJsonReaderFactory<TCHAR>::Create(InPayloadJson);
+		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid()) return false;
+		double Tmp = 0.0;
+		if (Obj->TryGetNumberField(TEXT("urgency"), Tmp)) OutUrgency = static_cast<float>(Tmp);
+		Obj->TryGetStringField(TEXT("proposed_target"), OutProposedTarget);
+		Obj->TryGetStringField(TEXT("rationale"), OutRationale);
+		return true;
+	}
+
+	// 从 intended payload 抽 addressed_to_hint 数组
+	TArray<FString> ParseAddressedToHint(const FString& InIntendedPayloadJson)
+	{
+		TArray<FString> Out;
+		TSharedPtr<FJsonObject> Obj;
+		const auto R = TJsonReaderFactory<TCHAR>::Create(InIntendedPayloadJson);
+		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid()) return Out;
+		const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+		if (Obj->TryGetArrayField(TEXT("addressed_to_hint"), Arr) && Arr)
+		{
+			for (const TSharedPtr<FJsonValue>& V : *Arr)
+			{
+				FString S;
+				if (V.IsValid() && V->TryGetString(S)) Out.Add(S);
+			}
+		}
+		return Out;
+	}
+
+	// 从 tick_resolved payload 取 winner_actor + winner_intended_seq
+	bool ParseTickResolvedPayload(const FString& InPayloadJson, FString& OutWinner,
+	                              int64& OutWinnerIntendedSeq)
+	{
+		OutWinner.Reset();
+		OutWinnerIntendedSeq = 0;
+		TSharedPtr<FJsonObject> Obj;
+		const auto R = TJsonReaderFactory<TCHAR>::Create(InPayloadJson);
+		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid()) return false;
+		Obj->TryGetStringField(TEXT("winner_actor"), OutWinner);
+		double Tmp = 0.0;
+		if (Obj->TryGetNumberField(TEXT("winner_intended_seq"), Tmp)) OutWinnerIntendedSeq = static_cast<int64>(Tmp);
+		return true;
+	}
+}
+
+TArray<FAILiveBid> UAILiveEventStoreSubsystem::ListBidsForTick(int64 InTickNo) const
+{
+	TArray<FAILiveBid> Out;
+	if (!IsGameOpen()) return Out;
+
+	// 协议不变量：每 actor 每拍最多 1 条 intended + 1 条 bid。
+	// JOIN events i ON i.game_id=b.game_id AND i.tick_no=b.tick_no AND i.actor=b.actor
+	// AND i.event_type='speech.intended' 反解 IntendedSeq。
+	const FString Sql = FString::Printf(
+		TEXT("SELECT b.actor, b.seq, b.payload, COALESCE(i.seq, 0) "
+		     "FROM events b "
+		     "LEFT JOIN events i "
+		     "  ON i.game_id = b.game_id AND i.tick_no = b.tick_no "
+		     " AND i.actor = b.actor AND i.event_type = ?3 "
+		     "WHERE b.game_id = ?1 AND b.tick_no = ?2 AND b.event_type = ?4 "
+		     "ORDER BY b.seq;"));
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("ListBidsForTick: prepare failed: %s"), *Db.GetLastError());
+		return Out;
+	}
+	const FString IntendedTypeStr = AILiveEvent::EventTypeToString(EAILiveEventType::SpeechIntended);
+	const FString BidTypeStr      = AILiveEvent::EventTypeToString(EAILiveEventType::Bid);
+	Stmt.SetBindingValueByIndex(1, CurrentGameId);
+	Stmt.SetBindingValueByIndex(2, InTickNo);
+	Stmt.SetBindingValueByIndex(3, IntendedTypeStr);
+	Stmt.SetBindingValueByIndex(4, BidTypeStr);
+
+	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FAILiveBid B;
+		Stmt.GetColumnValueByIndex(0, B.Actor);
+		Stmt.GetColumnValueByIndex(1, B.Seq);
+		FString PayloadJson;
+		Stmt.GetColumnValueByIndex(2, PayloadJson);
+		Stmt.GetColumnValueByIndex(3, B.IntendedSeq);
+		ParseBidPayload(PayloadJson, B.Urgency, B.ProposedTarget, B.Rationale);
+		// BidOffset / FinalScore / RuntimeAdj 由 ResolveFloor 填
+		Out.Add(MoveTemp(B));
+	}
+	return Out;
+}
+
+float UAILiveEventStoreSubsystem::ComputeRuntimeAdjustment(
+	const FString& InActor, int64 InCurrentTickNo) const
+{
+	float Adj = 0.f;
+	if (!IsGameOpen() || InActor.IsEmpty() || InCurrentTickNo <= 0) return Adj;
+
+	// 反霸麦：扫 tick-1..tick-3 的 tick_resolved.winner_actor。
+	// 任务卡常量版：连续 ≥ 3 拍命中 → -1.5（一次性，不叠乘）。
+	{
+		int32 Streak = 0;
+		bool  bBroken = false;
+		for (int64 T = InCurrentTickNo - 1; T >= InCurrentTickNo - 3 && T > 0 && !bBroken; --T)
+		{
+			TArray<FAILiveEvent> TR = QuoteByEventTypeAndTick(
+				EAILiveEventType::OrchestratorTickResolved, T);
+			bool bFoundWin = false;
+			for (const FAILiveEvent& E : TR)
+			{
+				FString W; int64 _ = 0;
+				if (ParseTickResolvedPayload(E.PayloadJson, W, _) && W == InActor)
+				{
+					bFoundWin = true;
+					break;
+				}
+			}
+			if (bFoundWin) ++Streak;
+			else { bBroken = true; }
+		}
+		if (Streak >= 3) Adj += -1.5f;
+	}
+
+	// 被 @ 加权：扫上一拍 tick_resolved → winner intended.addressed_to_hint 含本 actor → +2.0。
+	if (InCurrentTickNo >= 2)
+	{
+		TArray<FAILiveEvent> TR = QuoteByEventTypeAndTick(
+			EAILiveEventType::OrchestratorTickResolved, InCurrentTickNo - 1);
+		for (const FAILiveEvent& E : TR)
+		{
+			FString W; int64 IntSeq = 0;
+			if (!ParseTickResolvedPayload(E.PayloadJson, W, IntSeq) || W.IsEmpty() || IntSeq <= 0) continue;
+
+			// 取 winner intended 事件，无 viewer 过滤（orchestrator 自己用）。
+			const FString Sql = FString::Printf(
+				TEXT("SELECT %s FROM events e WHERE e.game_id = ?1 AND e.seq = ?2;"),
+				kEventSelectColumns);
+			FSQLitePreparedStatement St;
+			if (!St.Create(const_cast<FSQLiteDatabase&>(Db), *Sql)) continue;
+			St.SetBindingValueByIndex(1, CurrentGameId);
+			St.SetBindingValueByIndex(2, IntSeq);
+			if (St.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				const FAILiveEvent IntEv = RowToEvent(St);
+				const TArray<FString> Targets = ParseAddressedToHint(IntEv.PayloadJson);
+				if (Targets.Contains(InActor)) { Adj += 2.0f; break; }
+			}
+		}
+	}
+
+	// 沉默加权：本 actor 最近 5 拍无 speech.public（actor=本 NPC）→ +0.5。
+	if (InCurrentTickNo >= 6)
+	{
+		const FString PubTypeStr = AILiveEvent::EventTypeToString(EAILiveEventType::SpeechPublic);
+		const FString Sql = TEXT(
+			"SELECT 1 FROM events "
+			"WHERE game_id = ?1 AND actor = ?2 AND event_type = ?3 "
+			"  AND tick_no BETWEEN ?4 AND ?5 LIMIT 1;");
+		FSQLitePreparedStatement St;
+		if (St.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+		{
+			St.SetBindingValueByIndex(1, CurrentGameId);
+			St.SetBindingValueByIndex(2, InActor);
+			St.SetBindingValueByIndex(3, PubTypeStr);
+			St.SetBindingValueByIndex(4, InCurrentTickNo - 5);
+			St.SetBindingValueByIndex(5, InCurrentTickNo - 1);
+			const bool bFound = (St.Step() == ESQLitePreparedStatementStepResult::Row);
+			if (!bFound) Adj += 0.5f;
+		}
+	}
+
+	return Adj;
+}
+
+FAILiveTickResolution UAILiveEventStoreSubsystem::ResolveFloor(
+	int64 InTickNo,
+	const TArray<FString>& InEligibleAgentIds,
+	const TMap<FString, float>& InAgentBidOffsets,
+	float InColdThreshold) const
+{
+	FAILiveTickResolution Out;
+	Out.TickNo = static_cast<int32>(InTickNo);
+	if (!IsGameOpen()) return Out;
+
+	TArray<FAILiveBid> AllBids = ListBidsForTick(InTickNo);
+
+	// 过滤到 eligible 集合
+	TSet<FString> EligibleSet;
+	for (const FString& A : InEligibleAgentIds) EligibleSet.Add(A);
+
+	float BestScore = -FLT_MAX;
+	FString BestActor;
+	int64   BestIntendedSeq = 0;
+
+	for (FAILiveBid& B : AllBids)
+	{
+		if (!EligibleSet.Contains(B.Actor)) continue;
+		const float* OffPtr = InAgentBidOffsets.Find(B.Actor);
+		B.BidOffset  = OffPtr ? *OffPtr : 0.f;
+		B.RuntimeAdj = ComputeRuntimeAdjustment(B.Actor, InTickNo);
+		B.FinalScore = B.Urgency + B.BidOffset + B.RuntimeAdj;
+
+		// 同分按 lexicographic actor_id 取小（决策 #4）
+		const bool bWin =
+			(B.FinalScore > BestScore) ||
+			(B.FinalScore == BestScore && (BestActor.IsEmpty() || B.Actor < BestActor));
+		if (bWin)
+		{
+			BestScore = B.FinalScore;
+			BestActor = B.Actor;
+			BestIntendedSeq = B.IntendedSeq;
+		}
+		Out.AllBids.Add(B);
+	}
+
+	if (BestScore >= InColdThreshold && !BestActor.IsEmpty())
+	{
+		Out.WinnerActor       = BestActor;
+		Out.WinnerIntendedSeq = BestIntendedSeq;
+	}
+	// 否则 WinnerActor 留空（冷场）
+	return Out;
+}
+
+// ---------------------------------------------------------------
 // T3 — Static validation
 // ---------------------------------------------------------------
 

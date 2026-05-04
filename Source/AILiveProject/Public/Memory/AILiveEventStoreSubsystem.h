@@ -5,6 +5,7 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "SQLiteDatabase.h"
 #include "Memory/AILiveEventTypes.h"
+#include "Memory/AILiveBidTypes.h"
 #include "AILiveEventStoreSubsystem.generated.h"
 
 UCLASS()
@@ -137,6 +138,28 @@ public:
 	 */
 	TArray<FAILiveEvent> QuoteByEventTypeAndTick(EAILiveEventType InEventType, int64 InTickNo) const;
 
+	// === T7 — Bid 协议 + Floor control ============================================
+	// principles §5.2bis / §5.4。orchestrator 内部用，**不**加 BlueprintCallable。
+
+	/**
+	 * 取本拍全部 bid 事件并解析为 FAILiveBid 数组。
+	 * IntendedSeq 由 (game_id, tick_no, actor) JOIN events.speech.intended 反解
+	 * （协议不变量：每 actor 每拍最多 1 条 intended + 1 条 bid）。
+	 * BidOffset 留 0；Director 在 ResolveFloor 调用前从 Roster 注入。
+	 */
+	TArray<FAILiveBid> ListBidsForTick(int64 InTickNo) const;
+
+	/**
+	 * 收齐 bid → 对每 eligible bid 计算 RuntimeAdj → FinalScore = Urgency + BidOffset + RuntimeAdj
+	 * → 取最大；最大 < ColdThreshold → WinnerActor=""（冷场）；同分按 lexicographic actor_id 取小。
+	 * AllBids 含全部 eligible（未参与 bid 的 abstain agent 不在此列表——caller 通过 EligibleAgentIds 过滤）。
+	 * DerivedPublicSeq 留 0：由 caller 写完 speech.public 后回填到 tick_resolved.payload。
+	 */
+	FAILiveTickResolution ResolveFloor(int64 InTickNo,
+	                                   const TArray<FString>& InEligibleAgentIds,
+	                                   const TMap<FString, float>& InAgentBidOffsets,
+	                                   float InColdThreshold = 3.0f) const;
+
 	// 通过主连接读 _meta.db.schema_meta 全表。WAL 同进程二次连接会拿不到 -shm
 	// 共享映射（实测 ReadOnly / ReadWrite 都回 SQLITE_IOERR），故不开新连接，
 	// 走已 open 的 MetaDb。仅在 IsGameOpen() 时可调。
@@ -231,6 +254,15 @@ private:
 
 	/** Resolve parser_version to write: dynamic schema_meta read with constant fallback. */
 	FString ResolveLiveParserVersion();
+
+	/**
+	 * T7 — RuntimeAdj 计算（任务卡常量版，DevLog 调参基线）：
+	 *   反霸麦：扫 tick-1..tick-3 的 tick_resolved.winner_actor，连续 ≥ 3 拍命中本 actor → -1.5（一次性）
+	 *   被 @ 加权：扫上一拍 tick_resolved → winner intended payload.addressed_to_hint 含本 actor → +2.0
+	 *   沉默加权：本 actor 最近 5 拍无 actor=本 NPC 的 speech.public → +0.5
+	 *   三项独立累加返回。
+	 */
+	float ComputeRuntimeAdjustment(const FString& InActor, int64 InCurrentTickNo) const;
 
 	static FString GenerateUuidV7();
 

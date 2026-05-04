@@ -5,7 +5,9 @@
 #include "GameFramework/Actor.h"
 #include "InputCoreTypes.h"
 #include "LLM/AILiveAgentRoster.h"
+#include "LLM/AILiveParserClient.h"
 #include "LLM/OpenAIChatClient.h"
+#include "Memory/AILiveBidTypes.h"
 #include "Act02RuleReceiveDirector.generated.h"
 
 class USceneComponent;
@@ -29,20 +31,10 @@ enum class EAct02State : uint8
 	ReactionSpeak,
 };
 
-enum class EWillingness : uint8
-{
-	None             = 0,
-	Weak             = 2,
-	Moderate         = 3,
-	Strong           = 4,
-	ExtremelyStrong  = 5,
-};
-
 struct FAct02NPCRuntime
 {
 	FNPCAgentConfig Config;
 	TWeakObjectPtr<AActor> Pawn;
-	FString UnspokenContent;
 };
 
 UCLASS(BlueprintType, Blueprintable)
@@ -160,8 +152,50 @@ private:
 
 	void StartSeedPhase();
 	void TickLLMAwait(float Dt);
-	void GatherSeedAndPickWinner();
-	void GatherReactionAndPickWinner();
+
+	// === T7 主循环路径（替代 DispatchLLMs / GatherSeed* / GatherReaction*） ====
+
+	// 单 agent 一拍 Reasoner→Parser 双 LLM 串联结果（worker SetValue 一次 → GT 只读 Get）
+	struct FAgentTickResult
+	{
+		int32 NPCIndex = INDEX_NONE;
+		FString ActorId;            // "NPC%02d"
+		FString RequestId;
+		ELLMProvider Provider = ELLMProvider::DeepSeek;
+		FString Model;
+		bool    bAbstain = false;   // 3 次 reject sample 失败 → abstain
+		FString FailureReason;      // P.ErrorReason | "reasoner_http_failed" | "reasoner_timeout"
+		FString FailedStage;        // P.FailedStage（PrevalidateRawTaggedSections / ParseFourChannels / ...）
+		FString ReasonerRawText;    // 最后一次完整 raw text
+		AILiveParser::FParseResult Parsed;
+		OpenAIChat::FResult ReasonerResult;
+	};
+
+	struct FInflightTick
+	{
+		int32 NPCIndex = INDEX_NONE;
+		FString ActorId;
+		FString RequestId;
+		ELLMProvider Provider;
+		FString Model;
+		TFuture<FAgentTickResult> Future;
+	};
+
+	void RunTick();
+	static FAgentTickResult RunAgentTickInWorker(
+		const FNPCAgentConfig& Cfg,
+		const FString& RequestId,
+		const FString& SystemPrompt,
+		const FString& UserPrompt,
+		float PerAttemptTimeoutSec);
+	void GatherTickAndResolveFloor();
+	void DeriveActionIntents(int64 InTickNo);
+	int64 WriteTickResolvedAndAudit(const FAILiveTickResolution& Res, int64 DerivedPublicSeq);
+
+	// §A.1 四通道格式 system prompt（seed + reaction 共用，替代 BuildSeedSystemPrompt）
+	FString BuildReasonerSystemPrompt(const FNPCAgentConfig& Cfg,
+	                                  const FString& GameRule,
+	                                  int32 InCurrentRound) const;
 
 	void StartSpeak(int32 NPCIndex, const FString& Text);
 	void TickSpeakWatchdog(float Dt);
@@ -173,52 +207,12 @@ private:
 
 	void DebugMessage(const FString& Msg, const FLinearColor& Color = FLinearColor::White) const;
 
-	struct FInflight
-	{
-		int32 NPCIndex = INDEX_NONE;
-		FString SystemPrompt;
-		FString UserPrompt;
-		ELLMProvider Provider = ELLMProvider::DeepSeek;
-		FString Model;
-		FString RequestId;  // 配对 system.llm_inflight ↔ speech.public，principles §5.4
-		TFuture<OpenAIChat::FResult> Future;
-	};
-
-	struct FParsedAnswer
-	{
-		EWillingness Willingness = EWillingness::None;
-		bool bWantToSpeak = true;
-		FString Content;
-		bool bParseError = false;
-	};
-
-	FParsedAnswer ParseAnswer(const FString& Json, bool bExpectWantToSpeak) const;
-	EWillingness WillingnessFromString(const FString& S) const;
-	const TCHAR* WillingnessLabel(EWillingness W) const;
-
-	FString BuildSeedSystemPrompt(const FNPCAgentConfig& Cfg, const FString& GameRule) const;
-	FString BuildSeedUserPrompt(const FNPCAgentConfig& Cfg) const;
-	// Reaction phase prompt 已迁到 AILivePromptAssembler（T6 落地）；原
-	// BuildReactionSystemPrompt / BuildReactionUserPrompt 函数已删除。
-
-	void DispatchLLMs(bool bSeed);
-
-	// EventStore payload builders（T5：Director 直接 wrap LLM 文本为 speech.public，
-	// 这是 T7 引入 bid + intended 协议前的过渡形态——所有 speech.public 的 payload
-	// 含 "legacy_pre_bid": true，T7 后 SQL 用 IS NULL 过滤）。
-	static FString BuildSpeechPublicPayloadJson(int32 NPCIndex,
-	                                             const FParsedAnswer& Ans,
-	                                             const OpenAIChat::FResult& R,
-	                                             const FString& RequestId);
+	// in-flight 配对协议 payload builder 保留（principles §5.4）
 	static FString BuildLLMInflightPayloadJson(int32 NPCIndex,
 	                                            const FString& RequestId,
 	                                            const FString& SystemPromptHash,
 	                                            const FString& UserPromptHash,
 	                                            const FString& StartedAtIso8601);
-	static FString BuildWinnerDecisionPayloadJson(int32 WinnerNPCIndex,
-	                                               EWillingness Willingness,
-	                                               int32 RoundNo,
-	                                               const TCHAR* WillingnessLabelStr);
 
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> NavTargetCached;
@@ -229,8 +223,11 @@ private:
 	TMap<TWeakObjectPtr<AActor>, FTransform> InitialNPCTransforms;
 
 	TArray<FAct02NPCRuntime> NPCs;
-	TArray<FInflight> CurrentInflight;
-	TMap<int32, FParsedAnswer> CurrentAnswers;
+	TArray<FInflightTick> CurrentTickInflight;
+	// 当拍状态缓存：actor → 该 actor 同拍 intended 事件 seq（GatherTickAndResolveFloor 阶段 A 填，
+	// 阶段 B/C 用于 ResolveFloor / action.intent / speech.public 衍生）。
+	TMap<FString, int64> ActorToIntendedSeq;
+	TMap<FString, FString> ActorToRequestId;
 
 	int32 LastSpeakerIndex = INDEX_NONE;
 	FString LastSentence;

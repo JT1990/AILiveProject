@@ -16,11 +16,13 @@
 
 namespace
 {
-	// Parser provider 选定为 Qwen3（计划 §"已裁决"）。换型必须同步：
-	// 1. 这里 kParserProvider；
-	// 2. v 升版（v2.txt + GetCurrentParserVersion bump）；
-	// 3. _meta.db schema_meta 由下次 BeginGame 自动 upsert。
-	constexpr ELLMProvider kParserProvider = ELLMProvider::Qwen3;
+	// Parser provider 切到 DeepSeek（T7 烟测决定，2026-05-04）：
+	// 原 Qwen3 选型在 10 NPC 并发时 dashscope endpoint 限流，HTTP 0 / reasoner_timeout
+	// 失败率 70%+；切 DeepSeek 后 winner 路径可见，L1 #1/#2 才能机械验。
+	// 注：未 bump parser_version——prompt/schema/regex 不变，仅承载模型变。
+	// 如后续行为差异显著需要 bump，按文档流程加 v2.txt + GetCurrentParserVersion。
+	// _meta.db.schema_meta 由下次 BeginGame 自动 upsert parser_model 字段。
+	constexpr ELLMProvider kParserProvider = ELLMProvider::DeepSeek;
 
 	constexpr const TCHAR* kParserVersion          = TEXT("1");
 	constexpr const TCHAR* kParserPromptRegistry   = TEXT("Content/Prompts/Parser/");

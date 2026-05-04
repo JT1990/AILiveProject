@@ -23,6 +23,10 @@ struct AILIVEPROJECT_API FAILiveBid
 	UPROPERTY(BlueprintReadOnly, Category = "AILive|Bid")
 	float BidOffset = 0.f;
 
+	// T7 加：principles §5.4 反霸麦衰减 + 被 @ 加权 + 沉默加权汇总，用于 tick_audit.all_bids[].runtime_adj。
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Bid")
+	float RuntimeAdj = 0.f;
+
 	UPROPERTY(BlueprintReadOnly, Category = "AILive|Bid")
 	float FinalScore = 0.f;
 

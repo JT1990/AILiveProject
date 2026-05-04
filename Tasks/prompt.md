@@ -1,7 +1,7 @@
-执行 @Tasks/T0_sqlitecore_openssl_setup.md 
+执行 @Tasks/T7_runtick_bid_parser.md 
  
 工作流：
-1. 读 Tasks/T0_sqlitecore_openssl_setup.md 拿到目标 / 涉及文件 / 依赖 / 验收方式 / 完成定义。如果依赖任务（blockedBy）尚未完成，停下来问我。 
+1. 读 Tasks/T7_runtick_bid_parser.md 拿到目标 / 涉及文件 / 依赖 / 验收方式 / 完成定义。如果依赖任务（blockedBy）尚未完成，停下来问我。 
 2. 读 Tasks/00_overview.md 了解整体定位与依赖图，注意"文档冲突 / 待澄清"段对本任务的影响。
 3. 按任务卡"预检"段做差量：C++ 状态用 Read/Grep；Blueprint/资产用 Monolith MCP（先 mcp__monolith__monolith_status 确认在线）。
 4. 按需读真相源文档（不要全文 Read，按 offset/limit 切片, 不要照搬代码块——它是参考实现，不是逐行复制脚本）：
