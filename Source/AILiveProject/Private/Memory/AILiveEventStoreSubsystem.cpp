@@ -2324,6 +2324,810 @@ bool UAILiveEventStoreSubsystem::SetGameDbQueryOnly(bool bQueryOnly)
 	return true;
 }
 
+// ===============================================================
+// T8 — Projector 重建
+// principles §7.4 + §7.2 末「projector 是纯函数，不调任何 LLM」。
+// 全部 reducer 共享一个 BEGIN IMMEDIATE 事务，DELETE 旧投影 → INSERT 新行；
+// 任一步骤失败 → ROLLBACK，旧投影保留。
+// ===============================================================
+
+namespace
+{
+
+TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
+{
+	TSharedPtr<FJsonObject> Out;
+	if (Json.IsEmpty()) return Out;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+	FJsonSerializer::Deserialize(Reader, Out);
+	return Out;
+}
+
+FString JsonGetString(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Key)
+{
+	if (!Obj.IsValid()) return FString();
+	FString S;
+	Obj->TryGetStringField(Key, S);
+	return S;
+}
+
+/** payload.text 截断 256；text 缺失时退而取 raw payload 前缀。 */
+FString ExtractCommitmentText(const TSharedPtr<FJsonObject>& Obj, const FString& RawPayload)
+{
+	const FString T = JsonGetString(Obj, TEXT("text"));
+	const FString Base = T.IsEmpty() ? RawPayload : T;
+	return Base.Len() <= 256 ? Base : Base.Left(256);
+}
+
+/** speech.intended 的 deny 目标取 addressed_to_hint[0]；其它 commit/claim/deny 默认 NULL。 */
+FString ExtractDenyTarget(const TSharedPtr<FJsonObject>& Obj)
+{
+	if (!Obj.IsValid()) return FString();
+	const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+	if (!Obj->TryGetArrayField(TEXT("addressed_to_hint"), Arr)) return FString();
+	if (!Arr || Arr->Num() == 0) return FString();
+	const TSharedPtr<FJsonValue>& V = (*Arr)[0];
+	return V.IsValid() ? V->AsString() : FString();
+}
+
+}  // anon namespace
+
+// ---------------------------------------------------------------
+// ProjectCommitments —— 单 SELECT 拉所有候选 events，按 (event_type,
+// speech_act_type) 二维分派为 commitment_type，写入 commitments 表。
+// ---------------------------------------------------------------
+
+bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
+{
+	// 1) DELETE 旧投影
+	{
+		FSQLitePreparedStatement Del;
+		if (!Del.Create(Db, TEXT("DELETE FROM commitments WHERE game_id = ?1;")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectCommitments: DELETE prepare failed: %s"), *Db.GetLastError());
+			return false;
+		}
+		Del.SetBindingValueByIndex(1, CurrentGameId);
+		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectCommitments: DELETE step failed: %s"), *Db.GetLastError());
+			return false;
+		}
+	}
+
+	// 2) 拉候选事件
+	const TCHAR* SelSql =
+		TEXT("SELECT seq, round_no, actor, event_type, speech_act_type, payload "
+		     "FROM events WHERE game_id = ?1 "
+		     "  AND event_type IN ('vote','alliance_propose','alliance_accept',"
+		     "                     'speech.public','speech.intended') "
+		     "ORDER BY seq;");
+	FSQLitePreparedStatement Sel;
+	if (!Sel.Create(Db, SelSql))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ProjectCommitments: SELECT prepare failed: %s"), *Db.GetLastError());
+		return false;
+	}
+	Sel.SetBindingValueByIndex(1, CurrentGameId);
+
+	// 3) 每行分派 → INSERT
+	const TCHAR* InsSql =
+		TEXT("INSERT OR IGNORE INTO commitments "
+		     "(game_id, agent_id, round_no, seq, commitment_type, target, text, status) "
+		     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active');");
+	FSQLitePreparedStatement Ins;
+	if (!Ins.Create(Db, InsSql))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ProjectCommitments: INSERT prepare failed: %s"), *Db.GetLastError());
+		return false;
+	}
+
+	int64 InsertedCount = 0;
+	while (Sel.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		int64 Seq = 0, RoundNo = 0;
+		FString Actor, EventType, SpeechAct, Payload;
+		Sel.GetColumnValueByIndex(0, Seq);
+		Sel.GetColumnValueByIndex(1, RoundNo);
+		Sel.GetColumnValueByIndex(2, Actor);
+		Sel.GetColumnValueByIndex(3, EventType);
+		Sel.GetColumnValueByIndex(4, SpeechAct);
+		Sel.GetColumnValueByIndex(5, Payload);
+
+		const TSharedPtr<FJsonObject> P = ParseJsonObject(Payload);
+
+		FString CommitmentType, Target, Text;
+
+		if (EventType == TEXT("vote"))
+		{
+			CommitmentType = TEXT("vote_for");
+			Target = JsonGetString(P, TEXT("target"));
+			Text = ExtractCommitmentText(P, Payload);
+		}
+		else if (EventType == TEXT("alliance_propose") || EventType == TEXT("alliance_accept"))
+		{
+			CommitmentType = TEXT("alliance");
+			Target = JsonGetString(P, TEXT("alliance_id"));
+			Text = ExtractCommitmentText(P, Payload);
+		}
+		else  // speech.public / speech.intended — 由 speech_act_type 二次分派
+		{
+			if (SpeechAct == TEXT("commit"))
+			{
+				CommitmentType = TEXT("promise");
+				Text = ExtractCommitmentText(P, Payload);
+			}
+			else if (SpeechAct == TEXT("claim"))
+			{
+				CommitmentType = TEXT("claim_role");
+				Text = ExtractCommitmentText(P, Payload);
+			}
+			else if (SpeechAct == TEXT("deny"))
+			{
+				CommitmentType = TEXT("deny");
+				Target = ExtractDenyTarget(P);
+				Text = ExtractCommitmentText(P, Payload);
+			}
+			else
+			{
+				continue;  // 其它 speech_act_type 不入 commitments
+			}
+		}
+
+		Ins.Reset();
+		Ins.ClearBindings();
+		Ins.SetBindingValueByIndex(1, CurrentGameId);
+		Ins.SetBindingValueByIndex(2, Actor);
+		Ins.SetBindingValueByIndex(3, RoundNo);
+		Ins.SetBindingValueByIndex(4, Seq);
+		Ins.SetBindingValueByIndex(5, CommitmentType);
+		if (Target.IsEmpty())
+		{
+			Ins.SetBindingValueByIndex(6);  // bind NULL（参数 6 = target 列）
+		}
+		else
+		{
+			Ins.SetBindingValueByIndex(6, Target);
+		}
+		Ins.SetBindingValueByIndex(7, Text);
+
+		if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectCommitments: INSERT step failed (seq=%lld type=%s): %s"),
+				Seq, *CommitmentType, *Db.GetLastError());
+			return false;
+		}
+		++InsertedCount;
+	}
+
+	UE_LOG(LogAILiveMemory, Verbose,
+		TEXT("ProjectCommitments: inserted %lld rows"), InsertedCount);
+	return true;
+}
+
+// ---------------------------------------------------------------
+// ProjectVoteHistory —— INSERT…SELECT 直接派生（payload.target 提取走
+// json_extract，避免 C++ 端二次解析）。
+// ---------------------------------------------------------------
+
+bool UAILiveEventStoreSubsystem::ProjectVoteHistory_LockHeld()
+{
+	{
+		FSQLitePreparedStatement Del;
+		if (!Del.Create(Db, TEXT("DELETE FROM vote_history WHERE game_id = ?1;")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectVoteHistory: DELETE prepare failed: %s"), *Db.GetLastError());
+			return false;
+		}
+		Del.SetBindingValueByIndex(1, CurrentGameId);
+		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectVoteHistory: DELETE step failed: %s"), *Db.GetLastError());
+			return false;
+		}
+	}
+
+	const TCHAR* InsSql =
+		TEXT("INSERT OR IGNORE INTO vote_history (game_id, round_no, seq, voter, target) "
+		     "SELECT game_id, round_no, seq, actor, "
+		     "       COALESCE(json_extract(payload, '$.target'), '') "
+		     "FROM events "
+		     "WHERE game_id = ?1 AND event_type = 'vote';");
+	FSQLitePreparedStatement Ins;
+	if (!Ins.Create(Db, InsSql))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ProjectVoteHistory: INSERT prepare failed: %s"), *Db.GetLastError());
+		return false;
+	}
+	Ins.SetBindingValueByIndex(1, CurrentGameId);
+	if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ProjectVoteHistory: INSERT step failed: %s"), *Db.GetLastError());
+		return false;
+	}
+
+	UE_LOG(LogAILiveMemory, Verbose, TEXT("ProjectVoteHistory: rebuild OK"));
+	return true;
+}
+
+// ---------------------------------------------------------------
+// ProjectAllianceState —— 按 alliance_id 聚合；propose 取 MIN(seq)，
+// accept/betray 取 MAX(seq)；members/terms 从首条 propose payload 抽。
+// ---------------------------------------------------------------
+
+bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
+{
+	{
+		FSQLitePreparedStatement Del;
+		if (!Del.Create(Db, TEXT("DELETE FROM alliance_state WHERE game_id = ?1;")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectAllianceState: DELETE prepare failed: %s"), *Db.GetLastError());
+			return false;
+		}
+		Del.SetBindingValueByIndex(1, CurrentGameId);
+		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectAllianceState: DELETE step failed: %s"), *Db.GetLastError());
+			return false;
+		}
+	}
+
+	struct FAllianceAcc
+	{
+		int64 ProposedAtSeq = 0;
+		int64 AcceptedAtSeq = -1;
+		int64 BetrayedAtSeq = -1;
+		FString MembersJson = TEXT("[]");
+		FString Terms;
+		bool bHasPropose = false;
+	};
+	TMap<FString, FAllianceAcc> ByAlliance;
+
+	const TCHAR* SelSql =
+		TEXT("SELECT seq, event_type, payload FROM events "
+		     "WHERE game_id = ?1 AND event_type IN "
+		     "  ('alliance_propose','alliance_accept','alliance_betray') "
+		     "ORDER BY seq;");
+	FSQLitePreparedStatement Sel;
+	if (!Sel.Create(Db, SelSql))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ProjectAllianceState: SELECT prepare failed: %s"), *Db.GetLastError());
+		return false;
+	}
+	Sel.SetBindingValueByIndex(1, CurrentGameId);
+
+	while (Sel.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		int64 Seq = 0;
+		FString EventType, Payload;
+		Sel.GetColumnValueByIndex(0, Seq);
+		Sel.GetColumnValueByIndex(1, EventType);
+		Sel.GetColumnValueByIndex(2, Payload);
+
+		const TSharedPtr<FJsonObject> P = ParseJsonObject(Payload);
+		const FString AllianceId = JsonGetString(P, TEXT("alliance_id"));
+		if (AllianceId.IsEmpty()) continue;
+
+		FAllianceAcc& Acc = ByAlliance.FindOrAdd(AllianceId);
+		if (EventType == TEXT("alliance_propose"))
+		{
+			if (!Acc.bHasPropose)
+			{
+				Acc.bHasPropose = true;
+				Acc.ProposedAtSeq = Seq;
+				Acc.Terms = JsonGetString(P, TEXT("terms"));
+				if (P.IsValid())
+				{
+					const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+					if (P->TryGetArrayField(TEXT("members"), Arr) && Arr)
+					{
+						FString MembersOut;
+						const TSharedRef<TJsonWriter<>> W = TJsonWriterFactory<>::Create(&MembersOut);
+						FJsonSerializer::Serialize(*Arr, W);
+						Acc.MembersJson = MembersOut;
+					}
+				}
+			}
+		}
+		else if (EventType == TEXT("alliance_accept"))
+		{
+			Acc.AcceptedAtSeq = Seq;
+		}
+		else if (EventType == TEXT("alliance_betray"))
+		{
+			Acc.BetrayedAtSeq = Seq;
+		}
+	}
+
+	const TCHAR* InsSql =
+		TEXT("INSERT INTO alliance_state "
+		     "(game_id, alliance_id, members, proposed_at_seq, accepted_at_seq, "
+		     " betrayed_at_seq, terms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);");
+	FSQLitePreparedStatement Ins;
+	if (!Ins.Create(Db, InsSql))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ProjectAllianceState: INSERT prepare failed: %s"), *Db.GetLastError());
+		return false;
+	}
+
+	for (const TPair<FString, FAllianceAcc>& Pair : ByAlliance)
+	{
+		const FAllianceAcc& A = Pair.Value;
+		// alliance_propose 缺失（只有 accept / betray，少见）→ proposed_at_seq 取首次出现 seq
+		const int64 ProposedSeq = A.bHasPropose ? A.ProposedAtSeq
+			: (A.AcceptedAtSeq >= 0 ? A.AcceptedAtSeq : A.BetrayedAtSeq);
+		Ins.Reset();
+		Ins.ClearBindings();
+		Ins.SetBindingValueByIndex(1, CurrentGameId);
+		Ins.SetBindingValueByIndex(2, Pair.Key);
+		Ins.SetBindingValueByIndex(3, A.MembersJson);
+		Ins.SetBindingValueByIndex(4, ProposedSeq);
+		if (A.AcceptedAtSeq < 0)
+		{
+			Ins.SetBindingValueByIndex(5);  // bind NULL（参数 5 = accepted_at_seq）
+		}
+		else
+		{
+			Ins.SetBindingValueByIndex(5, A.AcceptedAtSeq);
+		}
+		if (A.BetrayedAtSeq < 0)
+		{
+			Ins.SetBindingValueByIndex(6);  // bind NULL（参数 6 = betrayed_at_seq）
+		}
+		else
+		{
+			Ins.SetBindingValueByIndex(6, A.BetrayedAtSeq);
+		}
+		Ins.SetBindingValueByIndex(7, A.Terms);
+		if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectAllianceState: INSERT step failed (alliance_id=%s): %s"),
+				*Pair.Key, *Db.GetLastError());
+			return false;
+		}
+	}
+
+	UE_LOG(LogAILiveMemory, Verbose,
+		TEXT("ProjectAllianceState: rebuilt %d rows"), ByAlliance.Num());
+	return true;
+}
+
+// ---------------------------------------------------------------
+// ProjectAgentViewState —— 单快照策略：每 agent 一行，as_of_seq=last_seq。
+// alive_players / known_roles / my_commitments / vote_history /
+// pending_intended 五段 JSON 由内联 SQL + JSON 写出器组装。
+// 必须在 ProjectCommitments / ProjectVoteHistory 之后调用——本步直读那两张表。
+// ---------------------------------------------------------------
+
+bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
+{
+	{
+		FSQLitePreparedStatement Del;
+		if (!Del.Create(Db, TEXT("DELETE FROM agent_view_state WHERE game_id = ?1;")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectAgentViewState: DELETE prepare failed: %s"), *Db.GetLastError());
+			return false;
+		}
+		Del.SetBindingValueByIndex(1, CurrentGameId);
+		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectAgentViewState: DELETE step failed: %s"), *Db.GetLastError());
+			return false;
+		}
+	}
+
+	// === 1) Roster：agent_calibration 优先；为空则从 events.actor DISTINCT NPC* 兜底。
+	TArray<FString> Roster;
+	{
+		FSQLitePreparedStatement Stmt;
+		if (Stmt.Create(Db,
+			TEXT("SELECT agent_id FROM agent_calibration WHERE game_id = ?1 ORDER BY agent_id;")))
+		{
+			Stmt.SetBindingValueByIndex(1, CurrentGameId);
+			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				FString AgentId;
+				Stmt.GetColumnValueByIndex(0, AgentId);
+				Roster.Add(AgentId);
+			}
+		}
+	}
+	if (Roster.Num() == 0)
+	{
+		FSQLitePreparedStatement Stmt;
+		if (Stmt.Create(Db,
+			TEXT("SELECT DISTINCT actor FROM events WHERE game_id = ?1 "
+			     "  AND actor LIKE 'NPC%' ORDER BY actor;")))
+		{
+			Stmt.SetBindingValueByIndex(1, CurrentGameId);
+			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				FString AgentId;
+				Stmt.GetColumnValueByIndex(0, AgentId);
+				Roster.Add(AgentId);
+			}
+		}
+	}
+	if (Roster.Num() == 0)
+	{
+		UE_LOG(LogAILiveMemory, Verbose,
+			TEXT("ProjectAgentViewState: empty roster — nothing to project"));
+		return true;
+	}
+
+	// === 2) 全局信息：当前 last_seq + deleted set + role_assigned 列表（一次查完）。
+	const int64 AsOfSeq = CachedLastSeq;
+
+	TSet<FString> DeletedActors;
+	{
+		FSQLitePreparedStatement Stmt;
+		if (Stmt.Create(Db,
+			TEXT("SELECT actor FROM events WHERE game_id = ?1 "
+			     "  AND event_type = 'system.delete_executed';")))
+		{
+			Stmt.SetBindingValueByIndex(1, CurrentGameId);
+			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				FString A;
+				Stmt.GetColumnValueByIndex(0, A);
+				if (!A.IsEmpty()) DeletedActors.Add(A);
+			}
+		}
+	}
+
+	// role_assigned 事件：actor=被分配角色的 agent；payload.role=角色字符串；
+	// visibility 列表 → event_visibility 表逐行存。本步把 (event_id, actor, role)
+	// + 该事件可见的 viewer 集合一并捞，供后续 per-agent 过滤。
+	struct FRoleAssignment
+	{
+		FString EventId;
+		FString Actor;
+		FString Role;
+		TArray<FString> Viewers;
+	};
+	TArray<FRoleAssignment> RoleEvents;
+	{
+		FSQLitePreparedStatement Stmt;
+		if (Stmt.Create(Db,
+			TEXT("SELECT event_id, actor, "
+			     "       COALESCE(json_extract(payload, '$.role'), '') "
+			     "FROM events WHERE game_id = ?1 AND event_type = 'system.role_assigned' "
+			     "ORDER BY seq;")))
+		{
+			Stmt.SetBindingValueByIndex(1, CurrentGameId);
+			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				FRoleAssignment R;
+				Stmt.GetColumnValueByIndex(0, R.EventId);
+				Stmt.GetColumnValueByIndex(1, R.Actor);
+				Stmt.GetColumnValueByIndex(2, R.Role);
+				if (!R.EventId.IsEmpty()) RoleEvents.Add(MoveTemp(R));
+			}
+		}
+		// 拉每条 role_assigned 的 viewers
+		FSQLitePreparedStatement VStmt;
+		if (VStmt.Create(Db, TEXT("SELECT viewer FROM event_visibility WHERE event_id = ?1;")))
+		{
+			for (FRoleAssignment& R : RoleEvents)
+			{
+				VStmt.Reset();
+				VStmt.ClearBindings();
+				VStmt.SetBindingValueByIndex(1, R.EventId);
+				while (VStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+				{
+					FString V;
+					VStmt.GetColumnValueByIndex(0, V);
+					R.Viewers.Add(V);
+				}
+			}
+		}
+	}
+
+	// 最近 tick_no 上限（pending_intended 的 10 拍窗口）
+	int64 LatestTickNo = 0;
+	{
+		FSQLitePreparedStatement Stmt;
+		if (Stmt.Create(Db,
+			TEXT("SELECT COALESCE(MAX(tick_no), 0) FROM events WHERE game_id = ?1;")))
+		{
+			Stmt.SetBindingValueByIndex(1, CurrentGameId);
+			if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				Stmt.GetColumnValueByIndex(0, LatestTickNo);
+			}
+		}
+	}
+	const int64 PendingTickFloor = FMath::Max<int64>(0, LatestTickNo - 9);
+
+	// === 3) per-agent 拼装并 INSERT
+	const TCHAR* InsSql =
+		TEXT("INSERT INTO agent_view_state "
+		     "(game_id, agent_id, as_of_seq, alive_players, known_roles, "
+		     " my_commitments, vote_history, pending_intended) "
+		     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);");
+	FSQLitePreparedStatement Ins;
+	if (!Ins.Create(Db, InsSql))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ProjectAgentViewState: INSERT prepare failed: %s"), *Db.GetLastError());
+		return false;
+	}
+
+	// 每 agent 复用三个查询语句（commitments / vote_history / pending）
+	FSQLitePreparedStatement CommitStmt;
+	CommitStmt.Create(Db,
+		TEXT("SELECT seq, commitment_type, COALESCE(target,''), text, status "
+		     "FROM commitments WHERE game_id = ?1 AND agent_id = ?2 ORDER BY seq;"));
+	FSQLitePreparedStatement VotesStmt;
+	VotesStmt.Create(Db,
+		TEXT("SELECT round_no, seq, target FROM vote_history "
+		     "WHERE game_id = ?1 AND voter = ?2 ORDER BY seq;"));
+	FSQLitePreparedStatement PendingStmt;
+	PendingStmt.Create(Db,
+		TEXT("SELECT seq, tick_no, COALESCE(json_extract(payload, '$.text'), ''), "
+		     "       json_extract(payload, '$.intended_action') "
+		     "FROM events e "
+		     "WHERE e.game_id = ?1 AND e.actor = ?2 "
+		     "  AND e.event_type = 'speech.intended' "
+		     "  AND e.tick_no >= ?3 "
+		     "  AND NOT EXISTS (SELECT 1 FROM events c "
+		     "                  WHERE c.game_id = e.game_id "
+		     "                    AND c.event_type = 'speech.public' "
+		     "                    AND c.parent_event_id = e.event_id) "
+		     "ORDER BY e.seq;"));
+
+	int64 InsertedRows = 0;
+	for (const FString& AgentId : Roster)
+	{
+		// alive_players：roster - DeletedActors
+		FString AlivePlayersJson;
+		{
+			const TSharedRef<TJsonWriter<>> W =
+				TJsonWriterFactory<>::Create(&AlivePlayersJson);
+			W->WriteArrayStart();
+			for (const FString& A : Roster)
+			{
+				if (!DeletedActors.Contains(A)) W->WriteValue(A);
+			}
+			W->WriteArrayEnd();
+			W->Close();
+		}
+
+		// known_roles：所有该 agent 可见的 role_assigned 事件
+		FString KnownRolesJson;
+		{
+			const TSharedRef<TJsonWriter<>> W =
+				TJsonWriterFactory<>::Create(&KnownRolesJson);
+			W->WriteObjectStart();
+			TSet<FString> SeenActors;
+			for (const FRoleAssignment& R : RoleEvents)
+			{
+				const bool bVisible = R.Viewers.Contains(AgentId)
+					|| R.Viewers.Contains(TEXT("public"))
+					|| R.Viewers.Contains(TEXT("audience"));
+				if (!bVisible) continue;
+				if (SeenActors.Contains(R.Actor)) continue;  // 同 actor 后续 role 覆盖：取首次
+				SeenActors.Add(R.Actor);
+				W->WriteValue(R.Actor, R.Role);
+			}
+			W->WriteObjectEnd();
+			W->Close();
+		}
+
+		// my_commitments：commitments 表 WHERE agent_id=AgentId
+		FString MyCommitmentsJson;
+		{
+			const TSharedRef<TJsonWriter<>> W =
+				TJsonWriterFactory<>::Create(&MyCommitmentsJson);
+			W->WriteObjectStart();
+			CommitStmt.Reset();
+			CommitStmt.ClearBindings();
+			CommitStmt.SetBindingValueByIndex(1, CurrentGameId);
+			CommitStmt.SetBindingValueByIndex(2, AgentId);
+			while (CommitStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				int64 CSeq = 0;
+				FString CType, CTarget, CText, CStatus;
+				CommitStmt.GetColumnValueByIndex(0, CSeq);
+				CommitStmt.GetColumnValueByIndex(1, CType);
+				CommitStmt.GetColumnValueByIndex(2, CTarget);
+				CommitStmt.GetColumnValueByIndex(3, CText);
+				CommitStmt.GetColumnValueByIndex(4, CStatus);
+				W->WriteObjectStart(FString::Printf(TEXT("%lld"), CSeq));
+				W->WriteValue(TEXT("type"), CType);
+				W->WriteValue(TEXT("target"), CTarget);
+				W->WriteValue(TEXT("text"), CText);
+				W->WriteValue(TEXT("status"), CStatus);
+				W->WriteObjectEnd();
+			}
+			W->WriteObjectEnd();
+			W->Close();
+		}
+
+		// vote_history：vote_history 表 WHERE voter=AgentId
+		FString MyVoteHistoryJson;
+		{
+			const TSharedRef<TJsonWriter<>> W =
+				TJsonWriterFactory<>::Create(&MyVoteHistoryJson);
+			W->WriteArrayStart();
+			VotesStmt.Reset();
+			VotesStmt.ClearBindings();
+			VotesStmt.SetBindingValueByIndex(1, CurrentGameId);
+			VotesStmt.SetBindingValueByIndex(2, AgentId);
+			while (VotesStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				int64 RoundNo = 0, VSeq = 0;
+				FString VTarget;
+				VotesStmt.GetColumnValueByIndex(0, RoundNo);
+				VotesStmt.GetColumnValueByIndex(1, VSeq);
+				VotesStmt.GetColumnValueByIndex(2, VTarget);
+				W->WriteObjectStart();
+				W->WriteValue(TEXT("round_no"), RoundNo);
+				W->WriteValue(TEXT("seq"), VSeq);
+				W->WriteValue(TEXT("target"), VTarget);
+				W->WriteObjectEnd();
+			}
+			W->WriteArrayEnd();
+			W->Close();
+		}
+
+		// pending_intended：speech.intended 没被 speech.public 引用的，最近 10 拍内
+		FString PendingJson;
+		{
+			const TSharedRef<TJsonWriter<>> W =
+				TJsonWriterFactory<>::Create(&PendingJson);
+			W->WriteArrayStart();
+			PendingStmt.Reset();
+			PendingStmt.ClearBindings();
+			PendingStmt.SetBindingValueByIndex(1, CurrentGameId);
+			PendingStmt.SetBindingValueByIndex(2, AgentId);
+			PendingStmt.SetBindingValueByIndex(3, PendingTickFloor);
+			while (PendingStmt.Step() == ESQLitePreparedStatementStepResult::Row)
+			{
+				int64 PSeq = 0, PTick = 0;
+				FString PText, IntendedActionJson;
+				PendingStmt.GetColumnValueByIndex(0, PSeq);
+				PendingStmt.GetColumnValueByIndex(1, PTick);
+				PendingStmt.GetColumnValueByIndex(2, PText);
+				PendingStmt.GetColumnValueByIndex(3, IntendedActionJson);  // NULL → empty FString
+				W->WriteObjectStart();
+				W->WriteValue(TEXT("seq"), PSeq);
+				W->WriteValue(TEXT("tick_no"), PTick);
+				W->WriteValue(TEXT("text_snippet"),
+					PText.Len() > 80 ? PText.Left(80) : PText);
+				if (!IntendedActionJson.IsEmpty())
+				{
+					W->WriteRawJSONValue(TEXT("intended_action"), IntendedActionJson);
+				}
+				W->WriteObjectEnd();
+			}
+			W->WriteArrayEnd();
+			W->Close();
+		}
+
+		// INSERT
+		Ins.Reset();
+		Ins.ClearBindings();
+		Ins.SetBindingValueByIndex(1, CurrentGameId);
+		Ins.SetBindingValueByIndex(2, AgentId);
+		Ins.SetBindingValueByIndex(3, AsOfSeq);
+		Ins.SetBindingValueByIndex(4, AlivePlayersJson);
+		Ins.SetBindingValueByIndex(5, KnownRolesJson);
+		Ins.SetBindingValueByIndex(6, MyCommitmentsJson);
+		Ins.SetBindingValueByIndex(7, MyVoteHistoryJson);
+		Ins.SetBindingValueByIndex(8, PendingJson);
+		if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ProjectAgentViewState: INSERT step failed (agent=%s): %s"),
+				*AgentId, *Db.GetLastError());
+			return false;
+		}
+		++InsertedRows;
+	}
+
+	UE_LOG(LogAILiveMemory, Verbose,
+		TEXT("ProjectAgentViewState: rebuilt %lld rows (as_of_seq=%lld, latest_tick=%lld)"),
+		InsertedRows, AsOfSeq, LatestTickNo);
+	return true;
+}
+
+// ---------------------------------------------------------------
+// RebuildProjections —— 主入口。WriteMutex + 单 BEGIN IMMEDIATE 事务 →
+// ProjectCommitments → ProjectVoteHistory → ProjectAllianceState →
+// ProjectAgentViewState（依赖前两表已写）→ COMMIT。任一步骤失败 → ROLLBACK。
+// ---------------------------------------------------------------
+
+bool UAILiveEventStoreSubsystem::RebuildProjections()
+{
+	if (!IsGameOpen() || !Db.IsValid())
+	{
+		UE_LOG(LogAILiveMemory, Verbose, TEXT("RebuildProjections: no game open"));
+		return false;
+	}
+
+	const double T0 = FPlatformTime::Seconds();
+
+	FScopeLock Lock(&WriteMutex);
+
+	if (!Db.Execute(TEXT("BEGIN IMMEDIATE;")))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("RebuildProjections: BEGIN IMMEDIATE failed: %s"), *Db.GetLastError());
+		return false;
+	}
+
+	bool bOk = ProjectCommitments_LockHeld()
+	        && ProjectVoteHistory_LockHeld()
+	        && ProjectAllianceState_LockHeld()
+	        && ProjectAgentViewState_LockHeld();
+
+	if (bOk && !Db.Execute(TEXT("COMMIT;")))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("RebuildProjections: COMMIT failed: %s"), *Db.GetLastError());
+		bOk = false;
+	}
+	if (!bOk)
+	{
+		Db.Execute(TEXT("ROLLBACK;"));
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("RebuildProjections: rolled back (game=%s)"), *CurrentGameId);
+		return false;
+	}
+
+	const double Elapsed = (FPlatformTime::Seconds() - T0) * 1000.0;
+	UE_LOG(LogAILiveMemory, Display,
+		TEXT("RebuildProjections OK (game=%s, elapsed=%.2fms)"),
+		*CurrentGameId, Elapsed);
+	return true;
+}
+
+// ---------------------------------------------------------------
+// T8 — 读 agent_view_state.pending_intended JSON（最新 as_of_seq 行）。
+// ---------------------------------------------------------------
+
+FString UAILiveEventStoreSubsystem::DebugReadPendingIntendedJson(const FString& InAgentId) const
+{
+	if (!IsGameOpen()) return TEXT("[]");
+
+	FSQLitePreparedStatement Stmt;
+	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db),
+		TEXT("SELECT pending_intended FROM agent_view_state "
+		     "WHERE game_id = ?1 AND agent_id = ?2 "
+		     "ORDER BY as_of_seq DESC LIMIT 1;")))
+	{
+		UE_LOG(LogAILiveMemory, Verbose,
+			TEXT("DebugReadPendingIntendedJson: prepare failed: %s"), *Db.GetLastError());
+		return TEXT("[]");
+	}
+	Stmt.SetBindingValueByIndex(1, CurrentGameId);
+	Stmt.SetBindingValueByIndex(2, InAgentId);
+	if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+	{
+		FString Out;
+		Stmt.GetColumnValueByIndex(0, Out);
+		return Out.IsEmpty() ? FString(TEXT("[]")) : Out;
+	}
+	return TEXT("[]");
+}
+
 // ---------------------------------------------------------------
 // Console commands — debug helpers, scoped to T2 acceptance.
 // ---------------------------------------------------------------
@@ -3243,4 +4047,108 @@ static FAutoConsoleCommand GAILiveTestExecDebugSqlCmd(
 			*Sql, bOk ? TEXT("OK") : TEXT("FAIL"),
 			bOk ? TEXT("") : TEXT(" err="),
 			bOk ? TEXT("") : *Err);
+	}));
+
+// === T8 — projector 重建 console 入口 =========================================
+
+static FAutoConsoleCommand GAILiveMemoryRebuildProjectionsCmd(
+	TEXT("AILive.Memory.RebuildProjections"),
+	TEXT("AILive.Memory.RebuildProjections — rebuild commitments / vote_history / "
+	     "alliance_state / agent_view_state from events (idempotent)"),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("RebuildProjections: no game open"));
+			return;
+		}
+		const bool bOk = Sys->RebuildProjections();
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("RebuildProjections -> %s"), bOk ? TEXT("OK") : TEXT("FAIL"));
+	}));
+
+static FAutoConsoleCommand GAILiveMemoryCompareInlinePendingCmd(
+	TEXT("AILive.Memory.CompareInlinePending"),
+	TEXT("AILive.Memory.CompareInlinePending <agent_id> — compare T4 inline "
+	     "ListMyPendingIntended vs T8 agent_view_state.pending_intended seq sets. "
+	     "注意：投影表只保留最近 10 拍内的 pending；T4 inline 无 tick 上限，故对照前先过滤 inline。"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Memory.CompareInlinePending <agent_id>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("CompareInlinePending: no game open"));
+			return;
+		}
+		const FString AgentId = Args[0];
+
+		// T4 path（events + parent 链直算）—— RecentN=0 取全部
+		const TArray<FAILiveEvent> Inline = Sys->ListMyPendingIntended(AgentId, /*RecentN=*/0);
+
+		// 投影侧只看近 10 拍：算出阈值，过滤 inline 结果到同窗口
+		int64 LatestTick = 0;
+		for (const FAILiveEvent& E : Inline)
+		{
+			if (E.TickNo > LatestTick) LatestTick = E.TickNo;
+		}
+		// 不能光看 inline 结果——拉一次 events 表 MAX(tick_no) 更准
+		// 简化：直接从 inline 取上限。投影同样基于 events.MAX(tick_no)，相差不影响交集判断。
+		const int64 TickFloor = FMath::Max<int64>(0, LatestTick - 9);
+		TSet<int64> InlineSeqs;
+		for (const FAILiveEvent& E : Inline)
+		{
+			if (E.TickNo >= TickFloor) InlineSeqs.Add(E.Seq);
+		}
+
+		// T8 投影 JSON
+		const FString ProjJson = Sys->DebugReadPendingIntendedJson(AgentId);
+		TSet<int64> ProjSeqs;
+		{
+			TArray<TSharedPtr<FJsonValue>> Arr;
+			const TSharedRef<TJsonReader<>> R = TJsonReaderFactory<>::Create(ProjJson);
+			if (FJsonSerializer::Deserialize(R, Arr))
+			{
+				for (const TSharedPtr<FJsonValue>& V : Arr)
+				{
+					if (!V.IsValid() || V->Type != EJson::Object) continue;
+					const TSharedPtr<FJsonObject> Obj = V->AsObject();
+					if (!Obj.IsValid()) continue;
+					int64 S = 0;
+					if (Obj->TryGetNumberField(TEXT("seq"), S)) ProjSeqs.Add(S);
+				}
+			}
+		}
+
+		const TSet<int64> OnlyInline = InlineSeqs.Difference(ProjSeqs);
+		const TSet<int64> OnlyProj   = ProjSeqs.Difference(InlineSeqs);
+		const bool bMatch = OnlyInline.Num() == 0 && OnlyProj.Num() == 0;
+
+		auto JoinSet = [](const TSet<int64>& S) -> FString
+		{
+			TArray<int64> Sorted = S.Array(); Sorted.Sort();
+			FString Out;
+			for (int64 V : Sorted) Out += FString::Printf(TEXT("%lld,"), V);
+			return Out.IsEmpty() ? FString(TEXT("(empty)")) : Out;
+		};
+
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("CompareInlinePending(agent=%s) %s: inline=%d proj=%d (latest_tick=%lld floor=%lld)"),
+			*AgentId,
+			bMatch ? TEXT("MATCH") : TEXT("MISMATCH"),
+			InlineSeqs.Num(), ProjSeqs.Num(),
+			LatestTick, TickFloor);
+		UE_LOG(LogAILiveMemory, Display, TEXT("  inline seqs: %s"), *JoinSet(InlineSeqs));
+		UE_LOG(LogAILiveMemory, Display, TEXT("  proj   seqs: %s"), *JoinSet(ProjSeqs));
+		if (!bMatch)
+		{
+			UE_LOG(LogAILiveMemory, Warning,
+				TEXT("  only inline: %s  |  only proj: %s"),
+				*JoinSet(OnlyInline), *JoinSet(OnlyProj));
+		}
 	}));

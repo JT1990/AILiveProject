@@ -1130,6 +1130,20 @@ void AAct02RuleReceiveDirector::GatherTickAndResolveFloor()
 	// === 阶段 D：tick_resolved + tick_audit 拆分写入 ==========================
 	WriteTickResolvedAndAudit(Res, PublicSeq);
 
+	// === 阶段 D.5：异步重建投影（T8）。memory_implementation §5.3 line 2195。
+	// WeakObjectPtr 守 EventStore：PIE 关闭后回调进入时 Subsystem 已被销毁——
+	// Get() 返回 nullptr 直接退出。任何失败仅 Verbose 日志，不阻塞主循环。
+	{
+		TWeakObjectPtr<UAILiveEventStoreSubsystem> WeakStore(Store);
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakStore]()
+		{
+			if (UAILiveEventStoreSubsystem* S = WeakStore.Get())
+			{
+				S->RebuildProjections();
+			}
+		});
+	}
+
 	// === 阶段 E：进入 SpeechSpeak / 推进（决策 #5：cold tick 跳 TTS 直接 advance） ===
 	if (!Res.WinnerActor.IsEmpty())
 	{

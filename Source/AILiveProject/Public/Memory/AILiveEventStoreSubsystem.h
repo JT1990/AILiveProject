@@ -132,6 +132,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AILive|Memory")
 	FString ListAllianceStateJson() const;
 
+	// === T8 — Projector 重建 =========================================================
+	// principles §7.4 + §7.2 末「projector 是纯函数，不调任何 LLM」。
+	// 任一时刻调用都得到与 events 当前快照一致的派生表内容（幂等）。
+	// 单事务包裹 DELETE → INSERT；事务在 WriteMutex 下持有，与 AppendEvent 互斥。
+	// 失败 → 整体 ROLLBACK，旧投影保留。
+
+	/**
+	 * 重放 events，重建 commitments / vote_history / alliance_state /
+	 * agent_view_state 四张投影表（pending_intended 写入 agent_view_state JSON 列）。
+	 * 返回 true 表示事务提交；false 表示未开局或事务失败。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AILive|Memory")
+	bool RebuildProjections();
+
+	/**
+	 * 读 agent_view_state.pending_intended JSON 列（最新 as_of_seq 行）。
+	 * 用于 T8 验收 V4 与 T4 ListMyPendingIntended 做集合比对。
+	 * 不存在或读失败返回 "[]"。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AILive|Memory")
+	FString DebugReadPendingIntendedJson(const FString& InAgentId) const;
+
 	/**
 	 * 内部用（T7 派生 action.intent 时按 tick_no 切片）。无 viewer 过滤——调用方
 	 * 是 orchestrator 自己。**不**加 BlueprintCallable，避免 BP 误用。
@@ -263,6 +285,20 @@ private:
 	 *   三项独立累加返回。
 	 */
 	float ComputeRuntimeAdjustment(const FString& InActor, int64 InCurrentTickNo) const;
+
+	// === T8 — Projector reducers（私有；RebuildProjections 内部按顺序调用） ==========
+	// 全部要求 caller 已持有 WriteMutex 且 BEGIN IMMEDIATE 事务在飞。
+	// 失败返回 false → caller ROLLBACK；不直接抛错或修改全局状态。
+
+	bool ProjectCommitments_LockHeld();
+	bool ProjectVoteHistory_LockHeld();
+	bool ProjectAllianceState_LockHeld();
+	/**
+	 * 单快照策略：每个 agent 写一行，as_of_seq = 当前 last_seq。
+	 * 内部组装 alive_players / known_roles / my_commitments / vote_history /
+	 * pending_intended 五个 JSON 字段。
+	 */
+	bool ProjectAgentViewState_LockHeld();
 
 	static FString GenerateUuidV7();
 
