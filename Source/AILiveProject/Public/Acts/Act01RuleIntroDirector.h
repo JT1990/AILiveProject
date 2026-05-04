@@ -155,6 +155,10 @@ private:
 
 	void DebugMessage(const FString& Message, const FLinearColor& Color = FLinearColor::White) const;
 
+	// 写一条 orchestrator.round_resolved 事件（phase=setup, visibility=["public"]）。
+	// 返回 false 表示 EventStore 不可用或 AppendEvent 失败，由调用方决定是否升级为 FailAct01。
+	bool AppendOrchestratorRoundResolved(const FString& Text);
+
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> NavTargetCached;
 

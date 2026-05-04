@@ -180,6 +180,7 @@ private:
 		FString UserPrompt;
 		ELLMProvider Provider = ELLMProvider::DeepSeek;
 		FString Model;
+		FString RequestId;  // 配对 system.llm_inflight ↔ speech.public，principles §5.4
 		TFuture<OpenAIChat::FResult> Future;
 	};
 
@@ -205,17 +206,23 @@ private:
 	FString BuildReactionUserPrompt(const FNPCAgentConfig& Cfg) const;
 
 	void DispatchLLMs(bool bSeed);
-	void WriteLLMLog(int32 NPCIndex, ELLMProvider Provider, const FString& Model,
-	                 int32 HttpStatus, float LatencyMs, int32 PromptTokens, int32 CompletionTokens,
-	                 const FParsedAnswer& Answer,
-	                 const FString& SystemPrompt, const FString& UserPrompt,
-	                 const FString& RawContent, const FString& ParsedJson,
-	                 const FString& ErrorMessage, const FString& FinishReason,
-	                 const FString& ReasoningContent, const FString& RawResponsePayload,
-	                 bool bRetriedWithoutResponseFormat) const;
-	void WriteWinnerLog(int32 WinnerIdx, const FString& Phase, int32 RoundIdx) const;
-	FString GetSessionDir() const;
-	FString MakeSubDir(const FString& Sub) const;
+
+	// EventStore payload builders（T5：Director 直接 wrap LLM 文本为 speech.public，
+	// 这是 T7 引入 bid + intended 协议前的过渡形态——所有 speech.public 的 payload
+	// 含 "legacy_pre_bid": true，T7 后 SQL 用 IS NULL 过滤）。
+	static FString BuildSpeechPublicPayloadJson(int32 NPCIndex,
+	                                             const FParsedAnswer& Ans,
+	                                             const OpenAIChat::FResult& R,
+	                                             const FString& RequestId);
+	static FString BuildLLMInflightPayloadJson(int32 NPCIndex,
+	                                            const FString& RequestId,
+	                                            const FString& SystemPromptHash,
+	                                            const FString& UserPromptHash,
+	                                            const FString& StartedAtIso8601);
+	static FString BuildWinnerDecisionPayloadJson(int32 WinnerNPCIndex,
+	                                               EWillingness Willingness,
+	                                               int32 RoundNo,
+	                                               const TCHAR* WillingnessLabelStr);
 
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> NavTargetCached;
@@ -239,8 +246,6 @@ private:
 	float MovementSettleElapsed = 0.f;
 	bool bArrivalSettling = false;
 	float SpeakElapsed = 0.f;
-
-	FString SessionTimestamp;
 
 	bool bSpeechFinished = false;
 	bool bSpeechFailed = false;

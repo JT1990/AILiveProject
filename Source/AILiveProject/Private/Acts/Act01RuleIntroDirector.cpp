@@ -4,6 +4,7 @@
 #include "AILiveProjectScatterMover.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "EnvironmentQuery/EnvQuery.h"
@@ -17,7 +18,10 @@
 #include "MediaPlayer.h"
 #include "MediaPlaylist.h"
 #include "MediaSource.h"
+#include "Memory/AILiveEventStoreSubsystem.h"
+#include "Memory/AILiveEventTypes.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "Util/AILiveJsonHelpers.h"
 #include "UObject/UnrealType.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAct01, Log, All);
@@ -164,6 +168,24 @@ bool AAct01RuleIntroDirector::BeginAct01()
 	if (CachedDoors.Num() == 0)
 	{
 		CacheCellDoorComponents();
+	}
+
+	// EventStore 强依赖：T5 完成定义要求 ACT01 setup 事件入库。Store 不可用即停。
+	UGameInstance* GI = UGameplayStatics::GetGameInstance(this);
+	UAILiveEventStoreSubsystem* Store = GI ? GI->GetSubsystem<UAILiveEventStoreSubsystem>() : nullptr;
+	if (!Store)
+	{
+		FailAct01(TEXT("EventStore subsystem unavailable"));
+		return false;
+	}
+	if (!Store->IsGameOpen())
+	{
+		const FString GameId = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+		if (!Store->BeginGame(GameId))
+		{
+			FailAct01(TEXT("EventStore BeginGame failed"));
+			return false;
+		}
 	}
 
 	ResetToInitialPositions();
@@ -432,6 +454,13 @@ void AAct01RuleIntroDirector::StartNPCMovement()
 	bArrivalSettling = false;
 	SceneState = EAct01State::NPCsMovingToTV;
 
+	// T5 setup-phase 入库节点 #1：开门动画完成、即将 Scatter
+	if (!AppendOrchestratorRoundResolved(TEXT("cell doors opened")))
+	{
+		FailAct01(TEXT("setup event 'cell doors opened' write failed"));
+		return;
+	}
+
 	if (!ScatterQueryAsset)
 	{
 		FailAct01(TEXT("ScatterQueryAsset not set"));
@@ -568,6 +597,16 @@ void AAct01RuleIntroDirector::StartVideo()
 	PlateComponent->SetLoop(false);
 	PlateComponent->bPlayOnOpen = false;
 	PlateComponent->Open();
+
+	// T5 setup-phase 入库节点 #2：播放请求已发出（不依赖 Player->Play() 返回值，
+	// 保证 ACT01 一定写一条 video started 事件——TickVideoFallback 中 Player->Play()
+	// 在 Player 已 IsPlaying 等状态下不一定进入）。
+	if (!AppendOrchestratorRoundResolved(TEXT("rule intro video started")))
+	{
+		FailAct01(TEXT("setup event 'video started' write failed"));
+		return;
+	}
+
 	DebugMessage(FString::Printf(TEXT("[Act01] video open requested: %s"), *MediaSource->GetUrl()),
 				 FLinearColor::Green);
 }
@@ -579,6 +618,13 @@ void AAct01RuleIntroDirector::HandleVideoEnded()
 		return;
 	}
 	DebugMessage(TEXT("[Act01] video OnEndReached fired"), FLinearColor::Green);
+
+	// T5 setup-phase 入库节点 #3：视频结束。失败仅 Warning（游戏即将结束，没必要 fail）。
+	if (!AppendOrchestratorRoundResolved(TEXT("rule intro video ended")))
+	{
+		UE_LOG(LogAct01, Warning, TEXT("[Act01] setup event 'video ended' write failed (continuing)"));
+	}
+
 	CompleteAct01();
 }
 
@@ -619,6 +665,11 @@ void AAct01RuleIntroDirector::TickVideoFallback(float DeltaSeconds)
 	if (VideoElapsed > VideoFallbackTimeoutSeconds)
 	{
 		UE_LOG(LogAct01, Warning, TEXT("[Act01] video fallback timeout fired (%.1fs)"), VideoElapsed);
+		// T5 setup-phase 入库节点 #3 (fallback path)：视频超时也算结束
+		if (!AppendOrchestratorRoundResolved(TEXT("rule intro video ended")))
+		{
+			UE_LOG(LogAct01, Warning, TEXT("[Act01] setup event 'video ended' write failed (continuing)"));
+		}
 		CompleteAct01();
 	}
 }
@@ -662,4 +713,24 @@ void AAct01RuleIntroDirector::DebugMessage(const FString &Message, const FLinear
 	{
 		UKismetSystemLibrary::PrintString(this, Message, true, false, Color, 4.0f);
 	}
+}
+
+bool AAct01RuleIntroDirector::AppendOrchestratorRoundResolved(const FString& Text)
+{
+	UGameInstance* GI = UGameplayStatics::GetGameInstance(this);
+	UAILiveEventStoreSubsystem* Store = GI ? GI->GetSubsystem<UAILiveEventStoreSubsystem>() : nullptr;
+	if (!Store || !Store->IsGameOpen())
+	{
+		return false;
+	}
+	FAILiveEvent Ev;
+	Ev.RoundNo    = 0;
+	Ev.Phase      = EAILivePhase::Setup;
+	Ev.Actor      = TEXT("orchestrator");
+	Ev.EventType  = EAILiveEventType::OrchestratorResolved;
+	Ev.Visibility = { TEXT("public") };
+	Ev.PayloadJson = FString::Printf(
+		TEXT("{\"text\":%s,\"phase\":\"setup\"}"),
+		*AILiveUtil::EscapeJsonString(Text));
+	return Store->AppendEvent(Ev) > 0;
 }

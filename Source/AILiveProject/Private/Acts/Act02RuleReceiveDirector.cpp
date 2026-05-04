@@ -4,22 +4,26 @@
 #include "AILiveProjectScatterMover.h"
 #include "Async/Async.h"
 #include "Dom/JsonObject.h"
+#include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
-#include "HAL/PlatformFileManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "Memory/AILiveEventStoreSubsystem.h"
+#include "Memory/AILiveEventTypes.h"
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
 #include "Misc/Paths.h"
 #include "MinimaxACELibrary.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Util/AILiveJsonHelpers.h"
 #include "Util/ProjectEnvLoader.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAct02, Log, All);
@@ -41,6 +45,18 @@ namespace
 		case EAct02State::ReactionSpeak:    return TEXT("ReactionSpeak");
 		}
 		return TEXT("?");
+	}
+
+	EAILivePhase ResolvePhase(int32 CurrentRound)
+	{
+		return CurrentRound == 0 ? EAILivePhase::Setup : EAILivePhase::DayDiscuss;
+	}
+
+	UAILiveEventStoreSubsystem* GetEventStore(const UObject* WorldCtx)
+	{
+		if (!WorldCtx) return nullptr;
+		const UGameInstance* GI = UGameplayStatics::GetGameInstance(WorldCtx);
+		return GI ? GI->GetSubsystem<UAILiveEventStoreSubsystem>() : nullptr;
 	}
 }
 
@@ -175,8 +191,23 @@ bool AAct02RuleReceiveDirector::BeginAct02()
 		return false;
 	}
 
-	// Session timestamp for log dir
-	SessionTimestamp = FDateTime::Now().ToString(TEXT("%Y-%m-%d_%H%M%S"));
+	// EventStore 强依赖：events 入库是 T5 完成定义，Store 不可用即停。
+	UAILiveEventStoreSubsystem* Store = GetEventStore(this);
+	if (!Store)
+	{
+		FailAct02(TEXT("EventStore subsystem unavailable"));
+		return false;
+	}
+	if (!Store->IsGameOpen())
+	{
+		const FString GameId = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+		if (!Store->BeginGame(GameId))
+		{
+			FailAct02(TEXT("EventStore BeginGame failed"));
+			return false;
+		}
+	}
+
 	LastSpeakerIndex = INDEX_NONE;
 	LastSentence.Reset();
 	for (FAct02NPCRuntime& N : NPCs)
@@ -519,6 +550,13 @@ void AAct02RuleReceiveDirector::DispatchLLMs(bool bSeed)
 	CurrentInflight.Reset();
 	CurrentAnswers.Reset();
 
+	UAILiveEventStoreSubsystem* Store = GetEventStore(this);
+	if (!Store || !Store->IsGameOpen())
+	{
+		FailAct02(TEXT("EventStore not open at DispatchLLMs"));
+		return;
+	}
+
 	FString GameRule;
 	LoadGameRule(GameRule);
 
@@ -557,6 +595,33 @@ void AAct02RuleReceiveDirector::DispatchLLMs(bool bSeed)
 		const AILiveAgentRoster::FProviderEndpoint Ep =
 			AILiveAgentRoster::ResolveProviderEndpoint(N.Config.Provider);
 		Item.Model = Ep.Model;
+
+		// === in-flight 配对协议（principles §5.4）：发起 LLM 请求前必须先写
+		// 一条 system.llm_inflight 并验证成功，否则不能发请求——否则 V3 配对
+		// SQL 会出现 pre_count=0 / post_count=1 的不平衡。
+		Item.RequestId = FGuid::NewGuid().ToString(EGuidFormats::DigitsLower);
+		const FString SysHash  = AILiveUtil::Sha256Fingerprint(Item.SystemPrompt);
+		const FString UserHash = AILiveUtil::Sha256Fingerprint(Item.UserPrompt);
+		const FString StartedAt = FDateTime::UtcNow().ToIso8601();
+
+		FAILiveEvent Pre;
+		Pre.RoundNo     = CurrentRound;
+		Pre.Phase       = ResolvePhase(CurrentRound);
+		Pre.Actor       = TEXT("orchestrator");
+		Pre.EventType   = EAILiveEventType::SystemLLMInflight;
+		Pre.Visibility  = { TEXT("system") };
+		Pre.PayloadJson = BuildLLMInflightPayloadJson(Item.NPCIndex, Item.RequestId,
+		                                              SysHash, UserHash, StartedAt);
+		const int64 PreSeq = Store->AppendEvent(Pre);
+		if (PreSeq <= 0)
+		{
+			UE_LOG(LogAct02, Error,
+				TEXT("[Act02] in-flight write failed for NPC%02d; aborting dispatch"), Item.NPCIndex);
+			FailAct02(FString::Printf(
+				TEXT("in-flight AppendEvent failed for NPC%02d"), Item.NPCIndex));
+			CurrentInflight.Reset();
+			return;
+		}
 
 		OpenAIChat::FRequest Req;
 		Req.ApiKey = Ep.ApiKey;
@@ -683,6 +748,13 @@ AAct02RuleReceiveDirector::ParseAnswer(const FString& JsonStr, bool bExpectWantT
 
 void AAct02RuleReceiveDirector::GatherSeedAndPickWinner()
 {
+	UAILiveEventStoreSubsystem* Store = GetEventStore(this);
+	if (!Store || !Store->IsGameOpen())
+	{
+		FailAct02(TEXT("EventStore not open at GatherSeedAndPickWinner"));
+		return;
+	}
+
 	int32 BestIdx = INDEX_NONE;
 	uint8 BestWill = 0;
 	int32 BestNPCIndex = TNumericLimits<int32>::Max();
@@ -700,11 +772,27 @@ void AAct02RuleReceiveDirector::GatherSeedAndPickWinner()
 			NPCs[Idx].UnspokenContent = Ans.Content;
 		}
 
-		WriteLLMLog(F.NPCIndex, F.Provider, F.Model, R.HttpStatus, R.LatencyMs,
-			R.PromptTokens, R.CompletionTokens, Ans,
-			F.SystemPrompt, F.UserPrompt, R.RawContent, R.ParsedJson,
-			R.ErrorMessage, R.FinishReason, R.ReasoningContent, R.RawResponsePayload,
-			R.bRetriedWithoutResponseFormat);
+		// 写 speech.public（legacy_pre_bid）配对 in-flight。所有 LLM 调用都写一条，
+		// 即便 willingness=none / parse_error=true——保 in-flight ↔ business 1:1 配对。
+		FAILiveEvent Pub;
+		Pub.RoundNo      = CurrentRound;
+		Pub.Phase        = ResolvePhase(CurrentRound);
+		Pub.Actor        = FString::Printf(TEXT("NPC%02d"), F.NPCIndex);
+		Pub.EventType    = EAILiveEventType::SpeechPublic;
+		Pub.Visibility   = { TEXT("public") };
+		Pub.PayloadJson  = BuildSpeechPublicPayloadJson(F.NPCIndex, Ans, R, F.RequestId);
+		Pub.RawLLMOutput = R.RawResponsePayload;
+		const int64 PubSeq = Store->AppendEvent(Pub);
+		if (PubSeq <= 0)
+		{
+			UE_LOG(LogAct02, Error,
+				TEXT("[Act02] speech.public write failed for NPC%02d (rid=%s); aborting"),
+				F.NPCIndex, *F.RequestId);
+			FailAct02(FString::Printf(
+				TEXT("speech.public AppendEvent failed for NPC%02d (request_id=%s); in-flight pair broken"),
+				F.NPCIndex, *F.RequestId));
+			return;
+		}
 
 		UE_LOG(LogAct02, Log,
 			TEXT("[Act02] LLM %s npc=%d http=%d latency=%.0fms willingness=%s parse_error=%d"),
@@ -732,7 +820,22 @@ void AAct02RuleReceiveDirector::GatherSeedAndPickWinner()
 	LastSentence = Winner.Content;
 	NPCs[BestIdx].UnspokenContent.Reset(); // 已说出口
 
-	WriteWinnerLog(BestIdx, TEXT("seed"), 0);
+	// 写 winner_decision 审计事件（失败仅 Warning，不阻断）
+	FAILiveEvent Win;
+	Win.RoundNo     = CurrentRound;
+	Win.Phase       = ResolvePhase(CurrentRound);
+	Win.Actor       = TEXT("orchestrator");
+	Win.EventType   = EAILiveEventType::WinnerDecision;
+	Win.Visibility  = { TEXT("public") };
+	Win.PayloadJson = BuildWinnerDecisionPayloadJson(NPCs[BestIdx].Config.NPCIndex,
+	                                                 Winner.Willingness, CurrentRound,
+	                                                 WillingnessLabel(Winner.Willingness));
+	if (Store->AppendEvent(Win) <= 0)
+	{
+		UE_LOG(LogAct02, Warning,
+			TEXT("[Act02] winner_decision write failed for NPC%02d round=%d (审计事件，不阻断)"),
+			NPCs[BestIdx].Config.NPCIndex, CurrentRound);
+	}
 
 	DebugMessage(FString::Printf(
 		TEXT("[Act02] seed winner: NPC%02d willingness=%s content=\"%s\""),
@@ -747,6 +850,13 @@ void AAct02RuleReceiveDirector::GatherSeedAndPickWinner()
 
 void AAct02RuleReceiveDirector::GatherReactionAndPickWinner()
 {
+	UAILiveEventStoreSubsystem* Store = GetEventStore(this);
+	if (!Store || !Store->IsGameOpen())
+	{
+		FailAct02(TEXT("EventStore not open at GatherReactionAndPickWinner"));
+		return;
+	}
+
 	int32 BestIdx = INDEX_NONE;
 	uint8 BestWill = 0;
 	int32 BestNPCIndex = TNumericLimits<int32>::Max();
@@ -768,11 +878,26 @@ void AAct02RuleReceiveDirector::GatherReactionAndPickWinner()
 			}
 		}
 
-		WriteLLMLog(F.NPCIndex, F.Provider, F.Model, R.HttpStatus, R.LatencyMs,
-			R.PromptTokens, R.CompletionTokens, Ans,
-			F.SystemPrompt, F.UserPrompt, R.RawContent, R.ParsedJson,
-			R.ErrorMessage, R.FinishReason, R.ReasoningContent, R.RawResponsePayload,
-			R.bRetriedWithoutResponseFormat);
+		// 配对 in-flight：每个 LLM 调用都写一条 speech.public（legacy_pre_bid）
+		FAILiveEvent Pub;
+		Pub.RoundNo      = CurrentRound;
+		Pub.Phase        = ResolvePhase(CurrentRound);
+		Pub.Actor        = FString::Printf(TEXT("NPC%02d"), F.NPCIndex);
+		Pub.EventType    = EAILiveEventType::SpeechPublic;
+		Pub.Visibility   = { TEXT("public") };
+		Pub.PayloadJson  = BuildSpeechPublicPayloadJson(F.NPCIndex, Ans, R, F.RequestId);
+		Pub.RawLLMOutput = R.RawResponsePayload;
+		const int64 PubSeq = Store->AppendEvent(Pub);
+		if (PubSeq <= 0)
+		{
+			UE_LOG(LogAct02, Error,
+				TEXT("[Act02] speech.public write failed for NPC%02d (rid=%s); aborting"),
+				F.NPCIndex, *F.RequestId);
+			FailAct02(FString::Printf(
+				TEXT("speech.public AppendEvent failed for NPC%02d (request_id=%s); in-flight pair broken"),
+				F.NPCIndex, *F.RequestId));
+			return;
+		}
 
 		UE_LOG(LogAct02, Log,
 			TEXT("[Act02] LLM %s npc=%d http=%d latency=%.0fms wts=%d willingness=%s parse_error=%d"),
@@ -806,7 +931,22 @@ void AAct02RuleReceiveDirector::GatherReactionAndPickWinner()
 	LastSentence = Winner.Content;
 	NPCs[BestIdx].UnspokenContent.Reset();
 
-	WriteWinnerLog(BestIdx, TEXT("reaction"), CurrentRound);
+	// 写 winner_decision 审计事件（失败仅 Warning，不阻断）
+	FAILiveEvent Win;
+	Win.RoundNo     = CurrentRound;
+	Win.Phase       = ResolvePhase(CurrentRound);
+	Win.Actor       = TEXT("orchestrator");
+	Win.EventType   = EAILiveEventType::WinnerDecision;
+	Win.Visibility  = { TEXT("public") };
+	Win.PayloadJson = BuildWinnerDecisionPayloadJson(NPCs[BestIdx].Config.NPCIndex,
+	                                                 Winner.Willingness, CurrentRound,
+	                                                 WillingnessLabel(Winner.Willingness));
+	if (Store->AppendEvent(Win) <= 0)
+	{
+		UE_LOG(LogAct02, Warning,
+			TEXT("[Act02] winner_decision write failed for NPC%02d round=%d (审计事件，不阻断)"),
+			NPCs[BestIdx].Config.NPCIndex, CurrentRound);
+	}
 
 	DebugMessage(FString::Printf(
 		TEXT("[Act02] reaction round %d winner: NPC%02d willingness=%s content=\"%s\""),
@@ -998,125 +1138,63 @@ FString AAct02RuleReceiveDirector::BuildReactionUserPrompt(const FNPCAgentConfig
 		*Cfg.Identity.FullName);
 }
 
-// ====== Logging ======
+// ====== EventStore payload builders ======
+// T5 阶段 Director 直接 wrap LLM 文本为 speech.public，标记 legacy_pre_bid:true；
+// T7 主循环重写后 speech.public 由 orchestrator 从 winner intended 衍生，不再带此标记。
 
-FString AAct02RuleReceiveDirector::GetSessionDir() const
+FString AAct02RuleReceiveDirector::BuildSpeechPublicPayloadJson(
+	int32 NPCIndex, const FParsedAnswer& Ans, const OpenAIChat::FResult& R,
+	const FString& RequestId)
 {
-	return FPaths::ProjectSavedDir() / TEXT("Logs") / TEXT("Act02") / SessionTimestamp;
+	const TCHAR* Will = TEXT("none");
+	switch (Ans.Willingness)
+	{
+	case EWillingness::ExtremelyStrong: Will = TEXT("extremely_strong"); break;
+	case EWillingness::Strong:          Will = TEXT("strong"); break;
+	case EWillingness::Moderate:        Will = TEXT("moderate"); break;
+	case EWillingness::Weak:            Will = TEXT("weak"); break;
+	case EWillingness::None:            Will = TEXT("none"); break;
+	}
+	return FString::Printf(
+		TEXT("{\"text\":%s,\"willingness\":\"%s\",\"want_to_speak\":%s,")
+		TEXT("\"tokens\":%d,\"latency_ms\":%.1f,\"request_id\":\"%s\",")
+		TEXT("\"npc_index\":%d,\"legacy_pre_bid\":true,\"parse_error\":%s}"),
+		*AILiveUtil::EscapeJsonString(Ans.Content),
+		Will,
+		Ans.bWantToSpeak ? TEXT("true") : TEXT("false"),
+		R.CompletionTokens,
+		R.LatencyMs,
+		*RequestId,
+		NPCIndex,
+		Ans.bParseError ? TEXT("true") : TEXT("false"));
 }
 
-FString AAct02RuleReceiveDirector::MakeSubDir(const FString& Sub) const
+FString AAct02RuleReceiveDirector::BuildLLMInflightPayloadJson(
+	int32 NPCIndex, const FString& RequestId,
+	const FString& SystemPromptHash, const FString& UserPromptHash,
+	const FString& StartedAtIso8601)
 {
-	const FString Dir = GetSessionDir() / Sub;
-	IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
-	if (!PF.DirectoryExists(*Dir))
-	{
-		PF.CreateDirectoryTree(*Dir);
-	}
-	return Dir;
+	return FString::Printf(
+		TEXT("{\"text\":\"in-flight to NPC%02d\",\"npc_index\":%d,")
+		TEXT("\"request_id\":\"%s\",\"system_prompt_hash\":\"%s\",")
+		TEXT("\"user_prompt_hash\":\"%s\",\"started_at\":\"%s\"}"),
+		NPCIndex, NPCIndex,
+		*RequestId, *SystemPromptHash, *UserPromptHash,
+		*StartedAtIso8601);
 }
 
-void AAct02RuleReceiveDirector::WriteLLMLog(int32 NPCIndex, ELLMProvider Provider, const FString& Model,
-	int32 HttpStatus, float LatencyMs, int32 PromptTokens, int32 CompletionTokens,
-	const FParsedAnswer& Answer,
-	const FString& SystemPrompt, const FString& UserPrompt,
-	const FString& RawContent, const FString& ParsedJson,
-	const FString& ErrorMessage, const FString& FinishReason,
-	const FString& ReasoningContent, const FString& RawResponsePayload,
-	bool bRetriedWithoutResponseFormat) const
+FString AAct02RuleReceiveDirector::BuildWinnerDecisionPayloadJson(
+	int32 WinnerNPCIndex, EWillingness Willingness, int32 RoundNo,
+	const TCHAR* WillingnessLabelStr)
 {
-	const bool bSeed = (CurrentRound == 0);
-	const FString Sub = bSeed
-		? TEXT("seed")
-		: FString::Printf(TEXT("reaction_round_%02d"), CurrentRound);
-	const FString Dir = const_cast<AAct02RuleReceiveDirector*>(this)->MakeSubDir(Sub);
-	const FString FName = FString::Printf(TEXT("npc_%02d_%s.md"), NPCIndex,
-		*AILiveAgentRoster::ProviderToString(Provider));
-	const FString Path = Dir / FName;
-
-	FString Md;
-	Md += TEXT("---\n");
-	Md += FString::Printf(TEXT("session: %s\n"), *SessionTimestamp);
-	Md += FString::Printf(TEXT("phase: %s\n"), bSeed ? TEXT("seed") : TEXT("reaction"));
-	Md += FString::Printf(TEXT("round: %d\n"), CurrentRound);
-	Md += FString::Printf(TEXT("npc_index: %d\n"), NPCIndex);
-	Md += FString::Printf(TEXT("provider: %s\n"), *AILiveAgentRoster::ProviderToString(Provider));
-	Md += FString::Printf(TEXT("model: %s\n"), *Model);
-	Md += FString::Printf(TEXT("http_status: %d\n"), HttpStatus);
-	Md += FString::Printf(TEXT("latency_ms: %.0f\n"), LatencyMs);
-	Md += FString::Printf(TEXT("prompt_tokens: %d\n"), PromptTokens);
-	Md += FString::Printf(TEXT("completion_tokens: %d\n"), CompletionTokens);
-	Md += FString::Printf(TEXT("finish_reason: %s\n"), FinishReason.IsEmpty() ? TEXT("none") : *FinishReason);
-	Md += FString::Printf(TEXT("retried_without_response_format: %s\n"),
-		bRetriedWithoutResponseFormat ? TEXT("true") : TEXT("false"));
-	Md += FString::Printf(TEXT("parsed_willingness: %s\n"), WillingnessLabel(Answer.Willingness));
-	Md += FString::Printf(TEXT("parsed_want_to_speak: %s\n"),
-		Answer.bWantToSpeak ? TEXT("true") : TEXT("false"));
-	Md += FString::Printf(TEXT("parse_error: %s\n"),
-		Answer.bParseError ? TEXT("true") : TEXT("false"));
-	Md += TEXT("---\n\n");
-
-	Md += TEXT("## System\n\n");
-	Md += SystemPrompt;
-	Md += TEXT("\n\n## User\n\n");
-	Md += UserPrompt;
-	Md += TEXT("\n\n## Error message\n\n");
-	Md += ErrorMessage.IsEmpty() ? TEXT("(empty)") : ErrorMessage;
-	Md += TEXT("\n\n## Raw response\n\n");
-	Md += RawContent;
-	Md += TEXT("\n\n## Reasoning content\n\n");
-	Md += ReasoningContent;
-	Md += TEXT("\n\n## Parsed JSON\n\n```json\n");
-	Md += ParsedJson;
-	Md += TEXT("\n```\n\n## Full response payload\n\n```json\n");
-	Md += RawResponsePayload;
-	Md += TEXT("\n```\n");
-
-	FFileHelper::SaveStringToFile(Md, *Path,
-		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-}
-
-void AAct02RuleReceiveDirector::WriteWinnerLog(int32 WinnerIdx, const FString& Phase, int32 RoundIdx) const
-{
-	if (!NPCs.IsValidIndex(WinnerIdx)) return;
-
-	const FString Sub = (Phase == TEXT("seed"))
-		? TEXT("seed")
-		: FString::Printf(TEXT("reaction_round_%02d"), RoundIdx);
-	const FString Dir = const_cast<AAct02RuleReceiveDirector*>(this)->MakeSubDir(Sub);
-	const FString Path = Dir / TEXT("_winner.md");
-
-	const FAct02NPCRuntime& W = NPCs[WinnerIdx];
-	const FParsedAnswer* WAns = CurrentAnswers.Find(W.Config.NPCIndex);
-
-	FString Md;
-	Md += TEXT("---\n");
-	Md += FString::Printf(TEXT("session: %s\n"), *SessionTimestamp);
-	Md += FString::Printf(TEXT("phase: %s\n"), *Phase);
-	Md += FString::Printf(TEXT("round: %d\n"), RoundIdx);
-	Md += FString::Printf(TEXT("winner_npc_index: %d\n"), W.Config.NPCIndex);
-	Md += FString::Printf(TEXT("winner_provider: %s\n"),
-		*AILiveAgentRoster::ProviderToString(W.Config.Provider));
-	if (WAns)
-	{
-		Md += FString::Printf(TEXT("winner_willingness: %s\n"), WillingnessLabel(WAns->Willingness));
-	}
-	Md += TEXT("---\n\n");
-	Md += TEXT("## Winner content\n\n");
-	if (WAns)
-	{
-		Md += WAns->Content;
-	}
-	Md += TEXT("\n\n## Other NPCs unspoken (after this round)\n\n");
-	for (const FAct02NPCRuntime& N : NPCs)
-	{
-		if (N.Config.NPCIndex == W.Config.NPCIndex) continue;
-		Md += FString::Printf(TEXT("- NPC%02d (%s): %s\n"),
-			N.Config.NPCIndex,
-			*AILiveAgentRoster::ProviderToString(N.Config.Provider),
-			N.UnspokenContent.IsEmpty() ? TEXT("(空)") : *N.UnspokenContent);
-	}
-
-	FFileHelper::SaveStringToFile(Md, *Path,
-		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	const FString Text = FString::Printf(
+		TEXT("NPC%02d wins round %d with willingness=%s"),
+		WinnerNPCIndex, RoundNo, WillingnessLabelStr);
+	(void)Willingness;  // 仅 label 字符串入 payload，enum 值已通过 label 表达
+	return FString::Printf(
+		TEXT("{\"text\":%s,\"winner_npc_index\":%d,\"willingness\":\"%s\",\"round\":%d}"),
+		*AILiveUtil::EscapeJsonString(Text),
+		WinnerNPCIndex,
+		WillingnessLabelStr,
+		RoundNo);
 }
