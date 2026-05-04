@@ -240,17 +240,19 @@ void WriteCanonicalObject(const TSharedPtr<FJsonObject>& Obj, FCanonicalWriter& 
  * QuoteRecentRounds / ListMy* / SearchHistory / QuoteByEventTypeAndTick / ListVotes）
  * 都拼这个常量，配套 RowToEvent 按相同顺序逐列读出 FAILiveEvent。
  *
- * **不含 tick_no**——FAILiveEvent 没有 TickNo 字段，且 tick_no 在 canonical JSON
- * 也是被排除的 protocol index（详见 CanonicalJsonOf 注释）。
+ * tick_no（第 3 列）于 T6 加入：FAILiveEvent.TickNo 字段供 PromptAssembler 按
+ * principles §7 模板渲染 `Tick {tick_no} round_no={round_no}` 行。**canonical
+ * JSON 仍显式排除该列**（CanonicalJsonOf 注释 + AILive.Test.CanonicalEcho 守护），
+ * 哈希链对老库继续兼容。
  *
- * 17 列，索引顺序：
- *  0=event_id  1=game_id  2=seq             3=round_no  4=phase
- *  5=actor     6=event_type  7=speech_act_type  8=visibility  9=addressed_to
- * 10=payload  11=parent_event_id  12=parser_version  13=raw_llm_output
- * 14=prev_event_hash  15=event_hash  16=wall_clock
+ * 18 列，索引顺序：
+ *  0=event_id  1=game_id  2=seq             3=tick_no   4=round_no  5=phase
+ *  6=actor     7=event_type  8=speech_act_type  9=visibility  10=addressed_to
+ * 11=payload  12=parent_event_id  13=parser_version  14=raw_llm_output
+ * 15=prev_event_hash  16=event_hash  17=wall_clock
  */
 const TCHAR* const kEventSelectColumns =
-	TEXT("e.event_id, e.game_id, e.seq, e.round_no, e.phase, "
+	TEXT("e.event_id, e.game_id, e.seq, e.tick_no, e.round_no, e.phase, "
 	     "e.actor, e.event_type, e.speech_act_type, e.visibility, e.addressed_to, "
 	     "e.payload, e.parent_event_id, e.parser_version, e.raw_llm_output, "
 	     "e.prev_event_hash, e.event_hash, e.wall_clock");
@@ -343,33 +345,35 @@ FString EscapeLikePattern(const FString& InKeyword)
 }
 
 /**
- * 按 kEventSelectColumns 顺序从 prepared statement 读 17 列，组装 FAILiveEvent。
+ * 按 kEventSelectColumns 顺序从 prepared statement 读 18 列，组装 FAILiveEvent。
  * 调用方必须保证 SQL SELECT 列与 kEventSelectColumns 完全一致。
  */
 FAILiveEvent RowToEvent(const FSQLitePreparedStatement& InStmt)
 {
 	FAILiveEvent Ev;
 	int64 SeqRead = 0;
+	int64 TickNoRead = 0;
 	int64 RoundNoRead = 0;
 	FString PhaseStr, EventTypeStr, SpeechActStr, VisibilityJson, AddressedToJson;
 
 	InStmt.GetColumnValueByIndex(0,  Ev.EventId);
 	InStmt.GetColumnValueByIndex(1,  Ev.GameId);
 	InStmt.GetColumnValueByIndex(2,  SeqRead);                                Ev.Seq = SeqRead;
-	InStmt.GetColumnValueByIndex(3,  RoundNoRead);                            Ev.RoundNo = (int32)RoundNoRead;
-	InStmt.GetColumnValueByIndex(4,  PhaseStr);                               Ev.Phase = AILiveEvent::PhaseFromString(PhaseStr);
-	InStmt.GetColumnValueByIndex(5,  Ev.Actor);
-	InStmt.GetColumnValueByIndex(6,  EventTypeStr);                           Ev.EventType = AILiveEvent::EventTypeFromString(EventTypeStr);
-	InStmt.GetColumnValueByIndex(7,  SpeechActStr);                           Ev.SpeechActType = AILiveEvent::SpeechActFromString(SpeechActStr);
-	InStmt.GetColumnValueByIndex(8,  VisibilityJson);                         Ev.Visibility = AILiveEvent::JsonStringToArray(VisibilityJson);
-	InStmt.GetColumnValueByIndex(9,  AddressedToJson);                        Ev.AddressedTo = AILiveEvent::JsonStringToArray(AddressedToJson);
-	InStmt.GetColumnValueByIndex(10, Ev.PayloadJson);
-	InStmt.GetColumnValueByIndex(11, Ev.ParentEventId);
-	InStmt.GetColumnValueByIndex(12, Ev.ParserVersion);
-	InStmt.GetColumnValueByIndex(13, Ev.RawLLMOutput);
-	InStmt.GetColumnValueByIndex(14, Ev.PrevEventHash);
-	InStmt.GetColumnValueByIndex(15, Ev.EventHash);
-	InStmt.GetColumnValueByIndex(16, Ev.WallClock);
+	InStmt.GetColumnValueByIndex(3,  TickNoRead);                             Ev.TickNo = TickNoRead;
+	InStmt.GetColumnValueByIndex(4,  RoundNoRead);                            Ev.RoundNo = (int32)RoundNoRead;
+	InStmt.GetColumnValueByIndex(5,  PhaseStr);                               Ev.Phase = AILiveEvent::PhaseFromString(PhaseStr);
+	InStmt.GetColumnValueByIndex(6,  Ev.Actor);
+	InStmt.GetColumnValueByIndex(7,  EventTypeStr);                           Ev.EventType = AILiveEvent::EventTypeFromString(EventTypeStr);
+	InStmt.GetColumnValueByIndex(8,  SpeechActStr);                           Ev.SpeechActType = AILiveEvent::SpeechActFromString(SpeechActStr);
+	InStmt.GetColumnValueByIndex(9,  VisibilityJson);                         Ev.Visibility = AILiveEvent::JsonStringToArray(VisibilityJson);
+	InStmt.GetColumnValueByIndex(10, AddressedToJson);                        Ev.AddressedTo = AILiveEvent::JsonStringToArray(AddressedToJson);
+	InStmt.GetColumnValueByIndex(11, Ev.PayloadJson);
+	InStmt.GetColumnValueByIndex(12, Ev.ParentEventId);
+	InStmt.GetColumnValueByIndex(13, Ev.ParserVersion);
+	InStmt.GetColumnValueByIndex(14, Ev.RawLLMOutput);
+	InStmt.GetColumnValueByIndex(15, Ev.PrevEventHash);
+	InStmt.GetColumnValueByIndex(16, Ev.EventHash);
+	InStmt.GetColumnValueByIndex(17, Ev.WallClock);
 	return Ev;
 }
 
@@ -742,8 +746,8 @@ bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase& InMetaDb)
 //   - viewer 字符串经 ExpandViewerForJoin 展开成 IN 集合（NPC03 → {NPC03,public}），
 //     "self" / 自由文本 一律展开为空集 → 直接返回不可见，不下发 SQL。
 //   - 内部用的 QuoteByEventTypeAndTick 例外（无 viewer 过滤——调用方是 orchestrator）。
-//   - 所有 SELECT 都用 kEventSelectColumns 17 列（不含 tick_no），
-//     RowToEvent 按相同顺序解列。
+//   - 所有 SELECT 都用 kEventSelectColumns 18 列（含 tick_no，T6 加入；canonical
+//     JSON 仍排除该列），RowToEvent 按相同顺序解列。
 //   - 短中文 keyword（< 3 字）走 LIKE fallback；FTS5 trigram 不可用时也走 LIKE。
 // ---------------------------------------------------------------
 
@@ -1386,8 +1390,10 @@ bool UAILiveEventStoreSubsystem::IsAddressedToSubsetOfVisibility(
 // event_type, game_id, parent_event_id, parser_version, payload,
 // phase, raw_llm_output, round_no, seq, speech_act_type, visibility.
 //
-// Excluded: tick_no (protocol index), prev_event_hash (already in
-// hash via Combined = prev || canonical), event_hash (self), wall_clock
+// Excluded: tick_no (protocol index — T6 加入 FAILiveEvent.TickNo 字段后该
+// 字段在内存里非零，但 canonical JSON 序列化必须继续跳过，否则哈希链对老库
+// 不兼容；AILive.Test.CanonicalEcho 守护此不变量), prev_event_hash (already
+// in hash via Combined = prev || canonical), event_hash (self), wall_clock
 // (DB DEFAULT, in-memory != row), payload_text (GENERATED column).
 // ---------------------------------------------------------------
 
@@ -1522,6 +1528,11 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 	InOutEvent.EventId = GenerateUuidV7();
 	InOutEvent.ParserVersion = ResolveLiveParserVersion();
 	InOutEvent.PrevEventHash = InOutLocalLastHash;
+	// T6: 回填 TickNo 给调用方——原来只 bind 到 SQL 第 17 列（line 1562），
+	// 新增 FAILiveEvent.TickNo 字段后必须同步回填，否则 PromptAssembler 拿到
+	// 的事件结构体 TickNo 仍是 0。CanonicalJsonOf 跳过 tick_no 字段，所以
+	// 回填**不影响**哈希计算。
+	InOutEvent.TickNo = CachedCurrentTickNo;
 
 	const FString CanonicalPayload = CanonicalJsonOf(InOutEvent);
 	const FString NewHash = ComputeEventHash(InOutLocalLastHash, CanonicalPayload);

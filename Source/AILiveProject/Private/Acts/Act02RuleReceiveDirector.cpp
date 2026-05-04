@@ -15,6 +15,7 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Memory/AILiveEventStoreSubsystem.h"
 #include "Memory/AILiveEventTypes.h"
+#include "Memory/AILivePromptAssembler.h"
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
@@ -587,9 +588,17 @@ void AAct02RuleReceiveDirector::DispatchLLMs(bool bSeed)
 		}
 		else
 		{
-			Item.SystemPrompt = BuildReactionSystemPrompt(
-				N.Config, SpeakerName, LastSentence, N.UnspokenContent);
-			Item.UserPrompt = BuildReactionUserPrompt(N.Config);
+			// T6: reaction phase prompt 由 AILivePromptAssembler 拼装。SpeakerName /
+			// LastSentence / N.UnspokenContent 不再注入 prompt——它们由 EventStore 中
+			// 上一拍 speech.public 事件 + ListMyPendingIntended 自然覆盖。
+			AILivePromptAssembler::FAssembleOptions Opt;
+			Opt.Viewer        = FString::Printf(TEXT("NPC%02d"), N.Config.NPCIndex);
+			Opt.CurrentRound  = CurrentRound;
+			Opt.NearWindowK   = 5;
+			Opt.GameRule      = GameRule;
+			Opt.ChallengeText = TEXT("");  // T7+ 才有 hostile prompt 入口
+			Item.SystemPrompt = AILivePromptAssembler::AssembleSystemPrompt(Store, N.Config, Opt);
+			Item.UserPrompt   = AILivePromptAssembler::AssembleUserPrompt(Store, N.Config, Opt);
 		}
 
 		const AILiveAgentRoster::FProviderEndpoint Ep =
@@ -1106,32 +1115,6 @@ FString AAct02RuleReceiveDirector::BuildSeedSystemPrompt(
 }
 
 FString AAct02RuleReceiveDirector::BuildSeedUserPrompt(const FNPCAgentConfig& Cfg) const
-{
-	return FString::Printf(
-		TEXT("你是 %s。请按 system 指示输出 JSON。"),
-		*Cfg.Identity.FullName);
-}
-
-FString AAct02RuleReceiveDirector::BuildReactionSystemPrompt(
-	const FNPCAgentConfig& Cfg,
-	const FString& SpeakerName,
-	const FString& InLastSentence,
-	const FString& MyUnspoken) const
-{
-	const FString MyUns = MyUnspoken.IsEmpty() ? TEXT("（你上一轮选择了不说）") : MyUnspoken;
-	return FString::Printf(
-		TEXT("你是 AI %s，%s。游戏规则：僵尸触碰游戏，三回合，每回合需与他人手碰手；人碰人得 1 分，人碰僵尸变僵尸，初始僵尸不可解。\n\n")
-		TEXT("刚刚 %s 说：「%s」\n\n")
-		TEXT("你上一轮想说但没说出口的内容：「%s」\n\n")
-		TEXT("请决定是否接话、接话内容。严格 JSON：\n")
-		TEXT("{\n  \"want_to_speak\": true | false,\n  \"willingness\": \"extremely_strong\" | \"strong\" | \"moderate\" | \"weak\" | \"none\",\n  \"content\": \"<不超过 80 字的中文>\"\n}\n")
-		TEXT("意愿语义同前。如果 want_to_speak=false，content 可填空字符串。\n")
-		TEXT("只输出 JSON。"),
-		*Cfg.Identity.FullName, *Cfg.VoicePresentationHint,
-		*SpeakerName, *InLastSentence, *MyUns);
-}
-
-FString AAct02RuleReceiveDirector::BuildReactionUserPrompt(const FNPCAgentConfig& Cfg) const
 {
 	return FString::Printf(
 		TEXT("你是 %s。请按 system 指示输出 JSON。"),

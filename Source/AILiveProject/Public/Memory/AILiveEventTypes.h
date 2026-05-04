@@ -73,6 +73,12 @@ struct AILIVEPROJECT_API FAILiveEvent
 	UPROPERTY(BlueprintReadWrite, Category = "AILive|Event")
 	int64 Seq = 0;
 
+	// 写入时由 EventStore 回填为 CachedCurrentTickNo（BeginTick 设定）；
+	// canonical JSON 永远排除该字段，仅作 prompt / 调试 / 切片读取用途，
+	// 不参与哈希链。
+	UPROPERTY(BlueprintReadOnly, Category = "AILive|Event")
+	int64 TickNo = 0;
+
 	UPROPERTY(BlueprintReadWrite, Category = "AILive|Event")
 	int32 RoundNo = 0;
 

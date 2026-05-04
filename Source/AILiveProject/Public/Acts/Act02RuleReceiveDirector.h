@@ -198,12 +198,8 @@ private:
 
 	FString BuildSeedSystemPrompt(const FNPCAgentConfig& Cfg, const FString& GameRule) const;
 	FString BuildSeedUserPrompt(const FNPCAgentConfig& Cfg) const;
-	FString BuildReactionSystemPrompt(
-		const FNPCAgentConfig& Cfg,
-		const FString& SpeakerName,
-		const FString& LastSentence,
-		const FString& MyUnspoken) const;
-	FString BuildReactionUserPrompt(const FNPCAgentConfig& Cfg) const;
+	// Reaction phase prompt 已迁到 AILivePromptAssembler（T6 落地）；原
+	// BuildReactionSystemPrompt / BuildReactionUserPrompt 函数已删除。
 
 	void DispatchLLMs(bool bSeed);
 
