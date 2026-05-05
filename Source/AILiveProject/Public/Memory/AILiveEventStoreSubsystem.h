@@ -24,6 +24,58 @@ public:
 	const FString& GetCurrentGameId() const { return CurrentGameId; }
 
 	/**
+	 * T9 — Resume protocol (impl §5.4 / principles §5.2bis.4 / §7.3).
+	 *
+	 * Open `Saved/Games/<InGameId>.db` (creates an empty one if missing — same
+	 * as BeginGame). Walk events to pair every system.llm_inflight against any
+	 * non-system event carrying the same payload.request_id; the unpaired set
+	 * is then projected into one system.agent_timeout event each (visibility
+	 * = ["system"], payload contains npc_index / request_id / age_seconds /
+	 * resumed_at). Finally calls RebuildProjections() so derived tables match
+	 * the new tail.
+	 *
+	 * MVP scope: stale (≥60s) and fresh (<60s) in-flights are treated the same
+	 * — always abstain via system.agent_timeout. Re-issuing fresh requests via
+	 * prompt cache is deferred (impl §5.4 line 1772).
+	 *
+	 * Returns true on success. On any step failure the function logs Error
+	 * and returns false; callers should not assume a partial recovery is
+	 * usable.
+	 */
+	bool ResumeFromGameId(const FString& InGameId);
+
+	/**
+	 * T9 — Delete cross-DB bridge (impl §3.2bis line 479-483).
+	 *
+	 * Three steps in order:
+	 *   1) INSERT one row into `_meta.db.agent_lifecycle_events`
+	 *      (lifecycle_event_type='delete_executed') and capture the new
+	 *      event_id.
+	 *   2) Call AILiveAgentRegistry::SyncRegistryFromLifecycle(MetaDb, eventId)
+	 *      so `_meta.db.agent_registry.status='deleted', deleted_at=...`.
+	 *   3) Append one `system.delete_executed` event to the live game .db
+	 *      with visibility=["public"], payload includes lifecycle_event_id +
+	 *      agent_id + reason_summary.
+	 *
+	 * The two writes span two SQLite connections so they cannot share a
+	 * transaction. If the process crashes between (1)+(2) and (3), the
+	 * lifecycle row remains and a follow-up Resume should reconcile by
+	 * appending the missing system event — that compensation is *not* in
+	 * the MVP and is documented in DevLog.
+	 *
+	 * @param OutLifecycleEventId Receives the `_meta.db` event_id (UUIDv7).
+	 * @return seq of the appended `system.delete_executed` event, or -1 on
+	 *         any failure.
+	 */
+	int64 TriggerDeleteExecuted(
+		const FString& InAgentId,
+		const FString& InReasonSummary,
+		const FString& InReasonPayloadJson,
+		const TArray<FString>& InTombstoneVisibility,
+		bool bAffectsPersonaContinuity,
+		FString& OutLifecycleEventId);
+
+	/**
 	 * Append one event. Delegates to AppendEventsAtomically (single-element group).
 	 * On success, fills InOutEvent.{Seq,EventId,PrevEventHash,EventHash} and returns Seq.
 	 * On rejection (visibility / payload validation failed) writes one

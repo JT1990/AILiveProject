@@ -1,6 +1,7 @@
 #include "Memory/AILiveEventStoreSubsystem.h"
 
 #include "LLM/AILiveParserVersion.h"
+#include "Memory/AILiveAgentRegistry.h"
 #include "Util/AILiveJsonEscape.h"
 #include "Util/AILiveSha256.h"
 
@@ -791,9 +792,33 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QueryEventsByActor(const FStrin
 
 bool UAILiveEventStoreSubsystem::VerifyHashChain(int64& OutFirstBadSeq) const
 {
-	UE_LOG(LogAILiveMemory, Verbose, TEXT("VerifyHashChain stub (T9)"));
-	OutFirstBadSeq = INDEX_NONE;
-	return false;
+	OutFirstBadSeq = -1;
+	if (!IsGameOpen())
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("VerifyHashChain: no game open"));
+		return false;
+	}
+	int64 LastSeq = 0;
+	int64 BadCount = 0;
+	int64 FirstBadSeq = -1;
+	UAILiveEventStoreSubsystem* Self = const_cast<UAILiveEventStoreSubsystem*>(this);
+	if (!Self->RecomputeHashChainOnMainConnection(LastSeq, BadCount, FirstBadSeq))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("VerifyHashChain: walk failed (game=%s)"), *CurrentGameId);
+		return false;
+	}
+	if (BadCount > 0)
+	{
+		OutFirstBadSeq = FirstBadSeq;
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("VerifyHashChain: chain BAD bad_count=%lld first_bad_seq=%lld last_seq=%lld"),
+			BadCount, FirstBadSeq, LastSeq);
+		return false;
+	}
+	UE_LOG(LogAILiveMemory, Display,
+		TEXT("VerifyHashChain OK (game=%s, last_seq=%lld)"), *CurrentGameId, LastSeq);
+	return true;
 }
 
 bool UAILiveEventStoreSubsystem::Quote(int64 InSeq, const FString& InViewer, FAILiveEvent& OutEvent) const
@@ -3129,6 +3154,353 @@ FString UAILiveEventStoreSubsystem::DebugReadPendingIntendedJson(const FString& 
 }
 
 // ---------------------------------------------------------------
+// T9 — Resume protocol (impl §5.4 / principles §5.2bis.4).
+// MVP 保守策略：所有未配对 in-flight（不区分新鲜/过期）统一写
+// system.agent_timeout，不重发；payload 含 age_seconds 供诊断。
+// 写完后 RebuildProjections() 让派生表与 events 一致。
+// ---------------------------------------------------------------
+
+namespace
+{
+
+bool ExtractRequestIdFromPayload(const FString& InPayload, FString& OutRequestId)
+{
+	OutRequestId.Reset();
+	if (InPayload.IsEmpty())
+	{
+		return false;
+	}
+	TSharedPtr<FJsonObject> Obj;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(InPayload);
+	if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
+	{
+		return false;
+	}
+	return Obj->TryGetStringField(TEXT("request_id"), OutRequestId) && !OutRequestId.IsEmpty();
+}
+
+struct FInflightRow
+{
+	int64   Seq          = 0;
+	int64   TickNo       = 0;
+	int32   RoundNo      = 0;
+	FString PhaseStr;
+	FString RequestId;
+	int32   NPCIndex     = 0;
+	FString StartedAtIso;
+};
+
+} // anonymous
+
+bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
+{
+	if (InGameId.IsEmpty())
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("ResumeFromGameId: empty game_id"));
+		return false;
+	}
+
+	if (!BeginGame(InGameId))
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("ResumeFromGameId('%s'): BeginGame failed"), *InGameId);
+		return false;
+	}
+
+	// Step 1 — collect every system.llm_inflight row.
+	TArray<FInflightRow> Inflights;
+	{
+		FSQLitePreparedStatement Stmt;
+		if (!Stmt.Create(Db,
+			TEXT("SELECT seq, tick_no, round_no, phase, payload FROM events "
+			     "WHERE game_id = ?1 AND event_type = 'system.llm_inflight' "
+			     "ORDER BY seq ASC;")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ResumeFromGameId: prepare inflight scan failed: %s"), *Db.GetLastError());
+			return false;
+		}
+		Stmt.SetBindingValueByIndex(1, CurrentGameId);
+		while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+		{
+			FInflightRow Row;
+			int64 RoundNo64 = 0;
+			FString Payload;
+			Stmt.GetColumnValueByIndex(0, Row.Seq);
+			Stmt.GetColumnValueByIndex(1, Row.TickNo);
+			Stmt.GetColumnValueByIndex(2, RoundNo64);
+			Stmt.GetColumnValueByIndex(3, Row.PhaseStr);
+			Stmt.GetColumnValueByIndex(4, Payload);
+			Row.RoundNo = (int32)RoundNo64;
+
+			TSharedPtr<FJsonObject> Obj;
+			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Payload);
+			if (FJsonSerializer::Deserialize(Reader, Obj) && Obj.IsValid())
+			{
+				Obj->TryGetStringField(TEXT("request_id"),  Row.RequestId);
+				int32 NpcInt = 0;
+				if (Obj->TryGetNumberField(TEXT("npc_index"), NpcInt))
+				{
+					Row.NPCIndex = NpcInt;
+				}
+				Obj->TryGetStringField(TEXT("started_at"), Row.StartedAtIso);
+			}
+			if (!Row.RequestId.IsEmpty())
+			{
+				Inflights.Add(MoveTemp(Row));
+			}
+			else
+			{
+				UE_LOG(LogAILiveMemory, Warning,
+					TEXT("ResumeFromGameId: in-flight seq=%lld missing request_id; skipped"),
+					Row.Seq);
+			}
+		}
+	}
+
+	// Step 2 — collect request_ids that already have a matching completion event.
+	// "Completion" = any event other than the in-flight marker that carries the
+	// same request_id in its payload. We include system.agent_timeout so that
+	// re-running Resume on the same .db is idempotent.
+	TSet<FString> CompletedRequestIds;
+	{
+		FSQLitePreparedStatement Stmt;
+		if (!Stmt.Create(Db,
+			TEXT("SELECT payload FROM events "
+			     "WHERE game_id = ?1 AND event_type != 'system.llm_inflight' "
+			     "  AND payload LIKE '%request_id%';")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ResumeFromGameId: prepare completion scan failed: %s"), *Db.GetLastError());
+			return false;
+		}
+		Stmt.SetBindingValueByIndex(1, CurrentGameId);
+		while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+		{
+			FString Payload;
+			Stmt.GetColumnValueByIndex(0, Payload);
+			FString Rid;
+			if (ExtractRequestIdFromPayload(Payload, Rid))
+			{
+				CompletedRequestIds.Add(Rid);
+			}
+		}
+	}
+
+	// Step 3 — write one system.agent_timeout per unpaired in-flight.
+	const FDateTime Now = FDateTime::UtcNow();
+	const FString ResumedAtIso = Now.ToIso8601();
+	int32 TimeoutsWritten = 0;
+	for (const FInflightRow& Row : Inflights)
+	{
+		if (CompletedRequestIds.Contains(Row.RequestId))
+		{
+			continue;
+		}
+
+		double AgeSeconds = -1.0;
+		if (!Row.StartedAtIso.IsEmpty())
+		{
+			FDateTime Started;
+			if (FDateTime::ParseIso8601(*Row.StartedAtIso, Started))
+			{
+				AgeSeconds = (Now - Started).GetTotalSeconds();
+			}
+		}
+
+		FAILiveEvent Out;
+		Out.RoundNo   = Row.RoundNo;
+		Out.Phase     = AILiveEvent::PhaseFromString(Row.PhaseStr);
+		Out.Actor     = TEXT("orchestrator");
+		Out.EventType = EAILiveEventType::SystemAgentTimeout;
+		Out.Visibility = { TEXT("system") };
+		Out.PayloadJson = FString::Printf(
+			TEXT("{\"text\":\"agent timeout from resume\",\"npc_index\":%d,")
+			TEXT("\"request_id\":\"%s\",\"age_seconds\":%.3f,\"resumed_at\":\"%s\","),
+			Row.NPCIndex, *Row.RequestId, AgeSeconds, *ResumedAtIso);
+		Out.PayloadJson += FString::Printf(
+			TEXT("\"source_inflight_seq\":%lld}"), Row.Seq);
+
+		// Tick-no inheritance: events written via AppendEvent inherit
+		// CachedCurrentTickNo (see InsertEventBypassValidation_LockHeld
+		// line 1830). Setting it to the original in-flight's tick_no makes
+		// `WHERE tick_no=N AND event_type='system.agent_timeout'` route the
+		// timeout back to its original tick — useful for forensics. Director's
+		// next BeginTick() overwrites this on the next live tick.
+		CachedCurrentTickNo = Row.TickNo;
+
+		const int64 NewSeq = AppendEvent(Out);
+		if (NewSeq <= 0)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("ResumeFromGameId: AppendEvent failed for request_id=%s"),
+				*Row.RequestId);
+			return false;
+		}
+		++TimeoutsWritten;
+	}
+
+	// Step 4 — rebuild projections so commitments / vote_history /
+	// alliance_state / agent_view_state include the new timeout rows.
+	if (!RebuildProjections())
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("ResumeFromGameId: RebuildProjections failed"));
+		return false;
+	}
+
+	UE_LOG(LogAILiveMemory, Display,
+		TEXT("ResumeFromGameId OK game=%s inflights=%d completed=%d timeouts_written=%d"),
+		*CurrentGameId, Inflights.Num(), CompletedRequestIds.Num(), TimeoutsWritten);
+	return true;
+}
+
+// ---------------------------------------------------------------
+// T9 — Delete cross-DB bridge (impl §3.2bis line 479-483).
+//   1) INSERT _meta.db.agent_lifecycle_events
+//   2) AILiveAgentRegistry::SyncRegistryFromLifecycle (UPDATE registry)
+//   3) AppendEvent system.delete_executed on the live game .db
+// Two SQLite connections → no shared transaction; ordering guarantees
+// consistency for the L2 acceptance scenario.
+// ---------------------------------------------------------------
+
+int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
+	const FString& InAgentId,
+	const FString& InReasonSummary,
+	const FString& InReasonPayloadJson,
+	const TArray<FString>& InTombstoneVisibility,
+	bool bAffectsPersonaContinuity,
+	FString& OutLifecycleEventId)
+{
+	OutLifecycleEventId.Reset();
+	if (!IsGameOpen())
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("TriggerDeleteExecuted: no game open"));
+		return -1;
+	}
+	if (InAgentId.IsEmpty())
+	{
+		UE_LOG(LogAILiveMemory, Error, TEXT("TriggerDeleteExecuted: empty agent_id"));
+		return -1;
+	}
+	{
+		FString TmpErr;
+		const TArray<FString> AgentIdAsViewer = { InAgentId };
+		if (!ValidateVisibility(AgentIdAsViewer, TmpErr))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("TriggerDeleteExecuted: agent_id '%s' is not a valid viewer string: %s"),
+				*InAgentId, *TmpErr);
+			return -1;
+		}
+	}
+
+	const FString LifecycleEventId = GenerateUuidV7();
+
+	// === Step 1 — INSERT _meta.db.agent_lifecycle_events =====================
+	const FString TombVisJson = AILiveEvent::ArrayToJsonString(InTombstoneVisibility);
+	const FString ReasonPayload = InReasonPayloadJson.IsEmpty()
+		? FString::Printf(TEXT("{\"text\":%s}"), *AILiveUtil::EscapeJsonString(InReasonSummary))
+		: InReasonPayloadJson;
+
+	{
+		if (!MetaDb.Execute(TEXT("BEGIN IMMEDIATE;")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("TriggerDeleteExecuted: meta BEGIN failed: %s"), *MetaDb.GetLastError());
+			return -1;
+		}
+		bool bRollback = false;
+		{
+			FSQLitePreparedStatement Ins;
+			if (!Ins.Create(MetaDb, TEXT(
+				"INSERT INTO agent_lifecycle_events ("
+				"  event_id, agent_id, lifecycle_event_type, triggered_in_game_id,"
+				"  triggered_at_seq, reason_summary, reason_payload, tombstone_visibility,"
+				"  affects_persona_continuity"
+				") VALUES (?1, ?2, 'delete_executed', ?3, ?4, ?5, ?6, ?7, ?8);")))
+			{
+				UE_LOG(LogAILiveMemory, Error,
+					TEXT("TriggerDeleteExecuted: prepare insert failed: %s"), *MetaDb.GetLastError());
+				bRollback = true;
+			}
+			else
+			{
+				bool bOk = true;
+				bOk = bOk && Ins.SetBindingValueByIndex(1, LifecycleEventId);
+				bOk = bOk && Ins.SetBindingValueByIndex(2, InAgentId);
+				bOk = bOk && Ins.SetBindingValueByIndex(3, CurrentGameId);
+				bOk = bOk && Ins.SetBindingValueByIndex(4, CachedLastSeq);
+				bOk = bOk && Ins.SetBindingValueByIndex(5, InReasonSummary);
+				bOk = bOk && Ins.SetBindingValueByIndex(6, ReasonPayload);
+				bOk = bOk && Ins.SetBindingValueByIndex(7, TombVisJson);
+				bOk = bOk && Ins.SetBindingValueByIndex(8, (int64)(bAffectsPersonaContinuity ? 1 : 0));
+				bOk = bOk && Ins.Execute();
+				if (!bOk)
+				{
+					UE_LOG(LogAILiveMemory, Error,
+						TEXT("TriggerDeleteExecuted: lifecycle INSERT failed: %s"),
+						*MetaDb.GetLastError());
+					bRollback = true;
+				}
+			}
+		}
+		if (bRollback)
+		{
+			MetaDb.Execute(TEXT("ROLLBACK;"));
+			return -1;
+		}
+		if (!MetaDb.Execute(TEXT("COMMIT;")))
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("TriggerDeleteExecuted: meta COMMIT failed: %s"), *MetaDb.GetLastError());
+			MetaDb.Execute(TEXT("ROLLBACK;"));
+			return -1;
+		}
+	}
+
+	// === Step 2 — UPDATE _meta.db.agent_registry via SyncRegistryFromLifecycle.
+	if (!AILiveAgentRegistry::SyncRegistryFromLifecycle(MetaDb, LifecycleEventId))
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("TriggerDeleteExecuted: SyncRegistryFromLifecycle failed for agent=%s eid=%s"),
+			*InAgentId, *LifecycleEventId);
+		return -1;
+	}
+
+	// === Step 3 — Append system.delete_executed to the live game .db ========
+	FAILiveEvent Sys;
+	Sys.RoundNo    = 0; // 与 §11 验收一致——orchestrator 内部事件，round 取 BeginTick 之外的兜底值
+	Sys.Phase      = EAILivePhase::Setup;
+	Sys.Actor      = TEXT("orchestrator");
+	Sys.EventType  = EAILiveEventType::SystemDeleteExecuted;
+	Sys.Visibility = { TEXT("public") };
+	Sys.PayloadJson = FString::Printf(
+		TEXT("{\"text\":%s,\"lifecycle_event_id\":\"%s\",\"agent_id\":\"%s\","),
+		*AILiveUtil::EscapeJsonString(
+			FString::Printf(TEXT("agent %s deleted"), *InAgentId)),
+		*LifecycleEventId, *InAgentId);
+	Sys.PayloadJson += FString::Printf(
+		TEXT("\"reason_summary\":%s}"),
+		*AILiveUtil::EscapeJsonString(InReasonSummary));
+
+	const int64 NewSeq = AppendEvent(Sys);
+	if (NewSeq <= 0)
+	{
+		UE_LOG(LogAILiveMemory, Error,
+			TEXT("TriggerDeleteExecuted: AppendEvent system.delete_executed failed; "
+			     "lifecycle row %s already committed (compensation deferred — see DevLog)"),
+			*LifecycleEventId);
+		return -1;
+	}
+
+	OutLifecycleEventId = LifecycleEventId;
+	UE_LOG(LogAILiveMemory, Display,
+		TEXT("TriggerDeleteExecuted OK agent=%s lifecycle_event_id=%s system_seq=%lld"),
+		*InAgentId, *LifecycleEventId, NewSeq);
+	return NewSeq;
+}
+
+// ---------------------------------------------------------------
 // Console commands — debug helpers, scoped to T2 acceptance.
 // ---------------------------------------------------------------
 
@@ -4151,4 +4523,127 @@ static FAutoConsoleCommand GAILiveMemoryCompareInlinePendingCmd(
 				TEXT("  only inline: %s  |  only proj: %s"),
 				*JoinSet(OnlyInline), *JoinSet(OnlyProj));
 		}
+	}));
+
+// === T9 — VerifyHashChain / Resume / Delete console commands ====================
+
+static FAutoConsoleCommand GAILiveMemoryVerifyHashChainCmd(
+	TEXT("AILive.Memory.VerifyHashChain"),
+	TEXT("AILive.Memory.VerifyHashChain — walk events and verify hash chain integrity. "
+	     "OK on success; on tamper writes ERROR with first_bad_seq."),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("VerifyHashChain: no game open"));
+			return;
+		}
+		int64 FirstBad = -1;
+		const bool bOk = Sys->VerifyHashChain(FirstBad);
+		if (bOk)
+		{
+			UE_LOG(LogAILiveMemory, Display, TEXT("VerifyHashChain -> OK"));
+		}
+		else
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("VerifyHashChain -> FAIL first_bad_seq=%lld"), FirstBad);
+		}
+	}));
+
+static FAutoConsoleCommand GAILiveMemoryResumeFromGameIdCmd(
+	TEXT("AILive.Memory.ResumeFromGameId"),
+	TEXT("AILive.Memory.ResumeFromGameId <game_id> — open Saved/Games/<game_id>.db, "
+	     "convert unpaired system.llm_inflight to system.agent_timeout, "
+	     "then RebuildProjections."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Memory.ResumeFromGameId <game_id>"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("ResumeFromGameId: subsystem unavailable"));
+			return;
+		}
+		const bool bOk = Sys->ResumeFromGameId(Args[0]);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("ResumeFromGameId('%s') -> %s"), *Args[0], bOk ? TEXT("OK") : TEXT("FAIL"));
+	}));
+
+static FAutoConsoleCommand GAILiveMemoryTriggerDeleteExecutedCmd(
+	TEXT("AILive.Memory.TriggerDeleteExecuted"),
+	TEXT("AILive.Memory.TriggerDeleteExecuted <agent_id> [reason_summary] — three-step "
+	     "Delete bridge: write _meta.db.agent_lifecycle_events row, sync agent_registry, "
+	     "append system.delete_executed (visibility=public) to live game .db."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 1)
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("Usage: AILive.Memory.TriggerDeleteExecuted <agent_id> [reason_summary]"));
+			return;
+		}
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("TriggerDeleteExecuted: no game open"));
+			return;
+		}
+		const FString AgentId = Args[0];
+		FString Reason = TEXT("manual delete (console)");
+		if (Args.Num() >= 2)
+		{
+			TArray<FString> RemainArgs = Args;
+			RemainArgs.RemoveAt(0);
+			Reason = FString::Join(RemainArgs, TEXT(" "));
+		}
+		FString OutEid;
+		const TArray<FString> Tomb = { TEXT("public") };
+		const int64 Seq = Sys->TriggerDeleteExecuted(
+			AgentId, Reason, /*ReasonPayloadJson=*/FString(),
+			Tomb, /*bAffectsPersonaContinuity=*/false, OutEid);
+		if (Seq > 0)
+		{
+			UE_LOG(LogAILiveMemory, Display,
+				TEXT("TriggerDeleteExecuted -> OK system_seq=%lld lifecycle_event_id=%s"),
+				Seq, *OutEid);
+		}
+		else
+		{
+			UE_LOG(LogAILiveMemory, Error,
+				TEXT("TriggerDeleteExecuted -> FAIL"));
+		}
+	}));
+
+static FAutoConsoleCommand GAILiveTestAppendBadAddressedToCmd(
+	TEXT("AILive.Test.AppendBadAddressedTo"),
+	TEXT("AILive.Test.AppendBadAddressedTo — append speech.public with "
+	     "visibility=[\"NPC03\"] addressed_to=[\"NPC07\"]; expect AppendEvent to "
+	     "succeed but log Warning + emit one system.parse_failed audit row."),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
+		if (!Sys || !Sys->IsGameOpen())
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("AppendBadAddressedTo: no game open"));
+			return;
+		}
+		FAILiveEvent Ev;
+		Ev.RoundNo      = 0;
+		Ev.Phase        = EAILivePhase::DayDiscuss;
+		Ev.Actor        = TEXT("NPC01");
+		Ev.EventType    = EAILiveEventType::SpeechPublic;
+		Ev.SpeechActType = EAILiveSpeechActType::Claim;
+		Ev.Visibility   = { TEXT("NPC03") };
+		Ev.AddressedTo  = { TEXT("NPC07") };
+		Ev.PayloadJson  = TEXT("{\"text\":\"addressed-to-not-in-visibility test\"}");
+		const int64 Seq = Sys->AppendEvent(Ev);
+		UE_LOG(LogAILiveMemory, Display,
+			TEXT("AppendBadAddressedTo -> seq=%lld (expect Warning above + extra system.parse_failed row)"),
+			Seq);
 	}));
