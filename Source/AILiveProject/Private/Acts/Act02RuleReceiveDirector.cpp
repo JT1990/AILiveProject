@@ -1,3 +1,55 @@
+﻿// =============================================================================
+// 中文教学：Act02RuleReceiveDirector.cpp —— Act02 实现（1400+ 行）
+//
+// 这是项目第二大的单文件，集成了：
+//   - LLM 异步调用编排（Reasoner + Parser 两阶段，10 NPC 并发）
+//   - Bid 协议 + Floor control（挑赢家公开发言）
+//   - PromptAssembler 调用 + EventStore 写入
+//   - TTS（MiniMax）+ A2F（NVIDIA Audio2Face）联动播放
+//
+// 文件分段（粗略）：
+//   1) BeginPlay/Tick/EndPlay + 状态机推进
+//   2) PrescatterToTV：NPC 走到电视前
+//   3) Seed phase：首拍下发种子 prompt + LLM 调用 + TTS
+//   4) Reaction phase：后续拍，带历史 + Bid 协议
+//   5) DispatchReasonerForNPC + DispatchParserForNPC：异步 LLM 调用
+//   6) ApplyBidsAndChooseWinner + PromoteWinnerToPublic
+//   7) TTS + A2F 播放管线
+//   8) Console 命令（debug 用）
+//
+// 关键 UE / C++ 概念：
+//
+//   1) AsyncTask + TFuture/TPromise + Lambda 闭包
+//      LLM 调用是阻塞的（OpenAIChat::RequestBlocking），但游戏线程不能阻塞。
+//      解决方案：
+//        AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakSelf]() {
+//          auto Result = OpenAIChat::RequestBlocking(...);
+//          AsyncTask(ENamedThreads::GameThread, [WeakSelf, Result]() {
+//            if (auto* Self = WeakSelf.Get()) Self->OnLLMDone(Result);
+//          });
+//        });
+//      用 TWeakObjectPtr 守 actor，防止 LLM 期间 actor 销毁导致野指针。
+//
+//   2) GameThread 切换的必要性
+//      EventStore / TTS / 动画接口都不是线程安全的；LLM 结果必须切回游戏线程
+//      才能调。AsyncTask(ENamedThreads::GameThread, ...) 是 UE 的 cross-thread
+//      标准模式。
+//
+//   3) Promise 用法
+//      Promise.SetValue(R) → Future.Get() 解锁。本文件用它把后台线程的 LLM
+//      结果交给状态机轮询函数（TickWaitForLLM 之类）使用。
+//
+//   4) AILivePromptAssembler::AssembleSystemPrompt + AssembleUserPrompt
+//      Reaction phase 的 prompt 拼装走这里（见 Memory/AILivePromptAssembler.h
+//      教学注释）；Seed phase 走自己的简化 BuildSeedSystemPrompt/UserPrompt
+//      （首拍无历史可拼）。
+//
+//   5) MiniMax TTS + A2F 联动
+//      赢家发言文本 → UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoise
+//      → 后台 HTTP TTS → 切回游戏线程喂 PCM 给 ACEAudioCurveSourceComponent
+//      → A2F 实时算嘴型 curve → MetaHuman face 动起来。一条龙最长 ~4 秒。
+// =============================================================================
+
 #include "Acts/Act02RuleReceiveDirector.h"
 
 #include "Acts/Act01RuleIntroDirector.h"

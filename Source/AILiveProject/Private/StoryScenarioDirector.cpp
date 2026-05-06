@@ -1,3 +1,33 @@
+﻿// =============================================================================
+// 中文教学：StoryScenarioDirector.cpp —— 简单 2-NPC 对话场景实现
+//
+// 文件做这几件事：
+//   1) BeginPlay 解析 NPC1Class / NPC2Class 在场景里的实例
+//   2) 触发键按下 → BeginScene → Spawn TargetPoint → NPC2 走到会面点
+//   3) PollMoveToMeeting：轮询 NPC2 是否到达 + 是否 idle
+//   4) 全员到达 + 静默 → StartDialogue → 用 timer 串起每条台词
+//   5) 每条台词 → 调 UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnNative 播放
+//   6) 所有台词播完 → StartReturn 让 NPC2 回原位 → Idle
+//
+// 关键 UE 概念：
+//
+//   1) ResolveActorOfClass + ResolveActorByClassAndLabel
+//      用 TActorIterator<AActor> 遍历当前 World 找匹配实例。简单暴力但够用。
+//      生产代码可以用 GetAllActorsOfClass 或者把引用提前存好。
+//
+//   2) BP function 反射调用 InvokeMoveAndLookAt
+//      不假设 NPC 是哪个具体 BP 子类，通过 FindFunction(FName) + ProcessEvent
+//      调它的 BP 函数。这种「duck typing」让本 Director 跟具体 NPC BP 解耦。
+//
+//   3) TFunction / Lambda 串台词
+//      DialogueIndex 累加 + DialogueTimer 重新设置实现「按时序播下一条」。
+//      每条结束的 native delegate 触发下一次 SpeakDialogueLine。
+//
+//   4) DebugMessage
+//      封装 GEngine->AddOnScreenDebugMessage —— 把信息打到屏幕左上角。
+//      Editor 调试用，Shipping build 也能用（性能开销低）。
+// =============================================================================
+
 #include "StoryScenarioDirector.h"
 
 #include "AIController.h"

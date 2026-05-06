@@ -1,9 +1,37 @@
+﻿// =============================================================================
+// 中文教学：AILiveParserClient.cpp —— Parser 三段流程实现
+//
+// 文件分四块：
+//   1) 匿名命名空间：parser 配置常量 + 模块作用域 cache（prompt 文本、模型名）
+//   2) 协议版本 getter：实现 AILiveParserVersion.h 暴露的 4 个查询函数
+//   3) PrevalidateRawTaggedSections：raw text 标签结构性预检
+//   4) ValidateParserOutputJson + ParseFourChannels：完整流程
+//
+// 关键 UE / C++ 概念：
+//   1) constexpr const TCHAR* + 模块作用域 cache 双重检查锁
+//      `EnsureSystemPromptLoaded()` 第一次进锁 → 读盘 → 写 cache，后续只取 cache。
+//      经典「double-check locking」简化版（这里没用 atomic 是因为 FScopeLock
+//      已经是全锁，性能损失可忽略；如果 prompt 加载是热路径再考虑无锁）。
+//
+//   2) constexpr ELLMProvider kParserProvider = ELLMProvider::DeepSeek
+//      编译期常量。Parser 模型选定后整个进程不变；改 provider 要重编译。
+//
+//   3) 显式三段错误标识 FailedStage = "raw_prevalidate" / "llm_call" / "output_validate"
+//      调用方据此分流：raw_prevalidate 是 NPC 输出格式错（要追责到 Reasoner 模型），
+//      llm_call 是网络/endpoint 问题（重试），output_validate 是 Parser 模型本身
+//      偏离 schema（少见，往往要换模型或调 prompt）。
+//
+//   4) AsyncTask vs ThreadPool（在 AILiveParserSelfCheck.cpp 而不是这里）
+//      本文件 ParseFourChannels 是阻塞同步函数，永远在调用方所在线程跑。
+//      调用方负责把它放到 ThreadPool 后台线程（避免卡游戏线程）。
+// =============================================================================
+
 #include "LLM/AILiveParserClient.h"
 #include "LLM/AILiveParserVersion.h"
 
 #include "LLM/AILiveAgentRoster.h"
 #include "LLM/OpenAIChatClient.h"
-#include "Memory/AILiveEventTypes.h"
+#include "Memory/AILiveEventTypes.h"   // LogAILiveMemory 日志类别
 
 #include "Dom/JsonObject.h"
 #include "HAL/CriticalSection.h"
@@ -29,11 +57,14 @@ namespace
 	constexpr const TCHAR* kParserPromptRelative   = TEXT("Content/Prompts/Parser/v1.txt");
 
 	// 模块作用域 cache：首次 ParseFourChannels 调用时同步加载 prompt 文件
+	// 中文教学：这是「单例 + 懒加载」模式 —— 多线程并发调用时，加锁保证只
+	// 加载一次。GParser*Lock 保护对应的 Loaded/Cached 变量。
 	FCriticalSection GParserPromptLock;
-	bool             GParserPromptLoaded = false;
-	bool             GParserPromptLoadOk = false;
-	FString          GParserSystemPrompt;
+	bool             GParserPromptLoaded = false;   // 是否已经尝试过加载（不论成败）
+	bool             GParserPromptLoadOk = false;   // 加载是否成功
+	FString          GParserSystemPrompt;            // 缓存的 prompt 文本
 
+	// 模型名缓存。同样的双重检查模式
 	FCriticalSection GParserModelLock;
 	bool             GParserModelResolved = false;
 	FString          GParserModelCached;
@@ -77,6 +108,8 @@ namespace
 		return Haystack.Find(Needle, ESearchCase::CaseSensitive, ESearchDir::FromStart, 0);
 	}
 
+	// 抽取「<TAG>...</TAG>」之间的文本。OpenTag/CloseTag 必须不重叠且按顺序出现。
+	// 返回 true 才填 OutBody。中文教学：这是手写 mini parser，不上正则避免依赖。
 	bool ExtractTagBody(const FString& Raw, const TCHAR* OpenTag, const TCHAR* CloseTag, FString& OutBody)
 	{
 		const int32 OpenAt = FindFirstSubstring(Raw, OpenTag);
@@ -85,6 +118,7 @@ namespace
 			return false;
 		}
 		const int32 OpenLen = FCString::Strlen(OpenTag);
+		// 从开标签后面开始找闭标签（避免嵌套时找错）
 		const int32 CloseAt = Raw.Find(CloseTag, ESearchCase::CaseSensitive, ESearchDir::FromStart, OpenAt + OpenLen);
 		if (CloseAt == INDEX_NONE)
 		{
@@ -160,6 +194,12 @@ namespace AILiveParser
 		return GParserModelCached;
 	}
 
+	// Stage 1：raw text 预检。
+	// 中文教学：在调 LLM 之前先做廉价的本地校验，能挡掉 70%+ 的 NPC 格式错，
+	// 节省 LLM 调用 token 和延迟。检查项：
+	//   - 四个 XML 风格标签都齐全
+	//   - <INTENDED> 内是合法 JSON object
+	//   - <BID> 内是合法 JSON object（urgency 字段值留给 Stage 3 校验）
 	FParseResult PrevalidateRawTaggedSections(const FString& RawText)
 	{
 		FParseResult R;
@@ -225,6 +265,15 @@ namespace AILiveParser
 		return R;
 	}
 
+	// Stage 3：Parser LLM 输出 JSON 的字段类型校验。
+	// 中文教学：每一段都按下面的 schema 严格校验：
+	//   {
+	//     "scratchpad":   string,      // 必填
+	//     "intended":     { "text": string, ... },  // text 必填
+	//     "bid":          { "urgency": number, ... },  // urgency 必填
+	//     "note_to_self": string       // 必填
+	//   }
+	// 任一字段缺失或类型错 → bOk=false，FailedStage="output_validate"
 	FParseResult ValidateParserOutputJson(const FString& ParserJson)
 	{
 		FParseResult R;
@@ -331,6 +380,9 @@ namespace AILiveParser
 		return R;
 	}
 
+	// 公开主入口：raw 预检 → LLM 调用 → 输出 JSON 校验。
+	// 中文教学：函数体里能看出三段流水线的清晰分割，每段失败都立刻 return，
+	// 不试图「部分恢复」。这种「fail-fast」风格让协议错误更容易定位（见 FailedStage）。
 	FParseResult ParseFourChannels(const FParseRequest& Req)
 	{
 		const double T0 = FPlatformTime::Seconds();

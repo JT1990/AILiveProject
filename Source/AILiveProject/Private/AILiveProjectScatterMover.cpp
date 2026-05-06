@@ -1,3 +1,21 @@
+﻿// =============================================================================
+// 中文教学：AILiveProjectScatterMover.cpp —— 散布实现
+//
+// 流程：
+//   1) UEnvQueryManager::RunEQSQuery 触发 EQS 异步查询，传中心 actor 当 querier
+//   2) 完成回调里：拿到 Result.GetAllAsLocations() → 一组 FVector
+//   3) 按索引派发给 NPCs：NPCs[i] → 调用其 BP 的 "MoveAndLookAtLocation" 函数
+//   4) 数量不匹配时按头/尾截断 + warning 日志
+//
+// 关键 UE 概念：
+//   - UFunction + ProcessEvent
+//      runtime 反射调用：FindFunction(FName("MoveAndLookAtLocation")) →
+//      ProcessEvent(Func, &ParamsStruct)。Params struct 字段顺序必须与 BP
+//      函数签名严格对应（这是反射调用最容易踩的坑）。
+//   - FEnvQueryRequest 链式 API
+//      .SetWorldContext(this).SetQueryFinishedDelegate(...).Execute(QueryMode);
+// =============================================================================
+
 #include "AILiveProjectScatterMover.h"
 
 #include "EnvironmentQuery/EnvQuery.h"

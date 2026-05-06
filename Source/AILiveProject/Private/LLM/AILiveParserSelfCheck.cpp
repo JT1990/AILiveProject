@@ -1,14 +1,48 @@
+﻿// =============================================================================
+// 中文教学：AILiveParserSelfCheck.cpp —— Parser 自检命令（控制台触发）
+//
+// 这是什么：
+//   注册一个控制台命令 `AILive.Test.ParserSelfCheck`，跑 5 个用例验证 Parser
+//   端到端工作正常：
+//     A) 真发 LLM 调用，期望返回完整四段并通过 Stage 3 校验
+//     B) raw 缺 BID 段 → 期望 Stage 1 reject（reason 含 "missing bid section"）
+//     C) raw INTENDED 不是 JSON → 期望 Stage 1 reject
+//     D) GetCurrentParser* 4 个 getter 一致性
+//     E) DB 中 schema_meta 与 API 返回值一致性（要先 BeginGame）
+//
+// 用法：在 PIE 中 ` 打开 console，敲 AILive.Test.ParserSelfCheck 回车。
+//
+// 关键 UE / C++ 概念：
+//   1) FAutoConsoleCommand
+//      静态全局对象，构造即注册控制台命令。析构（模块卸载）即注销。
+//      RAII 注册模式 —— 不需要手动调 Register/Unregister。
+//
+//   2) AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [](){...})
+//      把 lambda 调度到 UE 任务图（TaskGraph）的后台线程池跑。
+//      ENamedThreads:: 枚举有：GameThread / RenderThread / AudioThread /
+//      AnyBackgroundThreadNormalTask 等。本函数同步阻塞，所以丢后台跑。
+//      Lambda 通过值捕获 `[]`（不需要外部状态）。
+//
+//   3) FConsoleCommandDelegate::CreateStatic
+//      把全局 static 函数包成 delegate。如果是成员函数用 CreateUObject 或
+//      CreateRaw（区别：UObject 自动检查指针是否还活着）。
+//
+//   4) GEngine->GetWorldContexts() 找 PIE / Game World
+//      多窗口编辑器/PIE 场景下可能有多个 World。这里挑第一个匹配的，拿 GameInstance
+//      然后取 Subsystem。生产代码可以做更精细的选择（按 PlayerController）。
+// =============================================================================
+
 #include "LLM/AILiveParserClient.h"
 #include "LLM/AILiveParserVersion.h"
 
 #include "Memory/AILiveEventStoreSubsystem.h"
-#include "Memory/AILiveEventTypes.h"
+#include "Memory/AILiveEventTypes.h"      // LogAILiveMemory
 
-#include "Async/Async.h"
-#include "Engine/Engine.h"
-#include "Engine/GameInstance.h"
-#include "Engine/World.h"
-#include "HAL/IConsoleManager.h"
+#include "Async/Async.h"                    // AsyncTask + ENamedThreads
+#include "Engine/Engine.h"                  // GEngine
+#include "Engine/GameInstance.h"            // UGameInstance
+#include "Engine/World.h"                   // UWorld / FWorldContext
+#include "HAL/IConsoleManager.h"            // FAutoConsoleCommand
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
@@ -229,6 +263,10 @@ namespace
 	}
 }
 
+// 中文教学：FAutoConsoleCommand 的全局 static 实例，构造时即注册到 UE console。
+// 三个参数：命令名、help 文本（敲 ? 时显示）、要执行的 delegate。
+// CreateStatic 把普通函数 RunParserSelfCheck 包成 delegate；如果要绑成员函数
+// 需要 CreateRaw / CreateUObject。
 static FAutoConsoleCommand CCmdParserSelfCheck(
 	TEXT("AILive.Test.ParserSelfCheck"),
 	TEXT("Run T2.5 Parser self-check: 5 cases A/B/C/D/E (D/E sync, A/B/C async; A calls real Parser LLM)."),

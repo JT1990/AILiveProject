@@ -1,8 +1,38 @@
-#pragma once
+﻿#pragma once
+
+// =============================================================================
+// 中文教学：AILiveProjectPerceptionLogger.h —— AI 感知（视/听）信息收集 + BP 工具
+//
+// 这是什么：
+//   一个 BP 函数库，给 AIController 暴露「我此时此刻看到/听到了什么」的查询入口。
+//   底层走 UE 的 AIPerception 系统（UAIPerceptionComponent + AISense_Sight/Hearing）。
+//   再额外封了 SmartObject 申领工具（解决 BP 里 Wildcard pin 不易用的问题）。
+//
+// 两个数据结构：
+//   - FPerceivedAgentInfo ：视野感知到的另一 actor 的快照（距离/方位/相对偏航/年龄）
+//   - FHeardSoundInfo     ：听到的噪声事件（位置/响度/方位/年龄）
+//
+// 关键 UE 概念：
+//
+//   1) UAIPerceptionComponent
+//      AIController 上挂这个组件就能感知世界。组件订阅多种 AISense_*（Sight /
+//      Hearing / Damage / Touch / Team / Prediction）。配置好 Config 资产即可工作。
+//
+//   2) FAIStimulus
+//      一次感知刺激的快照：位置、年龄、是否当前可感知（被遮挡时为 false）。
+//
+//   3) RelativeYawDeg：[-180, 180]
+//      相对 perceiver forward 方向的偏航角。0=正前，+90=正右，-90=正左，
+//      ±180=正后。配合 NPC prompt「在你右侧 30 度有人发声」语义。
+//
+//   4) FSmartObjectClaimHandle
+//      SmartObject 是 UE 的「场景智能交互点」框架：椅子、按钮、咖啡机等可被
+//      NPC 使用的物件。claim handle 表示「我占用这个 slot」的凭据。
+// =============================================================================
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
-#include "SmartObjectRuntime.h"
+#include "SmartObjectRuntime.h"             // FSmartObjectClaimHandle
 #include "AILiveProjectPerceptionLogger.generated.h"
 
 class AAIController;

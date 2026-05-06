@@ -1,3 +1,33 @@
+﻿// =============================================================================
+// 中文教学：AILiveSchemaCheck.cpp —— 「USTRUCT 字段 vs schema.yaml」一致性检查
+//
+// 这是什么：
+//   AILive 的事件 schema 定义在 docs/schema.yaml（人类可读规范），同时也在
+//   C++ USTRUCT（FAILiveAgentCore / FAILiveAgentIdentity 等）里。两边必须保持同步，
+//   否则写库时字段名错位、类型错位会很难发现。
+//   本文件注册一个控制台命令 `AILive.Test.SchemaCheck`，遍历下面的 kFieldMappings
+//   表，用 UE 反射（UScriptStruct::FindPropertyByName）检查 USTRUCT 里：
+//     - 该字段确实存在
+//     - 字段类型是预期的（FStrProperty / FIntProperty / FEnumProperty<X>）
+//
+// 关键 UE 概念：
+//   1) UScriptStruct + StaticStruct()
+//      USTRUCT 都有一个 static UScriptStruct* StaticStruct() 入口，返回该
+//      结构的「反射元数据」对象。用它能枚举字段、查类型、读写值。
+//
+//   2) FProperty / FStrProperty / FIntProperty
+//      UE 反射里的字段抽象。每个 UPROPERTY 标记的成员在反射系统中对应一个
+//      FProperty 子类。`Cast<FStrProperty>(Prop)` 检查类型。
+//
+//   3) 函数指针 `UScriptStruct* (*StructGetter)()`
+//      为什么不直接存 UScriptStruct*：本数组在静态初始化阶段定义，那时
+//      UScriptStruct 单例可能还没构造好（UE 反射系统启动顺序有讲究）。
+//      存函数指针延迟取值，等命令被触发时才调用，绝对安全。
+//
+//   4) FAutoConsoleCommand
+//      与 LLM/AILiveParserSelfCheck.cpp 同样的注册方式。RAII 全局对象。
+// =============================================================================
+
 #include "Memory/AILiveAgentTypes.h"
 #include "Memory/AILiveEventTypes.h"
 #include "LLM/AILiveAgentRoster.h"

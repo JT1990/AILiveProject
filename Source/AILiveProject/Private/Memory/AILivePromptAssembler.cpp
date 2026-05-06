@@ -1,3 +1,32 @@
+﻿// =============================================================================
+// 中文教学：AILivePromptAssembler.cpp —— prompt 拼装实现
+//
+// 文件结构（已经有详尽内联中文注释；下面只补 C++/UE 概念教学）：
+//   1) 内部工具：JSON 提取、正则、事件行格式化
+//   2) Append*Section：每段一个生成函数
+//   3) 降级机制：FSectionEntry + DropSectionByName
+//   4) AssembleSystemPrompt / AssembleUserPrompt：公开 API
+//   5) Console commands：L1 验收测试入口
+//
+// 关键 C++ / UE 概念：
+//   1) FRegexPattern + FRegexMatcher
+//      UE 的正则封装。用法：构造 Pattern → 构造 Matcher(Pattern, Text) →
+//      while (M.FindNext()) 循环；M.GetCaptureGroup(N) 取第 N 个捕获组。
+//      模式语法是 ECMAScript，但要注意 UE 的 \\ 转义（C++ 字符串 + 正则双重转义）。
+//
+//   2) ensureAlwaysMsgf
+//      失败时打日志、记 callstack，但**不 abort 进程**（与 check() 不同）。
+//      Editor / Development build 才生效，Shipping 退化成 noop。
+//      用在「条件不满足想留 callstack 但不希望 PIE 崩溃」的场景。
+//
+//   3) FConsoleCommandWithArgsDelegate::CreateLambda
+//      Console 命令带参数版。Lambda 签名 [](const TArray<FString>& Args)。
+//      参数按空格分割：`AILive.Test.AssembleChallenge NPC01 3` → Args = ["NPC01", "3"]
+//
+//   4) FCString::Atoi
+//      字符串转 int 工具，无效输入返回 0。比 std::stoi 更宽容（不抛异常）。
+// =============================================================================
+
 #include "Memory/AILivePromptAssembler.h"
 
 #include "Memory/AILiveEventStoreSubsystem.h"

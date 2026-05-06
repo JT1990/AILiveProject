@@ -1,4 +1,36 @@
-#pragma once
+﻿#pragma once
+
+// =============================================================================
+// 中文教学：StoryScenarioDirector.h —— 「两个 NPC 走到一起对话」剧情 actor
+//
+// 这是 Act 系列之外的另一个 Director，做更轻量的 2-NPC 对话场景：
+//   1) NPC2 走到 NPC1 附近的会面点
+//   2) 到达后停下、轮流播放预设台词（DialogueLines）
+//   3) 全部说完后 NPC2 走回原位
+//
+// 与 Act01/02 的对比：
+//   - Act01：剧情触发器（开门 + 走到电视 + 播视频）
+//   - Act02：LLM 驱动的复杂对话主循环
+//   - StoryScenarioDirector：固定台词的简单 2-NPC 演出（早期实验用，没接 LLM）
+//
+// 状态机 EStoryScenarioState：
+//   Idle → MovingToMeeting → Dialogue → Returning → Idle
+//
+// 关键 UE 概念：
+//
+//   1) ATargetPoint
+//      场景里的「锚点 actor」，提供 transform 但没渲染。常用于剧情节点 /
+//      AI 移动目标。本类运行时 SpawnActor 几个 TargetPoint 当移动目标。
+//
+//   2) UPROPERTY(Transient)
+//      标记字段「不参与序列化」（不存关卡 / 不存 SaveGame）。运行时缓存的
+//      指针适合用 Transient ——存档没意义，PIE 重启自然重建。
+//
+//   3) FTimerHandle 用法集中演示
+//      MovementPollTimer / SettleTimer / DialogueTimer 三个 handle 演示了
+//      多个并行 timer 的管理：每个用途一个 handle，结束/取消时一个个 ClearTimer。
+//      组件 EndPlay 必须清理 handle 防止 dangling 回调。
+// =============================================================================
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"

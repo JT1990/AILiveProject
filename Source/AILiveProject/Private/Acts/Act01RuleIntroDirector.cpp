@@ -1,3 +1,37 @@
+﻿// =============================================================================
+// 中文教学：Act01RuleIntroDirector.cpp —— 第一幕剧情导演实现
+//
+// 文件大概分四段：
+//   1) BeginPlay/Tick/EndPlay 生命周期 + 状态机推进
+//   2) 开门 (StartOpeningDoors / TickOpenDoors / ResetDoorsToClosed)
+//   3) NPC 移动 (StartNPCMovement / TickNPCMovement) + 等待全部 idle
+//   4) 视频播放 (StartVideo / HandleVideoEnded / fallback timeout)
+//   5) Console 命令注册（debug 用）
+//
+// 关键 UE 概念：
+//
+//   1) AIController + UNavMoverComponent
+//      移动指令是发给 AIController 的（因为 NPC 是 AI 控制的 Pawn）。
+//      项目用 GASP Mover 2.0 的 NavMoverComponent 寻路；指令通过
+//      ScatterMover 组件下发。
+//
+//   2) FRotator + 相对/世界旋转
+//      门的开关用相对旋转（绕铰链轴转一定角度）。FCachedDoor 缓存关闭时的
+//      旋转，开门时插值到 ClosedRelativeRotation + DoorOpenRelativeRotation。
+//
+//   3) TWeakObjectPtr<USceneComponent>
+//      关门用的 SceneComponent 缓存指针——弱引用避免野指针，每次访问要
+//      `IsValid()` 检查。万一关卡中 actor 被销毁，weak ptr 会自动失效。
+//
+//   4) UEnvQuery
+//      EQS（Environment Query System）的查询模板。给定空间约束（"找最近的非
+//      占用 nav 网格点"）让 AI 系统挑目标位置。NPC 散开走到电视前用它。
+//
+//   5) UFUNCTION() 标记的 HandleVideoEnded
+//      不带参数的 UFUNCTION 标记让函数能被 UE 反射系统找到，从而能 bind 给
+//      dynamic delegate（如 MediaPlate 的 OnEnded 事件）。raw 函数 binding 不需要它。
+// =============================================================================
+
 #include "Acts/Act01RuleIntroDirector.h"
 
 #include "AIController.h"

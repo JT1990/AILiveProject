@@ -1,13 +1,57 @@
-#pragma once
+﻿#pragma once
+
+// =============================================================================
+// 中文教学：Act02RuleReceiveDirector.h —— 「第二幕」LLM 驱动的对话剧情导演
+//
+// 这是项目最复杂的 Director Actor。Act01 只播视频，Act02 是真正的 LLM 对话主循环：
+//   - 10 个 NPC 围着电视，依次让每个 NPC 思考 + 发言
+//   - 每个 NPC 的思考调用「Reasoner LLM」（自己的 provider），输出四段 raw text
+//   - 接着 Parser LLM 把 raw text 切成 4 段 JSON
+//   - Bid 协议：所有 NPC 提 urgency 分数，Director 挑赢家发言（floor control）
+//   - 输给的 NPC 的 intended 留在 EventStore，赢家的 intended 转 public
+//   - PromptAssembler 把 EventStore 历史拼成下一拍的 prompt
+//   - 完整一拍写入 EventStore，hash 链 + projector 同步更新
+//
+// 状态机 EAct02State：
+//   Idle → PrescatterToTV (NPC 走到电视前) →
+//   SeedDispatch (开局首拍，无历史；下发种子 prompt) → SeedAwait (等 LLM) → SeedSpeak (TTS+A2F)
+//   → GatedAwaitNext (等用户按下 NextPhaseKey)
+//   → ReactionDispatch (后续拍，带历史) → ReactionAwait → ReactionSpeak → 回 GatedAwaitNext
+//
+// 关键 UE / C++ 概念：
+//
+//   1) FAct02NPCRuntime
+//      纯 C++ 结构（不进反射），把每个 NPC 的「配置 + 弱引用 Pawn」打包。
+//      Director 自己持有 TArray<FAct02NPCRuntime>。
+//
+//   2) TWeakObjectPtr<AActor>
+//      弱指针 + IsValid() 检查：Pawn 可能在剧情进行中被销毁（VisualOverride 切身体），
+//      用 weak ptr 避免野指针访问；每次用前先 IsValid()。
+//
+//   3) Async/Future.h
+//      包含 TFuture<T> / TPromise<T>：异步计算结果占位符。Reasoner LLM 调用
+//      跑在 ThreadPool 后台线程，结果通过 TFuture<FResult> 回到游戏线程消费。
+//
+//   4) ReceiveActorBeginPlay / ReceiveActorEndPlay
+//      与 BP override 不同名字 —— 见 .cpp 教学注释。
+//
+// 阅读建议（顺序）：
+//   1) BeginAct02 + 构造默认值，理解配置参数
+//   2) StartPrescatterToTV + 状态切换
+//   3) DispatchReasonerForNPC：每个 NPC 怎么发 LLM 请求
+//   4) ApplyBidsAndChooseWinner：怎么挑赢家
+//   5) PromoteWinnerToPublic + 写入 EventStore
+//   6) Tick 推进各个 await 状态
+// =============================================================================
 
 #include "CoreMinimal.h"
-#include "Async/Future.h"
+#include "Async/Future.h"                  // TFuture / TPromise 异步占位符
 #include "GameFramework/Actor.h"
 #include "InputCoreTypes.h"
-#include "LLM/AILiveAgentRoster.h"
-#include "LLM/AILiveParserClient.h"
-#include "LLM/OpenAIChatClient.h"
-#include "Memory/AILiveBidTypes.h"
+#include "LLM/AILiveAgentRoster.h"         // FNPCAgentConfig
+#include "LLM/AILiveParserClient.h"        // FParseResult
+#include "LLM/OpenAIChatClient.h"          // FRequest / FResult
+#include "Memory/AILiveBidTypes.h"         // FAILiveBid / FAILiveTickResolution
 #include "Act02RuleReceiveDirector.generated.h"
 
 class USceneComponent;

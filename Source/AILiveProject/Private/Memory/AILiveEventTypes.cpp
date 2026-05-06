@@ -1,3 +1,20 @@
+﻿// =============================================================================
+// 中文教学：AILiveEventTypes.cpp —— 枚举↔字符串映射 + JSON 数组工具实现
+//
+// 文件结构：
+//   1) DEFINE_LOG_CATEGORY(LogAILiveMemory) —— 把头里的 EXTERN 声明落实
+//   2) *ToString：每个枚举一个 switch；default 不写（UE 编译器会就缺枚举值警告）
+//      每个函数最后都有兜底 return —— 防止 default 漏掉新枚举值时编译失败
+//   3) *FromString：if/else 链；未知字符串 → 默认值 + Warning 日志
+//   4) ArrayToJsonString / JsonStringToArray：UE JSON API 包装
+//
+// 设计取舍：
+//   - 不用 TMap<EnumValue, FString> 查表：枚举值少，switch 编译器能优化为跳转表，
+//     可读性更好；少几行代码也少几次 cache miss
+//   - 未知字符串不抛异常：UE 项目惯例「记日志 + 默认值」；让 PIE 长跑场景下
+//     遇到旧 schema 数据也能继续运行（写一条 Warning 而非 crash）
+// =============================================================================
+
 #include "Memory/AILiveEventTypes.h"
 
 #include "Dom/JsonValue.h"
@@ -5,6 +22,8 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
+// 头里 DECLARE_LOG_CATEGORY_EXTERN 是「外部声明」；这里 DEFINE 才生成实例。
+// 所有用到 LogAILiveMemory 的 .cpp 都靠链接器找到这一份定义。
 DEFINE_LOG_CATEGORY(LogAILiveMemory);
 
 namespace AILiveEvent
@@ -171,13 +190,16 @@ namespace AILiveEvent
 		return EAILiveCommitmentStatus::Active;
 	}
 
+	// 把 TArray<FString> 序列化成 JSON 数组字符串。
+	// 中文教学：UE 没有直接「数组 → JSON」便利函数，要先包装成 TArray<TSharedPtr<FJsonValue>>。
+	// 输出形如：["NPC01","NPC02","public"]
 	FString ArrayToJsonString(const TArray<FString>& A)
 	{
 		TArray<TSharedPtr<FJsonValue>> Items;
 		Items.Reserve(A.Num());
 		for (const FString& S : A)
 		{
-			Items.Add(MakeShared<FJsonValueString>(S));
+			Items.Add(MakeShared<FJsonValueString>(S));   // 每个字符串包成 JsonValue
 		}
 		FString Out;
 		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);

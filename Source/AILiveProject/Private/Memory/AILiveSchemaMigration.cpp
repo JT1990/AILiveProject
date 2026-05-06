@@ -1,9 +1,41 @@
+﻿// =============================================================================
+// 中文教学：AILiveSchemaMigration.cpp —— SQLite DDL + schema 版本迁移
+//
+// 这是什么：
+//   集中存放所有「建表 / 建索引 / 建触发器 / 建 FTS」的 SQL 字符串常量，以及
+//   schema 版本演进的「迁移函数」。
+//
+// 文件结构：
+//   1) GameDb_*  ：当前局 .db 的所有 DDL 语句（events / commitments / projector 表 ...）
+//   2) MetaDb_*  ：跨局 _meta.db 的所有 DDL 语句（agent_registry / lifecycle_events ...）
+//   3) ApplyMigrationV0ToV1：把 schema 版本从 0 升到 1（首次建库走这个）
+//
+// 为什么单独成文件：
+//   EventStoreSubsystem.cpp 已经 4600 行，把巨大的 DDL 字符串再塞进去会让
+//   主流程更难读。把它们抽到本文件，主文件只 #include 这边的函数即可。
+//
+// 关键概念：
+//   1) AppendOnly via TRIGGER … BEFORE UPDATE/DELETE → ABORT
+//      events 表绝不允许 UPDATE 或 DELETE。SQLite 触发器在写之前检查，
+//      不合规直接 ABORT 整个事务。这是 hash 链一致性的硬保证。
+//
+//   2) FTS5 + tokenizer
+//      SQLite FTS5（全文搜索扩展）支持的中文 tokenizer 取决于 SQLite 编译选项。
+//      项目运行时 detect 是「trigram」（短词搜索）还是「unicode61」（拉丁词）。
+//      SearchHistory 据此决定走 MATCH 还是 LIKE。
+//
+//   3) IF NOT EXISTS
+//      DDL 加这个保证幂等。第二次 BeginGame 不会因表已存在报错。
+// =============================================================================
+
 #include "CoreMinimal.h"
 #include "Memory/AILiveEventTypes.h"
 #include "SQLiteDatabase.h"
 
 namespace AILiveSchemaMigration
 {
+	// schema 版本 0 → 1 的迁移函数。中文教学：未来 schema 改动要加 V1ToV2 / V2ToV3 等。
+	// 调用方按版本号顺序串起来跑（在 EventStoreSubsystem::RunMigrations 里）。
 	bool ApplyMigrationV0ToV1(FSQLiteDatabase& InDb, bool bIsMetaDb, const TCHAR* FtsTokenizer);
 }
 

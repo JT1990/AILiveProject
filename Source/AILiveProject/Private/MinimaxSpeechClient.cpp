@@ -1,3 +1,26 @@
+﻿// =============================================================================
+// 中文教学：MinimaxSpeechClient.cpp —— TTS HTTP 实现
+//
+// 流程：
+//   1) BuildRequestBody：把 FRequest 序列化成 MiniMax 协议的 JSON（model/text/
+//      voice_setting/audio_setting）
+//   2) HTTP POST → ProcessRequestUntilComplete 阻塞等结果
+//   3) 解析响应 JSON：检 base_resp.status_code、抓 trace_id、取 data.audio（hex 编码）
+//   4) DecodeHexAudio：每 2 个 hex 字符还原 1 字节，重解释为 int16 数组
+//
+// 为什么用 hex 而不是 base64：MiniMax 协议要求 output_format="hex"。每字节
+// 用 2 个 ASCII 字符表示，体积是 base64 的 1.33 倍但解析最简单。
+//
+// 关键 C++ 知识点：
+//   1) FORCEINLINE
+//      强制编译器内联（不仅仅是建议 inline）。HexDigit 是热路径辅助函数，
+//      内联省掉调用开销。Editor 调试时可能仍不内联。
+//
+//   2) reinterpret_cast<uint8*>(OutSamples.GetData())
+//      把 int16* 强转 uint8* 当字节数组用——同一段内存，按字节填充。
+//      x86/ARM 都是小端，刚好与协议字节序对齐（lo byte 在前）。
+// =============================================================================
+
 #include "MinimaxSpeechClient.h"
 
 #include "HttpModule.h"

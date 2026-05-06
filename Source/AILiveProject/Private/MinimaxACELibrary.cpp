@@ -1,3 +1,49 @@
+﻿// =============================================================================
+// 中文教学：MinimaxACELibrary.cpp —— TTS + A2F + AI 感知 三件事的总编排实现
+//
+// 这是 ~470 行的「整合层」。所有 TTS 入口都在这里实现，分工：
+//
+//   - PrewarmA2F：首次发声前预编译 TRT，避免冷启动延迟
+//   - GetAvailableA2FProviders：列出当前可用的 A2F provider（取决于安装的插件）
+//   - GetMinimaxApiKeyFromProjectEnv：从 .env 读 minimax 密钥（开发期专用）
+//   - TriggerMinimaxSpeech：基础版本，仅 TTS + A2F，没听觉感知上报
+//   - TriggerMinimaxSpeechWithNoise：基础版 + AISense_Hearing 噪声事件（NPC 能感知）
+//   - TriggerMinimaxSpeechFromPawnWithNoise：BP 友好包装（解析 VisualOverride child actor）
+//   - TriggerMinimaxSpeechFromPawnNative：C++ only 版，带完成 delegate
+//   - GetVisualOverrideAudioTarget：BP 工具，从 Pawn 找到挂 ACE 组件的可见 actor
+//
+// 关键 UE / C++ 概念：
+//
+//   1) check(IsInGameThread())
+//      断言只在游戏线程调。失败则 PIE crash。GetOrAddCurveSource 必须在
+//      GameThread 因为它要 NewObject + RegisterComponent，那些都不是线程安全的。
+//
+//   2) FindComponentByClass<T>() / NewObject<T>() / SetupAttachment / RegisterComponent
+//      运行时给 actor 挂组件的标准三步：
+//        a) 先查有没有现成的 → FindComponentByClass
+//        b) 没有就 NewObject 创建
+//        c) SetupAttachment + RegisterComponent + AddInstanceComponent
+//      漏 RegisterComponent 组件不会 tick / 接事件。
+//
+//   3) TWeakObjectPtr 跨线程守 actor
+//      LLM 调用动辄几秒，actor 可能在期间被销毁（玩家退出 PIE / 关卡切换）。
+//      把 weak ptr 闭包捕获到 lambda；切回 GameThread 后 .Get() / .IsValid() 检查。
+//
+//   4) AsyncTask(ENamedThreads::GameThread, [...](){ ... })
+//      把 lambda 调度到游戏线程下一帧执行。所有 ACE/A2F/AISense 调用都必须
+//      在游戏线程。
+//
+//   5) FACERuntimeModule::AnimateFromAudioSamples
+//      ACE 模块的核心入口：传 PCM 数据 + provider name → 它内部把数据流送给
+//      A2F 引擎，由 UACEAudioCurveSourceComponent 输出 curve 给 face AnimBP。
+//      调用是阻塞-streaming（持续数秒），所以噪声事件要在这之前发，避免命中
+//      推迟到音频几乎播完时。
+//
+//   6) UAISense_Hearing::ReportNoiseEvent
+//      给 AI Perception 系统报一个噪声刺激事件。线程不安全，必须 GameThread。
+//      所有听见这个声音的 AIController 会收到 OnPerceptionUpdated 回调。
+// =============================================================================
+
 #include "MinimaxACELibrary.h"
 
 #include "MinimaxSpeechClient.h"
@@ -10,12 +56,12 @@
 #include "Misc/Paths.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 
-#include "ACERuntimeModule.h"
-#include "ACEAudioCurveSourceComponent.h"
-#include "A2FProvider.h"
+#include "ACERuntimeModule.h"                  // FACERuntimeModule
+#include "ACEAudioCurveSourceComponent.h"      // UACEAudioCurveSourceComponent
+#include "A2FProvider.h"                       // IA2FProvider 列出可用 provider
 
 #include "GameFramework/Pawn.h"
-#include "Perception/AISense_Hearing.h"
+#include "Perception/AISense_Hearing.h"        // UAISense_Hearing::ReportNoiseEvent
 
 DEFINE_LOG_CATEGORY_STATIC(LogMinimaxACE, Log, All);
 

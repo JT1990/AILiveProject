@@ -1,3 +1,65 @@
+﻿// =============================================================================
+// 中文教学：AILiveEventStoreSubsystem.cpp —— 4600+ 行的事件存储实现
+//
+// 这是项目最大的单文件。不要试图一口气读完——按下面阅读路径分段啃。
+//
+// 文件结构（按行号粗略分段）：
+//   1)   ~1-200   ：includes + 常量 + canonical JSON 编码（hash 链基础）
+//   2)  ~200-400  ：UUIDv7 生成 + canonical JSON 工具
+//   3)  ~400-700  ：Initialize / Deinitialize / BeginGame / EndGame / Tick
+//   4)  ~700-1100 ：ApplyPragmas / EnsureSchema / RunMigrations
+//   5) ~1100-1600 ：AppendEvent / AppendEventsAtomically / 校验
+//   6) ~1600-2200 ：InsertEventBypassValidation_LockHeld / ComputeEventHash
+//   7) ~2200-2800 ：Quote / QuoteByRound / QuoteRecentRounds / List* 读 API
+//   8) ~2800-3400 ：T7 Bid 协议 + ResolveFloor + RuntimeAdj
+//   9) ~3400-4000 ：T8 Projector：Project*_LockHeld 系列 + RebuildProjections
+//  10) ~4000-4649 ：T9 Resume + TriggerDeleteExecuted + Console 命令
+//
+// 阅读路径建议（C++ 小白先看这几个函数，看完就懂 80%）：
+//
+//   ① BeginGame / EndGame：理解 SQLite 连接与 schema 怎么挂上来
+//   ② AppendEvent → AppendEventsAtomically → InsertEventBypassValidation_LockHeld
+//      ：理解写入流水线（校验 → 锁 → 事务 → hash 链 → INSERT）
+//   ③ CanonicalJsonOf + ComputeEventHash：理解 hash 链怎么算
+//   ④ Quote：理解视角隔离（visibility EXISTS 的 SQL 模式）
+//   ⑤ RebuildProjections：理解 projector 怎么从 events 重建派生表
+//
+// 关键 UE / C++ 概念（贯穿全文件）：
+//
+//   1) FSQLitePreparedStatement
+//      预编译语句 = 把 SQL 字符串提前编译，避免每次执行都要解析。
+//      流程：Create(Db, "SELECT ... WHERE x=?1") → SetBindingValueByIndex(1, value)
+//      → Step() 取一行 → GetColumnValueByIndex(N, OutValue)。
+//      Step 返回 ESQLitePreparedStatementStepResult：Row（有数据）/ Done（结束）/ Error。
+//      ⚠️ 必须用「预编译 + 参数绑定」防 SQL 注入；绝不要字符串拼接 SQL！
+//
+//   2) BEGIN IMMEDIATE / COMMIT / ROLLBACK
+//      显式事务。本文件的写流程都是：
+//        BEGIN IMMEDIATE; → 多条 INSERT → COMMIT;  失败则 ROLLBACK;
+//      `IMMEDIATE` 比默认 `BEGIN`（DEFERRED）更早申请 RESERVED 锁，
+//      避免后续升级为 EXCLUSIVE 时死锁。
+//
+//   3) FScopeLock + WriteMutex
+//      写流程统一在 WriteMutex 下进行，避免多线程同时 BEGIN 导致 SQLite busy 错误。
+//      `*_LockHeld` 后缀的函数表示「调用方必须已经持锁」（不能自己再 lock）。
+//
+//   4) Canonical JSON
+//      Hash 链要求两台机器算出来的 hash 字节级相同。所以序列化时必须：
+//        - 字段按字典序固定顺序
+//        - 数字格式固定（不能让 1.0 vs 1 出现差异）
+//        - 不能含运行时变化的字段（tick_no 故意不入 canonical，因为它是写入时才填）
+//
+//   5) UUIDv7
+//      时间排序的 UUID 变种（前 48 bit 是毫秒时间戳）。事件 EventId 用它，
+//      让按字符串排序也能近似按时间排序，调试方便。
+//
+//   6) WAL 模式 + 二次连接限制（项目踩过的坑）
+//      SQLite WAL 模式下，同进程开第二个连接读 -shm 共享映射会失败（IOERR）。
+//      所以 SchemaCheck 等读取必须走主连接 Db，不能新开连接——
+//      QueryMetaSchemaRegistry / RecomputeHashChainOnMainConnection 都是
+//      为了规避这条限制设计的「内联读」方法。
+// =============================================================================
+
 #include "Memory/AILiveEventStoreSubsystem.h"
 
 #include "LLM/AILiveParserVersion.h"

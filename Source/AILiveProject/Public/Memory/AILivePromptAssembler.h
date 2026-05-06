@@ -1,7 +1,39 @@
-#pragma once
+﻿#pragma once
+
+// =============================================================================
+// 中文教学：AILivePromptAssembler.h —— 把事件流拼装成 prompt 文本
+//
+// LLM-driven NPC 的核心问题：每次 NPC 要思考时，给它喂多少历史？
+//   - 太多 → 超 context window，钱多还失忆
+//   - 太少 → 失忆、自我矛盾、违背承诺
+//   AILive 用「分段 + 优先级 + 必保留段」三件事解决：把 prompt 拆成 9 个段
+//   （见 principles §4.3），有些段「必保留 (must-keep)」，超长时只丢可丢段。
+//
+// 关键设计：
+//   - 纯 namespace 函数，无状态，所有数据通过 Store 引用读取（不持有指针）
+//   - 不调 LLM；输出的 prompt 字符串才送给 LLM
+//   - 不读文件系统：GameRule 由调用方预加载传入（避免每次拼 prompt 都重新读盘）
+//
+// 9 个段（见 .cpp 内详细标注）：
+//   System 端：[INVARIANT REMINDERS] / [CURRENT TICK] / [OUTPUT SCHEMA]
+//   User 端：
+//     必保留 ：[YOUR OWN COMPLETE STATEMENT HISTORY]
+//              [YOUR RECENT INTENDED-BUT-NOT-SAID]
+//              [RECENT NEAR-WINDOW PUBLIC EVENTS]
+//     可丢 ：[YOUR NOTES TO FUTURE SELF]
+//             [YOUR COMMITMENTS]
+//             [PRIVATE / NON-PUBLIC EVENTS ADDRESSED TO YOU]
+//             [PREFETCHED EVIDENCE FROM REFERENCED ROUND N] (条件触发)
+//
+// 关键 C++ 知识点：
+//   - 前向声明 (forward declaration)：`class UAILiveEventStoreSubsystem;`
+//     头里只用到指针/引用，**不**需要完整类型 → 用前向声明，避免 include 链膨胀。
+//     用到完整类型（成员调用、按值持有）才需要 #include 真正的头。
+// =============================================================================
 
 #include "CoreMinimal.h"
 
+// 前向声明：这两个类型在本头里只作为指针/引用参数出现，不需要看到完整定义
 class UAILiveEventStoreSubsystem;
 struct FNPCAgentConfig;
 

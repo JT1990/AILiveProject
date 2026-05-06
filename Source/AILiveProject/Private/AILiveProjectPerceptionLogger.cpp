@@ -1,3 +1,26 @@
+﻿// =============================================================================
+// 中文教学：AILiveProjectPerceptionLogger.cpp —— 感知收集 + BP 工具实现
+//
+// 文件做这几件事：
+//   1) GatherSightPerception：从 AIController 的 PerceptionComponent 抓出当前
+//      sight stimulus 列表，每个匹配 IAILiveAgent 的 actor 算出距离/方位/相对偏航
+//   2) GatherHearingPerception：同上但是 hearing
+//   3) Log* 系列：把上面收集结果打到 Output Log（debug 用）
+//   4) ClaimFirstSlotInActor：在指定 SmartObject actor 上找首个空闲 slot 申领
+//
+// 关键 UE 概念：
+//   1) Implements<UAILiveAgent>()
+//      检查 actor 是否实现了 IAILiveAgent 接口（注意是 U 前缀的 marker class）。
+//      所有 NPC actor 都该实现 IAILiveAgent，这样过滤逻辑就能区分敌我。
+//
+//   2) FRotator::FromDirection / FVector::Size
+//      方向 → 偏航角 / 距离的标准 UE 数学。常用工具。
+//
+//   3) AIPerceptionComponent::GetCurrentlyPerceivedActors
+//      只取「当前还能感知到」的 actor（excludes 已离开视野超过 max age 的）。
+//      想拿历史记录用 GetPerceivedActors（不带 Currently 前缀）。
+// =============================================================================
+
 #include "AILiveProjectPerceptionLogger.h"
 
 #include "AIController.h"

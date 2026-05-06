@@ -1,4 +1,81 @@
-#pragma once
+﻿#pragma once
+
+// =============================================================================
+// 中文教学：AILiveEventStoreSubsystem.h —— AILive 的「事件存储中枢」
+//
+// 这是整个系统最核心的类。一个 GameInstance 一份单例，挂着两个 SQLite 连接：
+//   - Db     ：当前局的事件流 `Saved/Games/<GameId>.db`
+//   - MetaDb ：跨局共享的 agent registry / lifecycle  `_meta.db`
+//
+// 架构总览（参考 PRD memory_principles.md）：
+//
+//   ┌──────────────────────────────────────────────────────────────────┐
+//   │                   UAILiveEventStoreSubsystem                      │
+//   │  ┌─────────────────┐    ┌──────────────────┐    ┌──────────────┐│
+//   │  │  Append* API    │    │   读 API (T4)    │    │ Projector  ││
+//   │  │  (写入 +        │    │   Quote*/List*   │    │ (T8 投影)  ││
+//   │  │   hash 链)      │    │   带视角隔离      │    │            ││
+//   │  └────────┬────────┘    └────────┬─────────┘    └──────┬─────┘│
+//   │           │                       │                      │      │
+//   │           ▼                       ▼                      ▼      │
+//   │  ┌────────────────────────────────────────────────────────────┐│
+//   │  │              SQLite (events / projections)                  ││
+//   │  │  events / commitments / vote_history / alliance_state /     ││
+//   │  │  agent_view_state / events_fts (FTS5)                       ││
+//   │  └────────────────────────────────────────────────────────────┘│
+//   └──────────────────────────────────────────────────────────────────┘
+//
+// 三个核心承诺（任一违反都是协议 bug）：
+//
+//   1) Append-only + Hash 链
+//      events 表绝不允许 UPDATE / DELETE（SQL trigger 强制 ABORT），每条事件
+//      hash = SHA-256(prev_hash || canonical_json(event))。VerifyHashChain()
+//      可校验从头到尾未篡改。
+//
+//   2) 视角隔离
+//      所有读 API 都接 InViewer 参数，SQL 层用 EXISTS(visibility[]) 强制过滤；
+//      传 "self" 字面量一律返回不可见——self 只是 prompt 模板的相对语义。
+//      调用方必须传具体 agent_id（"NPC03" 等）或特殊值 "public" / "system" / "orchestrator"。
+//
+//   3) Projector 是纯函数
+//      RebuildProjections() 重放 events 重建所有派生表（commitments / vote_history /
+//      alliance_state / agent_view_state）。任意时刻调用都得到相同结果（幂等）。
+//      事故恢复就靠它 —— 投影表损坏可以从源 events 重建。
+//
+// 重要 UE / C++ 概念：
+//
+//   1) UGameInstanceSubsystem
+//      UE 的一种 Subsystem 模式（编辑器 / GameInstance / World / LocalPlayer 各
+//      一种）。生命周期：UGameInstance 创建/销毁时同步。GameInstance 在游戏
+//      启动到关闭期间一直存在；多 PIE 多 GameInstance 互不干扰。
+//      访问方式：`World->GetGameInstance()->GetSubsystem<UAILiveEventStoreSubsystem>()`
+//      不需要在 BP 里手动 spawn。
+//
+//   2) virtual Initialize / Deinitialize
+//      Subsystem 的两个生命周期钩子。Initialize 时连 SQLite，Deinitialize 时断开。
+//      与 Actor 的 BeginPlay/EndPlay 不同——Subsystem 不依赖 World。
+//
+//   3) FCriticalSection WriteMutex (mutable)
+//      多线程并发 Append 时保护 SQLite + hash 链 cache。`mutable` 让它能在
+//      const 方法里被锁（读 API 也要在某些场景下短暂持锁，如重新加载 cache）。
+//
+//   4) BEGIN IMMEDIATE / COMMIT / ROLLBACK
+//      每次 AppendEventsAtomically 包一个 SQL 事务，部分失败整体回滚。
+//      `BEGIN IMMEDIATE` 比 `BEGIN` 更激进——立刻申请 RESERVED 锁，避免后续
+//      升级到 EXCLUSIVE 时与读连接冲突。详见实现。
+//
+//   5) UFUNCTION(BlueprintCallable, Category = "AILive|Memory")
+//      读 API 主要给 BP 调试 / Console 命令用。写 API 都是 C++ 直调，不需要
+//      暴露给 BP（且写入要严格走预校验，BP 的随手调用会绕过 ValidateVisibility）。
+//
+// 阅读建议：
+//   1) 先看 BeginGame / EndGame 理解 SQLite 文件挂接和卸载
+//   2) 看 AppendEvent / AppendEventsAtomically + InsertEventBypassValidation_LockHeld
+//      理解写入流水线：校验 → 锁 → BEGIN → 计算 hash → INSERT → COMMIT
+//   3) 看 Quote / QuoteByRound / QuoteRecentRounds 理解视角隔离 SQL 模式
+//   4) 看 VerifyHashChain / RecomputeHashChainOnMainConnection 理解一致性校验
+//   5) 看 RebuildProjections + Project*_LockHeld 理解四张投影表怎么重建
+// =============================================================================
 
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
@@ -14,14 +91,18 @@ class AILIVEPROJECT_API UAILiveEventStoreSubsystem : public UGameInstanceSubsyst
 	GENERATED_BODY()
 
 public:
-	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
-	virtual void Deinitialize() override;
+	// UE Subsystem 生命周期钩子
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;  // GameInstance 启动时
+	virtual void Deinitialize() override;                                     // GameInstance 关闭时
 
+	// 局生命周期。InGameId 决定 Saved/Games/<InGameId>.db 文件名。
+	// 中文教学：BeginGame 会创建/打开数据库 + ApplyPragmas + EnsureSchema +
+	// LoadHashChainTail（恢复 cache 末尾 seq+hash）。EndGame 关闭连接。
 	bool BeginGame(const FString& InGameId);
 	void EndGame();
 
-	bool IsGameOpen() const { return Db.IsValid(); }
-	const FString& GetCurrentGameId() const { return CurrentGameId; }
+	bool IsGameOpen() const { return Db.IsValid(); }                   // inline 内联 getter
+	const FString& GetCurrentGameId() const { return CurrentGameId; }  // 当前局 ID
 
 	/**
 	 * T9 — Resume protocol (impl §5.4 / principles §5.2bis.4 / §7.3).
@@ -81,6 +162,9 @@ public:
 	 * On rejection (visibility / payload validation failed) writes one
 	 * system.parse_failed event to the truth log and returns -1.
 	 */
+	// 写入单事件。中文教学：调用方填好 InOutEvent 业务字段后传入；本函数会
+	// 回填 Seq/EventId/PrevEventHash/EventHash。失败返回 -1（同时会写一条
+	// system.parse_failed 留痕）。线程安全（内部加 WriteMutex）。
 	int64 AppendEvent(FAILiveEvent& InOutEvent);
 
 	/**
@@ -93,6 +177,9 @@ public:
 	 * (which takes the lock itself), so there is no nested-lock / nested-BEGIN
 	 * risk. The actual writes happen under WriteMutex with BEGIN IMMEDIATE.
 	 */
+	// 批量原子写入。中文教学：一次写多条事件作为一个事务——要么全成功要么
+	// 全失败回滚。这是写跨事件不变量（如 commit + corresponding intended）
+	// 的唯一安全方式。返回值是组内第一条事件的 Seq。
 	int64 AppendEventsAtomically(TArray<FAILiveEvent>& InOutEvents);
 
 	/**
@@ -100,6 +187,9 @@ public:
 	 * CachedCurrentTickNo so subsequent inserts auto-fill events.tick_no.
 	 * On failure restores the previous tick_no cache. Returns the anchor seq.
 	 */
+	// 中文教学：开始一个新 tick（一拍）。每个 tick 是一组 NPC 同步思考的边界。
+	// BeginTick 会写一条 orchestrator.tick_anchor 事件标记拍号，并更新本 Subsystem
+	// 内部缓存 CachedCurrentTickNo。后续 Append* 会自动用这个 tick_no 填 events.tick_no 列。
 	int64 BeginTick(int32 InTickNo);
 
 	/**
@@ -108,7 +198,11 @@ public:
 	 */
 	int64 GetCurrentTickNo() const { return CachedCurrentTickNo; }
 
+	// 调试 / debug 用。直接按 actor 拉事件，无视角隔离。生产代码不要用。
 	TArray<FAILiveEvent> QueryEventsByActor(const FString& Actor, int32 LimitCount) const;
+
+	// 中文教学：从头到尾校验 hash 链未被篡改。OutFirstBadSeq 会写入第一个出错的
+	// seq（用于定位损坏起点）。返回 true = 完整无损。这是事故诊断的兜底工具。
 	bool VerifyHashChain(int64& OutFirstBadSeq) const;
 
 	// === T4 — 读 API（视角隔离 JOIN 强制）。
@@ -296,6 +390,9 @@ public:
 	static const TCHAR* const kGenesisHash;
 
 private:
+	// ── 私有辅助。生命周期 / schema 维护 ──────────────────────────────
+	// 中文教学：private 区是「实现细节」，外部模块看不到。这里把 SQLite
+	// pragma 配置、schema 创建、版本迁移、Meta DB 注册表初始化都封装起来。
 	void ApplyPragmas(FSQLiteDatabase& InDb);
 	bool EnsureSchema(FSQLiteDatabase& InDb, bool bIsMetaDb);
 	bool RunMigrations(FSQLiteDatabase& InDb, int32 FromVersion, int32 ToVersion, bool bIsMetaDb, const TCHAR* FtsTokenizer);
@@ -354,14 +451,18 @@ private:
 
 	static FString GenerateUuidV7();
 
-	FSQLiteDatabase Db;
-	FSQLiteDatabase MetaDb;
-	FString CurrentGameId;
+	// ── 实例数据。所有运行时状态都在这里 ──────────────────────────────
+	FSQLiteDatabase Db;                      // 当前局连接 Saved/Games/<GameId>.db
+	FSQLiteDatabase MetaDb;                  // 跨局共享连接 _meta.db
+	FString CurrentGameId;                   // 当前局 ID（与 Db 文件名同步）
 
+	// 中文教学：mutable + const 方法
+	//   const 方法理论上不能修改成员，但同步原语（mutex）需要在 const 方法里加锁。
+	//   `mutable` 关键字给 WriteMutex 开个豁免：const 方法也能 lock 它。
 	mutable FCriticalSection WriteMutex;
-	int64 CachedLastSeq = 0;
-	FString CachedLastHash;
-	int64 CachedCurrentTickNo = 0;
+	int64 CachedLastSeq = 0;                 // hash 链尾 seq（避免每次 Append 都查盘）
+	FString CachedLastHash;                  // hash 链尾值
+	int64 CachedCurrentTickNo = 0;           // 当前 tick_no（BeginTick 写入）
 
 	/** events_fts 表实际使用的 tokenizer（"trigram" / "unicode61"），EnsureSchema 时缓存。
 	 *  SearchHistory 据此决定 LIKE 还是 MATCH 路径。 */

@@ -1,3 +1,22 @@
+﻿// =============================================================================
+// 中文教学：SightMemoryComponent.cpp —— 视觉记忆组件实现
+//
+// 流程：
+//   1) BeginPlay：尝试找 owner actor 的 AIController + 它的 PerceptionComponent
+//   2) 找到则 bind OnPerceptionUpdated → OnPerceptionUpdated 函数
+//   3) 找不到（AIController 还没 spawn 上来）→ 设 timer 0.1s 后重试
+//   4) 收到事件后更新 LastSeenLocations / CurrentlyVisibleActors
+//      新增 → 触发 OnSightEnter；丢失 → 触发 OnSightExit
+//
+// 关键 UE 概念：
+//   - TWeakObjectPtr 作 TMap key
+//      `TMap<TWeakObjectPtr<AActor>, FVector>`：当 actor 被销毁时，weak ptr
+//      自动失效，但在 TMap 里仍占位置（key 不会自动移除）。需要时遍历清理
+//      过期 entry。
+//   - GetWorld()->GetTimerManager().SetTimer
+//      UE 的标准延迟回调。FTimerHandle 用来取消（ClearTimer）。
+// =============================================================================
+
 #include "SightMemoryComponent.h"
 
 #include "AIController.h"
