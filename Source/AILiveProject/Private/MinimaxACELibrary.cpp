@@ -40,8 +40,9 @@
 //      推迟到音频几乎播完时。
 //
 //   6) UAISense_Hearing::ReportNoiseEvent
-//      给 AI Perception 系统报一个噪声刺激事件。线程不安全，必须 GameThread。
-//      所有听见这个声音的 AIController 会收到 OnPerceptionUpdated 回调。
+//      给 AI Perception 系统报一个噪声刺激事件。UE 约定 perception 系统在
+//      GameThread 调用（跨线程使用未文档化、不要冒险）。所有听见这个声音的
+//      AIController 会收到 OnPerceptionUpdated 回调。
 // =============================================================================
 
 #include "MinimaxACELibrary.h"

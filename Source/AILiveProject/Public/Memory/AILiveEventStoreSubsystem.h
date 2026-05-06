@@ -29,8 +29,11 @@
 //
 //   1) Append-only + Hash 链
 //      events 表绝不允许 UPDATE / DELETE（SQL trigger 强制 ABORT），每条事件
-//      hash = SHA-256(prev_hash || canonical_json(event))。VerifyHashChain()
-//      可校验从头到尾未篡改。
+//      hash = SHA-256(prev_hash || canonical_json(event))。
+//      canonical_json = 字段按字典序固定顺序、数字格式固定的可重现序列化形式
+//      （详见 .cpp 里的 CanonicalJsonOf；tick_no/wall_clock/*_event_hash 故意
+//      被排除以保持哈希在补 tick 后仍稳定，已有 console 命令 AILive.Test.CanonicalEcho 守护）。
+//      VerifyHashChain() 可校验从头到尾未篡改。
 //
 //   2) 视角隔离
 //      所有读 API 都接 InViewer 参数，SQL 层用 EXISTS(visibility[]) 强制过滤；

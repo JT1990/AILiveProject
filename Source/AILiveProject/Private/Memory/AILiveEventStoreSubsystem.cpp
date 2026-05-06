@@ -53,9 +53,10 @@
 //      时间排序的 UUID 变种（前 48 bit 是毫秒时间戳）。事件 EventId 用它，
 //      让按字符串排序也能近似按时间排序，调试方便。
 //
-//   6) WAL 模式 + 二次连接限制（项目踩过的坑）
-//      SQLite WAL 模式下，同进程开第二个连接读 -shm 共享映射会失败（IOERR）。
-//      所以 SchemaCheck 等读取必须走主连接 Db，不能新开连接——
+//   6) WAL 模式 + 二次连接限制（项目实测）
+//      项目实测下 UE FSQLiteCore + WAL 模式开第二个连接做某些读取会触发
+//      IOERR（未深究是 plugin 层还是 -shm 共享映射限制；通用 SQLite 不一定
+//      有这条限制）。所以 SchemaCheck 等读取统一走主连接 Db ——
 //      QueryMetaSchemaRegistry / RecomputeHashChainOnMainConnection 都是
 //      为了规避这条限制设计的「内联读」方法。
 // =============================================================================

@@ -10,9 +10,18 @@
 //   AILive 的 Reasoner→Parser 双 LLM 串联（PRD T7）就靠这个客户端发请求。
 //
 // 设计选择：阻塞式调用 RequestBlocking（同步等结果返回）
-//   - 在游戏线程调会卡帧 —— 所以调用方都在 ThreadPool 后台线程跑（见
+//   - 在游戏线程调会卡帧 —— 所以调用方都在「GameThread 之外的线程」上跑（见
 //     AILiveParserSelfCheck.cpp 的 AsyncTask + ENamedThreads::AnyBackgroundThreadNormalTask）
 //   - 用阻塞接口比写 callback 简单：调用方代码线性
+//
+// 后台线程小词表（本项目里这三种叫法都出现过，含义都是「不在 GameThread 上跑」）：
+//   - `Async(EAsyncExecution::ThreadPool, lambda)`            —— 拿 TFuture 等结果用，
+//                                                              MinimaxACELibrary.cpp 用这个
+//   - `AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, lambda)`
+//                                                            —— TaskGraph 调度，
+//                                                              AILiveParserSelfCheck.cpp 用这个
+//   - `TaskGraph` / `FRunnable`                               —— 底层概念，本项目未直接用
+//   选哪种取决于：是否需要等结果（Future）、是否要指定线程类别。
 //
 // C++ 知识点：
 //   - 没有 UCLASS/USTRUCT，纯 C++ 结构体（不进 UE 反射），因为不需要在蓝图里用，

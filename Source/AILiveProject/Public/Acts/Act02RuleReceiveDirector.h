@@ -12,11 +12,22 @@
 //   - PromptAssembler 把 EventStore 历史拼成下一拍的 prompt
 //   - 完整一拍写入 EventStore，hash 链 + projector 同步更新
 //
-// 状态机 EAct02State：
-//   Idle → PrescatterToTV (NPC 走到电视前) →
-//   SeedDispatch (开局首拍，无历史；下发种子 prompt) → SeedAwait (等 LLM) → SeedSpeak (TTS+A2F)
-//   → GatedAwaitNext (等用户按下 NextPhaseKey)
-//   → ReactionDispatch (后续拍，带历史) → ReactionAwait → ReactionSpeak → 回 GatedAwaitNext
+// 状态机 EAct02State（每个箭头后 [...] 是「转移触发条件」，由 Tick() 轮询 await 计数推进）：
+//   Idle
+//     → PrescatterToTV         [BeginAct02 调用]
+//        (NPC 走到电视前)
+//     → SeedDispatch           [所有 NPC 到位 / EQS 完成]
+//        (开局首拍，无历史；并行下发种子 prompt 到所有 NPC)
+//     → SeedAwait              [所有 NPC 的 Reasoner+Parser TFuture 完成]
+//     → SeedSpeak              [TTS+A2F 启动]
+//     → GatedAwaitNext         [TTS 完成]
+//        (等用户按下 NextPhaseKey)
+//     → ReactionDispatch       [玩家按键]
+//        (后续拍，带历史)
+//     → ReactionAwait          [所有 NPC 的 Reasoner+Parser TFuture 完成]
+//     → ReactionSpeak          [Bid 决策选赢家 → TTS+A2F → 写 EventStore]
+//     → GatedAwaitNext         [TTS 完成；下一拍循环]
+// 推进的唯一驱动：Tick() 里检查各 await flag/counter，不靠事件回调直接切状态。
 //
 // 关键 UE / C++ 概念：
 //
@@ -25,8 +36,12 @@
 //      Director 自己持有 TArray<FAct02NPCRuntime>。
 //
 //   2) TWeakObjectPtr<AActor>
-//      弱指针 + IsValid() 检查：Pawn 可能在剧情进行中被销毁（VisualOverride 切身体），
-//      用 weak ptr 避免野指针访问；每次用前先 IsValid()。
+//      弱指针 + IsValid() 检查：FAct02NPCRuntime.Pawn 持有的是关卡里的外层
+//      Pawn 本体（GetAllActorsOfClass 找到的 NPCMoverClass 实例），不是 VisualOverride
+//      内部的 child actor —— 切 VisualOverride 不会让这个 weak 失效。
+//      真正的失效场景是：PIE 退出 / 关卡切换 / 外部 Destroy。
+//      凡是 LLM 异步回调期间跨帧持有 Actor 的写法，都用 weak ptr 避免野指针；
+//      每次用前先 IsValid() 再 .Get()。
 //
 //   3) Async/Future.h
 //      包含 TFuture<T> / TPromise<T>：异步计算结果占位符。Reasoner LLM 调用
