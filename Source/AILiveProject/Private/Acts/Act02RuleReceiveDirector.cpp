@@ -1,5 +1,6 @@
 #include "Acts/Act02RuleReceiveDirector.h"
 
+#include "Acts/Act01RuleIntroDirector.h"
 #include "AIController.h"
 #include "AILiveProjectScatterMover.h"
 #include "Async/Async.h"
@@ -115,9 +116,33 @@ void AAct02RuleReceiveDirector::BeginPlay()
 	BindRoster();
 	RegisterDebugConsoleCommands();
 
+	// 自动衔接：监听场上所有 Act01 director 的完成事件，自动 BeginAct02。
+	// 按 1 触发 ACT01 → 视频结束广播 OnAct01Completed → 这里接住进 ACT02。
+	if (UWorld* W = GetWorld())
+	{
+		int32 BoundAct01 = 0;
+		for (TActorIterator<AAct01RuleIntroDirector> It(W); It; ++It)
+		{
+			AAct01RuleIntroDirector* A1 = *It;
+			if (!A1) continue;
+			if (!A1->OnAct01Completed.IsAlreadyBound(this, &AAct02RuleReceiveDirector::HandleAct01Completed))
+			{
+				A1->OnAct01Completed.AddDynamic(this, &AAct02RuleReceiveDirector::HandleAct01Completed);
+				++BoundAct01;
+			}
+		}
+		UE_LOG(LogAct02, Log, TEXT("[Act02] auto-link bound %d Act01 director(s)"), BoundAct01);
+	}
+
 	UE_LOG(LogAct02, Log,
 		TEXT("[Act02] BeginPlay cached %d NPC(s), Roster=%d"),
 		InitialNPCTransforms.Num(), Roster.Num());
+}
+
+void AAct02RuleReceiveDirector::HandleAct01Completed()
+{
+	UE_LOG(LogAct02, Log, TEXT("[Act02] auto-trigger via OnAct01Completed"));
+	BeginAct02();
 }
 
 void AAct02RuleReceiveDirector::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -1167,8 +1192,10 @@ void AAct02RuleReceiveDirector::GatherTickAndResolveFloor()
 			FLinearColor::Yellow);
 		if (CurrentRound == 0)
 		{
+			// seed 冷场也自动推进到反应阶段，避免卡在 GatedAwaitNext 等手动按 3
 			SceneState = EAct02State::GatedAwaitNext;
 			StateElapsed = 0.f;
+			StartReactionPhase();
 		}
 		else
 		{
@@ -1314,10 +1341,12 @@ void AAct02RuleReceiveDirector::TickSpeakWatchdog(float Dt)
 
 		if (bWasSeed)
 		{
-			DebugMessage(TEXT("[Act02] seed phase complete; press 3 / act02.next to continue"),
-				FLinearColor::Yellow);
+			DebugMessage(TEXT("[Act02] seed phase complete; auto-advancing to reaction round 1"),
+				FLinearColor::Green);
+			// StartReactionPhase 状态 guard 要求当前 == GatedAwaitNext，先满足前置再调
 			SceneState = EAct02State::GatedAwaitNext;
 			StateElapsed = 0.f;
+			StartReactionPhase();
 		}
 		else
 		{

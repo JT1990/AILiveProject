@@ -129,6 +129,10 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "AILiveProject|Act02")
 	EAct02State GetSceneState() const { return SceneState; }
 
+	// 监听 ACT01 完成事件，自动触发 BeginAct02（开发调试：按 1 即可一路跑完 act01 → act02 → 反应轮）
+	UFUNCTION()
+	void HandleAct01Completed();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
