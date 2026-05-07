@@ -1,3 +1,10 @@
 {
-  "C_Cpp.default.compilerPath": "d:\\Software\\Microsoft Visual Studio\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe"
+  "C_Cpp.default.compilerPath": "d:\\Software\\Microsoft Visual Studio\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+  "markdown.preview.openMarkdownLinks": "inEditor",
+  "editor.fontFamily": "Consolas, 'Courier New', monospace",
+  "markdown.preview.fontFamily": "'Sarasa Mono SC', Consolas, monospace",
+  "markdown.styles": [".vscode/markdown-preview.css"],
+  "[markdown]": {
+    "editor.fontFamily": "'Sarasa Mono SC', Consolas, monospace"
+  }
 }

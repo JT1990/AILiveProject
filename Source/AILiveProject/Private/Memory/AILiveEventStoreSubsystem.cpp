@@ -18,8 +18,7 @@
 // 阅读路径建议（C++ 小白先看这几个函数，看完就懂 80%）：
 //
 //   ① BeginGame / EndGame：理解 SQLite 连接与 schema 怎么挂上来
-//   ② AppendEvent → AppendEventsAtomically → InsertEventBypassValidation_LockHeld
-//      ：理解写入流水线（校验 → 锁 → 事务 → hash 链 → INSERT）
+//   ② AppendEvent → AppendEventsAtomically → InsertEventBypassValidation_LockHeld：理解写入流水线（校验 → 锁 → 事务 → hash 链 → INSERT）
 //   ③ CanonicalJsonOf + ComputeEventHash：理解 hash 链怎么算
 //   ④ Quote：理解视角隔离（visibility EXISTS 的 SQL 模式）
 //   ⑤ RebuildProjections：理解 projector 怎么从 events 重建派生表
@@ -90,75 +89,84 @@
 
 namespace AILiveSchemaMigration
 {
-	bool ApplyMigrationV0ToV1(FSQLiteDatabase& InDb, bool bIsMetaDb, const TCHAR* FtsTokenizer);
+	bool ApplyMigrationV0ToV1(FSQLiteDatabase &InDb, bool bIsMetaDb, const TCHAR *FtsTokenizer);
 }
 
-const TCHAR* const UAILiveEventStoreSubsystem::kGenesisHash =
+const TCHAR *const UAILiveEventStoreSubsystem::kGenesisHash =
 	TEXT("0000000000000000000000000000000000000000000000000000000000000000");
 
 namespace
 {
 
-FString MakeGameDbPath(const FString& InGameId)
-{
-	const FString Dir = FPaths::ProjectSavedDir() / TEXT("Games");
-	return Dir / (InGameId + TEXT(".db"));
-}
-
-FString MakeMetaDbPath()
-{
-	const FString Dir = FPaths::ProjectSavedDir() / TEXT("Games");
-	return Dir / TEXT("_meta.db");
-}
-
-bool EnsureSavedGamesDir()
-{
-	const FString Dir = FPaths::ProjectSavedDir() / TEXT("Games");
-	return IFileManager::Get().MakeDirectory(*Dir, /*Tree=*/true);
-}
-
-UWorld* GetActiveWorldForConsole()
-{
-	if (GEngine)
+	/** 生成单局游戏数据库路径：Saved/Games/<game_id>.db。 */
+	FString MakeGameDbPath(const FString &InGameId)
 	{
-		for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+		// ProjectSavedDir() 是 UE 的项目 Saved 目录；用 / 拼路径会自动处理分隔符。
+		const FString Dir = FPaths::ProjectSavedDir() / TEXT("Games");
+		return Dir / (InGameId + TEXT(".db"));
+	}
+
+	/** 生成跨局共享的 meta 数据库路径：Saved/Games/_meta.db。 */
+	FString MakeMetaDbPath()
+	{
+		const FString Dir = FPaths::ProjectSavedDir() / TEXT("Games");
+		return Dir / TEXT("_meta.db");
+	}
+
+	/** 确保 Saved/Games 目录存在；Tree=true 表示父目录不存在时一起创建。 */
+	bool EnsureSavedGamesDir()
+	{
+		const FString Dir = FPaths::ProjectSavedDir() / TEXT("Games");
+		return IFileManager::Get().MakeDirectory(*Dir, /*Tree=*/true);
+	}
+
+	/** 为 console 命令寻找当前可用的 PIE/Game World，找不到再退回 GWorld。 */
+	UWorld *GetActiveWorldForConsole()
+	{
+		if (GEngine)
 		{
-			if ((Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game) && Ctx.World())
+			for (const FWorldContext &Ctx : GEngine->GetWorldContexts())
 			{
-				return Ctx.World();
+				// Console 命令可能在编辑器里运行；这里只接受真正可执行业务逻辑的 World。
+				if ((Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game) && Ctx.World())
+				{
+					return Ctx.World();
+				}
 			}
 		}
+		return GWorld;
 	}
-	return GWorld;
-}
 
-UAILiveEventStoreSubsystem* GetSubsystemForConsole()
-{
-	UWorld* World = GetActiveWorldForConsole();
-	if (!World)
+	/** Console 命令入口共用：从当前 World 的 GameInstance 上取 EventStore 子系统。 */
+	UAILiveEventStoreSubsystem *GetSubsystemForConsole()
 	{
-		UE_LOG(LogAILiveMemory, Error, TEXT("Console: no active PIE/Game world"));
-		return nullptr;
+		UWorld *World = GetActiveWorldForConsole();
+		if (!World)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Console: no active PIE/Game world"));
+			return nullptr;
+		}
+		UGameInstance *GI = World->GetGameInstance();
+		if (!GI)
+		{
+			// 没有 GameInstance 时，Subsystem 生命周期还不存在，后续 DB 操作没有宿主。
+			UE_LOG(LogAILiveMemory, Error, TEXT("Console: world has no GameInstance"));
+			return nullptr;
+		}
+		UAILiveEventStoreSubsystem *Sys = GI->GetSubsystem<UAILiveEventStoreSubsystem>();
+		if (!Sys)
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("Console: UAILiveEventStoreSubsystem not found on GameInstance"));
+		}
+		return Sys;
 	}
-	UGameInstance* GI = World->GetGameInstance();
-	if (!GI)
-	{
-		UE_LOG(LogAILiveMemory, Error, TEXT("Console: world has no GameInstance"));
-		return nullptr;
-	}
-	UAILiveEventStoreSubsystem* Sys = GI->GetSubsystem<UAILiveEventStoreSubsystem>();
-	if (!Sys)
-	{
-		UE_LOG(LogAILiveMemory, Error, TEXT("Console: UAILiveEventStoreSubsystem not found on GameInstance"));
-	}
-	return Sys;
-}
 
-void LogQueryRows(FSQLiteDatabase& InDb, const TCHAR* InSql, const TCHAR* InLabel, int32 InColumnCount)
-{
-	UE_LOG(LogAILiveMemory, Display, TEXT("[%s] %s"), InLabel, InSql);
-	const int64 Rows = InDb.Execute(InSql, [InLabel, InColumnCount](const FSQLitePreparedStatement& Stmt)
+	/** 运行一条调试 SELECT，并按列数把每行拼成日志输出。 */
+	void LogQueryRows(FSQLiteDatabase &InDb, const TCHAR *InSql, const TCHAR *InLabel, int32 InColumnCount)
 	{
+		UE_LOG(LogAILiveMemory, Display, TEXT("[%s] %s"), InLabel, InSql);
+		const int64 Rows = InDb.Execute(InSql, [InLabel, InColumnCount](const FSQLitePreparedStatement &Stmt)
+										{
 		FString Line;
 		for (int32 i = 0; i < InColumnCount; ++i)
 		{
@@ -168,297 +176,316 @@ void LogQueryRows(FSQLiteDatabase& InDb, const TCHAR* InSql, const TCHAR* InLabe
 			Line += Val;
 		}
 		UE_LOG(LogAILiveMemory, Display, TEXT("  [%s] %s"), InLabel, *Line);
-		return ESQLitePreparedStatementExecuteRowResult::Continue;
-	});
-	UE_LOG(LogAILiveMemory, Display, TEXT("  [%s] -> %lld rows"), InLabel, Rows);
-}
-
-// ===== T3 helpers =====
-
-/** Closed-set viewer namespace (schema.yaml header). "self" forbidden. */
-bool IsValidViewerString(const FString& V)
-{
-	if (V == TEXT("public")   || V == TEXT("audience") ||
-		V == TEXT("orchestrator") || V == TEXT("system"))
-	{
-		return true;
+		return ESQLitePreparedStatementExecuteRowResult::Continue; });
+		UE_LOG(LogAILiveMemory, Display, TEXT("  [%s] -> %lld rows"), InLabel, Rows);
 	}
-	if (V.StartsWith(TEXT("NPC")) && V.Len() >= 4 && V.Len() <= 6)
+
+	// ===== T3 helpers =====
+
+	/** Closed-set viewer namespace (schema.yaml header). "self" forbidden. */
+	bool IsValidViewerString(const FString &V)
 	{
-		for (int32 i = 3; i < V.Len(); ++i)
+		if (V == TEXT("public") || V == TEXT("audience") ||
+			V == TEXT("orchestrator") || V == TEXT("system"))
 		{
-			if (!FChar::IsDigit(V[i])) return false;
+			return true;
 		}
-		return true;
-	}
-	if (V.StartsWith(TEXT("Faction")) && V.Len() > 7)
-	{
-		return true;
-	}
-	return false;
-}
-
-using FCanonicalWriter =
-	TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>;
-using FCanonicalWriterRef =
-	TSharedRef<FCanonicalWriter>;
-using FCanonicalWriterFactory =
-	TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>;
-
-/** Format a double for canonical JSON: %.17g + force ".0" suffix when the
- *  value is integer-valued so 1.0 doesn't collapse to "1".
- *  Per memory_principles.md §二底层不变量 #8: floats must IEEE round-trip,
- *  e.g. "1.0" not "1" or "1.000". UE TJsonWriter::WriteValue(double) drops
- *  the trailing ".0" for integer-valued doubles, so we bypass it. */
-FString CanonicalDoubleToString(double D)
-{
-	FString S = FString::Printf(TEXT("%.17g"), D);
-	const bool bHasDot = S.Contains(TEXT("."));
-	const bool bHasExp = S.Contains(TEXT("e")) || S.Contains(TEXT("E"));
-	const bool bIsSpecial = S.Contains(TEXT("nan")) || S.Contains(TEXT("inf"));
-	if (!bHasDot && !bHasExp && !bIsSpecial)
-	{
-		S += TEXT(".0");
-	}
-	return S;
-}
-
-/** Recursively emit a JSON value with deterministic ordering. */
-void WriteCanonicalValue(const TSharedPtr<FJsonValue>& V, FCanonicalWriter& W)
-{
-	if (!V.IsValid())
-	{
-		W.WriteNull();
-		return;
-	}
-	switch (V->Type)
-	{
-	case EJson::Null:
-		W.WriteNull();
-		break;
-	case EJson::Boolean:
-		W.WriteValue(V->AsBool());
-		break;
-	case EJson::Number:
-		// Bypass WriteValue(double) to control IEEE round-trip formatting.
-		W.WriteRawJSONValue(CanonicalDoubleToString(V->AsNumber()));
-		break;
-	case EJson::String:
-		W.WriteValue(V->AsString());
-		break;
-	case EJson::Array:
-	{
-		W.WriteArrayStart();
-		for (const TSharedPtr<FJsonValue>& Elem : V->AsArray())
+		if (V.StartsWith(TEXT("NPC")) && V.Len() >= 4 && V.Len() <= 6)
 		{
-			WriteCanonicalValue(Elem, W);
+			for (int32 i = 3; i < V.Len(); ++i)
+			{
+				if (!FChar::IsDigit(V[i]))
+					return false;
+			}
+			return true;
 		}
-		W.WriteArrayEnd();
-		break;
+		if (V.StartsWith(TEXT("Faction")) && V.Len() > 7)
+		{
+			return true;
+		}
+		return false;
 	}
-	case EJson::Object:
+
+	using FCanonicalWriter =
+		TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>;
+	using FCanonicalWriterRef =
+		TSharedRef<FCanonicalWriter>;
+	using FCanonicalWriterFactory =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>;
+
+	/** Format a double for canonical JSON: %.17g + force ".0" suffix when the
+	 *  value is integer-valued so 1.0 doesn't collapse to "1".
+	 *  Per memory_principles.md §二底层不变量 #8: floats must IEEE round-trip,
+	 *  e.g. "1.0" not "1" or "1.000". UE TJsonWriter::WriteValue(double) drops
+	 *  the trailing ".0" for integer-valued doubles, so we bypass it. */
+	FString CanonicalDoubleToString(double D)
 	{
-		const TSharedPtr<FJsonObject> Obj = V->AsObject();
+		FString S = FString::Printf(TEXT("%.17g"), D);
+		const bool bHasDot = S.Contains(TEXT("."));
+		const bool bHasExp = S.Contains(TEXT("e")) || S.Contains(TEXT("E"));
+		const bool bIsSpecial = S.Contains(TEXT("nan")) || S.Contains(TEXT("inf"));
+		if (!bHasDot && !bHasExp && !bIsSpecial)
+		{
+			// Canonical JSON 要保持 1.0 的语义，不让它被普通 JSON writer 压成 1。
+			S += TEXT(".0");
+		}
+		return S;
+	}
+
+	/** Recursively emit a JSON value with deterministic ordering. */
+	void WriteCanonicalValue(const TSharedPtr<FJsonValue> &V, FCanonicalWriter &W)
+	{
+		if (!V.IsValid())
+		{
+			W.WriteNull();
+			return;
+		}
+		switch (V->Type)
+		{
+		case EJson::Null:
+			W.WriteNull();
+			break;
+		case EJson::Boolean:
+			W.WriteValue(V->AsBool());
+			break;
+		case EJson::Number:
+			// Bypass WriteValue(double) to control IEEE round-trip formatting.
+			W.WriteRawJSONValue(CanonicalDoubleToString(V->AsNumber()));
+			break;
+		case EJson::String:
+			W.WriteValue(V->AsString());
+			break;
+		case EJson::Array:
+		{
+			W.WriteArrayStart();
+			for (const TSharedPtr<FJsonValue> &Elem : V->AsArray())
+			{
+				WriteCanonicalValue(Elem, W);
+			}
+			W.WriteArrayEnd();
+			break;
+		}
+		case EJson::Object:
+		{
+			const TSharedPtr<FJsonObject> Obj = V->AsObject();
+			W.WriteObjectStart();
+			if (Obj.IsValid())
+			{
+				TArray<FString> Keys;
+				Obj->Values.GetKeys(Keys);
+				// 字段排序是 hash chain 的关键：不同机器/不同 map 遍历顺序必须得到同一串字节。
+				Keys.Sort();
+				for (const FString &K : Keys)
+				{
+					W.WriteIdentifierPrefix(K);
+					WriteCanonicalValue(Obj->Values[K], W);
+				}
+			}
+			W.WriteObjectEnd();
+			break;
+		}
+		default:
+			W.WriteNull();
+			break;
+		}
+	}
+
+	/** 按固定字段顺序写出一个 JSON object，是 CanonicalJsonOf 的递归 helper。 */
+	void WriteCanonicalObject(const TSharedPtr<FJsonObject> &Obj, FCanonicalWriter &W)
+	{
 		W.WriteObjectStart();
 		if (Obj.IsValid())
 		{
 			TArray<FString> Keys;
 			Obj->Values.GetKeys(Keys);
+			// object 内部也必须排序，避免 payload 字段顺序影响 event_hash。
 			Keys.Sort();
-			for (const FString& K : Keys)
+			for (const FString &K : Keys)
 			{
 				W.WriteIdentifierPrefix(K);
 				WriteCanonicalValue(Obj->Values[K], W);
 			}
 		}
 		W.WriteObjectEnd();
-		break;
 	}
-	default:
-		W.WriteNull();
-		break;
-	}
-}
 
-void WriteCanonicalObject(const TSharedPtr<FJsonObject>& Obj, FCanonicalWriter& W)
-{
-	W.WriteObjectStart();
-	if (Obj.IsValid())
+	// ===== T4 helpers (read API) =====
+
+	/**
+	 * 统一的事件列清单。所有读 SQL（QueryEventsByActor / Quote / QuoteByRound /
+	 * QuoteRecentRounds / ListMy* / SearchHistory / QuoteByEventTypeAndTick / ListVotes）
+	 * 都拼这个常量，配套 RowToEvent 按相同顺序逐列读出 FAILiveEvent。
+	 *
+	 * tick_no（第 3 列）于 T6 加入：FAILiveEvent.TickNo 字段供 PromptAssembler 按
+	 * principles §7 模板渲染 `Tick {tick_no} round_no={round_no}` 行。**canonical
+	 * JSON 仍显式排除该列**（CanonicalJsonOf 注释 + AILive.Test.CanonicalEcho 守护），
+	 * 哈希链对老库继续兼容。
+	 *
+	 * 18 列，索引顺序：
+	 *  0=event_id  1=game_id  2=seq             3=tick_no   4=round_no  5=phase
+	 *  6=actor     7=event_type  8=speech_act_type  9=visibility  10=addressed_to
+	 * 11=payload  12=parent_event_id  13=parser_version  14=raw_llm_output
+	 * 15=prev_event_hash  16=event_hash  17=wall_clock
+	 */
+	const TCHAR *const kEventSelectColumns =
+		TEXT("e.event_id, e.game_id, e.seq, e.tick_no, e.round_no, e.phase, "
+			 "e.actor, e.event_type, e.speech_act_type, e.visibility, e.addressed_to, "
+			 "e.payload, e.parent_event_id, e.parser_version, e.raw_llm_output, "
+			 "e.prev_event_hash, e.event_hash, e.wall_clock");
+
+	/**
+	 * 读侧 viewer 展开规则——write 侧 event_visibility 行按字面量存（'public' /
+	 * 'NPC03' / 'orchestrator' 等不展开成 per-agent 行），所以读侧必须把 NPC viewer
+	 * 扩成 IN 集合才能取到 visibility=["public"] 的事件。
+	 *
+	 * 返回空集表示"任何事件都不可见"——典型场景：viewer 传 "self" / 自由文本 / 空串。
+	 * 调用方拿到空集应跳过 SQL 直接返回空结果。
+	 */
+	TArray<FString> ExpandViewerForJoin(const FString &InViewer)
 	{
-		TArray<FString> Keys;
-		Obj->Values.GetKeys(Keys);
-		Keys.Sort();
-		for (const FString& K : Keys)
+		TArray<FString> Out;
+
+		if (InViewer.IsEmpty() || InViewer == TEXT("self"))
 		{
-			W.WriteIdentifierPrefix(K);
-			WriteCanonicalValue(Obj->Values[K], W);
+			UE_LOG(LogAILiveMemory, Warning,
+				   TEXT("ExpandViewerForJoin: rejected viewer='%s' "
+						"('self' / empty 一律返回不可见——必须传具体 actor ID)"),
+				   *InViewer);
+			return Out;
 		}
-	}
-	W.WriteObjectEnd();
-}
 
-// ===== T4 helpers (read API) =====
+		if (InViewer == TEXT("public"))
+		{
+			Out.Add(TEXT("public"));
+			return Out;
+		}
+		if (InViewer == TEXT("orchestrator"))
+		{
+			Out.Add(TEXT("orchestrator"));
+			return Out;
+		}
+		if (InViewer == TEXT("system"))
+		{
+			Out.Add(TEXT("system"));
+			return Out;
+		}
+		if (InViewer == TEXT("audience"))
+		{
+			Out.Add(TEXT("audience"));
+			Out.Add(TEXT("public"));
+			return Out;
+		}
+		if (IsValidViewerString(InViewer))
+		{
+			// NPC<NN> 或 Faction<X> —— 自己定向 + 公开都能看
+			Out.Add(InViewer);
+			Out.Add(TEXT("public"));
+			return Out;
+		}
 
-/**
- * 统一的事件列清单。所有读 SQL（QueryEventsByActor / Quote / QuoteByRound /
- * QuoteRecentRounds / ListMy* / SearchHistory / QuoteByEventTypeAndTick / ListVotes）
- * 都拼这个常量，配套 RowToEvent 按相同顺序逐列读出 FAILiveEvent。
- *
- * tick_no（第 3 列）于 T6 加入：FAILiveEvent.TickNo 字段供 PromptAssembler 按
- * principles §7 模板渲染 `Tick {tick_no} round_no={round_no}` 行。**canonical
- * JSON 仍显式排除该列**（CanonicalJsonOf 注释 + AILive.Test.CanonicalEcho 守护），
- * 哈希链对老库继续兼容。
- *
- * 18 列，索引顺序：
- *  0=event_id  1=game_id  2=seq             3=tick_no   4=round_no  5=phase
- *  6=actor     7=event_type  8=speech_act_type  9=visibility  10=addressed_to
- * 11=payload  12=parent_event_id  13=parser_version  14=raw_llm_output
- * 15=prev_event_hash  16=event_hash  17=wall_clock
- */
-const TCHAR* const kEventSelectColumns =
-	TEXT("e.event_id, e.game_id, e.seq, e.tick_no, e.round_no, e.phase, "
-	     "e.actor, e.event_type, e.speech_act_type, e.visibility, e.addressed_to, "
-	     "e.payload, e.parent_event_id, e.parser_version, e.raw_llm_output, "
-	     "e.prev_event_hash, e.event_hash, e.wall_clock");
-
-/**
- * 读侧 viewer 展开规则——write 侧 event_visibility 行按字面量存（'public' /
- * 'NPC03' / 'orchestrator' 等不展开成 per-agent 行），所以读侧必须把 NPC viewer
- * 扩成 IN 集合才能取到 visibility=["public"] 的事件。
- *
- * 返回空集表示"任何事件都不可见"——典型场景：viewer 传 "self" / 自由文本 / 空串。
- * 调用方拿到空集应跳过 SQL 直接返回空结果。
- */
-TArray<FString> ExpandViewerForJoin(const FString& InViewer)
-{
-	TArray<FString> Out;
-
-	if (InViewer.IsEmpty() || InViewer == TEXT("self"))
-	{
 		UE_LOG(LogAILiveMemory, Warning,
-			TEXT("ExpandViewerForJoin: rejected viewer='%s' "
-			     "('self' / empty 一律返回不可见——必须传具体 actor ID)"), *InViewer);
+			   TEXT("ExpandViewerForJoin: unrecognized viewer='%s' — returning empty set"), *InViewer);
 		return Out;
 	}
 
-	if (InViewer == TEXT("public"))
+	/** 按 ExpandViewerForJoin 返回的尺寸生成 SQL 占位符串 "?,?,?". 0 个返回空串。 */
+	FString MakeViewerInPlaceholders(int32 Count)
 	{
-		Out.Add(TEXT("public"));
-		return Out;
-	}
-	if (InViewer == TEXT("orchestrator"))
-	{
-		Out.Add(TEXT("orchestrator"));
-		return Out;
-	}
-	if (InViewer == TEXT("system"))
-	{
-		Out.Add(TEXT("system"));
-		return Out;
-	}
-	if (InViewer == TEXT("audience"))
-	{
-		Out.Add(TEXT("audience"));
-		Out.Add(TEXT("public"));
-		return Out;
-	}
-	if (IsValidViewerString(InViewer))
-	{
-		// NPC<NN> 或 Faction<X> —— 自己定向 + 公开都能看
-		Out.Add(InViewer);
-		Out.Add(TEXT("public"));
-		return Out;
-	}
-
-	UE_LOG(LogAILiveMemory, Warning,
-		TEXT("ExpandViewerForJoin: unrecognized viewer='%s' — returning empty set"), *InViewer);
-	return Out;
-}
-
-/** 按 ExpandViewerForJoin 返回的尺寸生成 SQL 占位符串 "?,?,?". 0 个返回空串。 */
-FString MakeViewerInPlaceholders(int32 Count)
-{
-	if (Count <= 0) return FString();
-	FString Out;
-	Out.Reserve(Count * 2);
-	for (int32 i = 0; i < Count; ++i)
-	{
-		if (i > 0) Out.Append(TEXT(","));
-		Out.Append(TEXT("?"));
-	}
-	return Out;
-}
-
-/**
- * 转义 LIKE 模式里的元字符：% / _ / \ → \% / \_ / \\。配套 SQL `ESCAPE '\\'`。
- * 防止用户输入 `100%` 这类内容被当成 SQL 通配符误匹配。
- */
-FString EscapeLikePattern(const FString& InKeyword)
-{
-	FString Out;
-	Out.Reserve(InKeyword.Len() + 4);
-	for (TCHAR C : InKeyword)
-	{
-		if (C == TEXT('\\') || C == TEXT('%') || C == TEXT('_'))
+		if (Count <= 0)
+			return FString();
+		FString Out;
+		Out.Reserve(Count * 2);
+		for (int32 i = 0; i < Count; ++i)
 		{
-			Out.AppendChar(TEXT('\\'));
+			if (i > 0)
+				Out.Append(TEXT(","));
+			Out.Append(TEXT("?"));
 		}
-		Out.AppendChar(C);
+		return Out;
 	}
-	return Out;
-}
 
-/**
- * 按 kEventSelectColumns 顺序从 prepared statement 读 18 列，组装 FAILiveEvent。
- * 调用方必须保证 SQL SELECT 列与 kEventSelectColumns 完全一致。
- */
-FAILiveEvent RowToEvent(const FSQLitePreparedStatement& InStmt)
-{
-	FAILiveEvent Ev;
-	int64 SeqRead = 0;
-	int64 TickNoRead = 0;
-	int64 RoundNoRead = 0;
-	FString PhaseStr, EventTypeStr, SpeechActStr, VisibilityJson, AddressedToJson;
+	/**
+	 * 转义 LIKE 模式里的元字符：% / _ / \ → \% / \_ / \\。配套 SQL `ESCAPE '\\'`。
+	 * 防止用户输入 `100%` 这类内容被当成 SQL 通配符误匹配。
+	 */
+	FString EscapeLikePattern(const FString &InKeyword)
+	{
+		FString Out;
+		Out.Reserve(InKeyword.Len() + 4);
+		for (TCHAR C : InKeyword)
+		{
+			if (C == TEXT('\\') || C == TEXT('%') || C == TEXT('_'))
+			{
+				Out.AppendChar(TEXT('\\'));
+			}
+			Out.AppendChar(C);
+		}
+		return Out;
+	}
 
-	InStmt.GetColumnValueByIndex(0,  Ev.EventId);
-	InStmt.GetColumnValueByIndex(1,  Ev.GameId);
-	InStmt.GetColumnValueByIndex(2,  SeqRead);                                Ev.Seq = SeqRead;
-	InStmt.GetColumnValueByIndex(3,  TickNoRead);                             Ev.TickNo = TickNoRead;
-	InStmt.GetColumnValueByIndex(4,  RoundNoRead);                            Ev.RoundNo = (int32)RoundNoRead;
-	InStmt.GetColumnValueByIndex(5,  PhaseStr);                               Ev.Phase = AILiveEvent::PhaseFromString(PhaseStr);
-	InStmt.GetColumnValueByIndex(6,  Ev.Actor);
-	InStmt.GetColumnValueByIndex(7,  EventTypeStr);                           Ev.EventType = AILiveEvent::EventTypeFromString(EventTypeStr);
-	InStmt.GetColumnValueByIndex(8,  SpeechActStr);                           Ev.SpeechActType = AILiveEvent::SpeechActFromString(SpeechActStr);
-	InStmt.GetColumnValueByIndex(9,  VisibilityJson);                         Ev.Visibility = AILiveEvent::JsonStringToArray(VisibilityJson);
-	InStmt.GetColumnValueByIndex(10, AddressedToJson);                        Ev.AddressedTo = AILiveEvent::JsonStringToArray(AddressedToJson);
-	InStmt.GetColumnValueByIndex(11, Ev.PayloadJson);
-	InStmt.GetColumnValueByIndex(12, Ev.ParentEventId);
-	InStmt.GetColumnValueByIndex(13, Ev.ParserVersion);
-	InStmt.GetColumnValueByIndex(14, Ev.RawLLMOutput);
-	InStmt.GetColumnValueByIndex(15, Ev.PrevEventHash);
-	InStmt.GetColumnValueByIndex(16, Ev.EventHash);
-	InStmt.GetColumnValueByIndex(17, Ev.WallClock);
-	return Ev;
-}
+	/**
+	 * 按 kEventSelectColumns 顺序从 prepared statement 读 18 列，组装 FAILiveEvent。
+	 * 调用方必须保证 SQL SELECT 列与 kEventSelectColumns 完全一致。
+	 */
+	FAILiveEvent RowToEvent(const FSQLitePreparedStatement &InStmt)
+	{
+		FAILiveEvent Ev;
+		int64 SeqRead = 0;
+		int64 TickNoRead = 0;
+		int64 RoundNoRead = 0;
+		FString PhaseStr, EventTypeStr, SpeechActStr, VisibilityJson, AddressedToJson;
+
+		InStmt.GetColumnValueByIndex(0, Ev.EventId);
+		InStmt.GetColumnValueByIndex(1, Ev.GameId);
+		InStmt.GetColumnValueByIndex(2, SeqRead);
+		Ev.Seq = SeqRead;
+		InStmt.GetColumnValueByIndex(3, TickNoRead);
+		Ev.TickNo = TickNoRead;
+		InStmt.GetColumnValueByIndex(4, RoundNoRead);
+		Ev.RoundNo = (int32)RoundNoRead;
+		InStmt.GetColumnValueByIndex(5, PhaseStr);
+		Ev.Phase = AILiveEvent::PhaseFromString(PhaseStr);
+		InStmt.GetColumnValueByIndex(6, Ev.Actor);
+		InStmt.GetColumnValueByIndex(7, EventTypeStr);
+		Ev.EventType = AILiveEvent::EventTypeFromString(EventTypeStr);
+		InStmt.GetColumnValueByIndex(8, SpeechActStr);
+		Ev.SpeechActType = AILiveEvent::SpeechActFromString(SpeechActStr);
+		InStmt.GetColumnValueByIndex(9, VisibilityJson);
+		Ev.Visibility = AILiveEvent::JsonStringToArray(VisibilityJson);
+		InStmt.GetColumnValueByIndex(10, AddressedToJson);
+		Ev.AddressedTo = AILiveEvent::JsonStringToArray(AddressedToJson);
+		InStmt.GetColumnValueByIndex(11, Ev.PayloadJson);
+		InStmt.GetColumnValueByIndex(12, Ev.ParentEventId);
+		InStmt.GetColumnValueByIndex(13, Ev.ParserVersion);
+		InStmt.GetColumnValueByIndex(14, Ev.RawLLMOutput);
+		InStmt.GetColumnValueByIndex(15, Ev.PrevEventHash);
+		InStmt.GetColumnValueByIndex(16, Ev.EventHash);
+		InStmt.GetColumnValueByIndex(17, Ev.WallClock);
+		return Ev;
+	}
 
 } // namespace anonymous
 
-void UAILiveEventStoreSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+/** UE 子系统初始化钩子：这里只记录日志，真正的 DB 打开由 BeginGame 触发。 */
+void UAILiveEventStoreSubsystem::Initialize(FSubsystemCollectionBase &Collection)
 {
 	Super::Initialize(Collection);
 	UE_LOG(LogAILiveMemory, Log, TEXT("EventStoreSubsystem initialized"));
 }
 
+/** UE 子系统销毁钩子：如果游戏 DB 还开着，先走 EndGame 做成对清理。 */
 void UAILiveEventStoreSubsystem::Deinitialize()
 {
 	if (IsGameOpen())
 	{
+		// 避免编辑器停止 PIE 时 SQLite 连接仍持有 WAL/SHM 文件句柄。
 		EndGame();
 	}
 	Super::Deinitialize();
 }
 
-bool UAILiveEventStoreSubsystem::BeginGame(const FString& InGameId)
+/** 打开或创建一局游戏的 game.db 与共享 _meta.db，并确保 schema / registry / hash tail 可用。 */
+bool UAILiveEventStoreSubsystem::BeginGame(const FString &InGameId)
 {
 	if (InGameId.IsEmpty())
 	{
@@ -467,6 +494,7 @@ bool UAILiveEventStoreSubsystem::BeginGame(const FString& InGameId)
 	}
 	if (IsGameOpen())
 	{
+		// 同一个 subsystem 同时只服务一局；切局前先关闭旧连接。
 		UE_LOG(LogAILiveMemory, Warning, TEXT("BeginGame('%s'): closing previous game '%s'"), *InGameId, *CurrentGameId);
 		EndGame();
 	}
@@ -481,9 +509,10 @@ bool UAILiveEventStoreSubsystem::BeginGame(const FString& InGameId)
 	if (!Db.Open(*GameDbPath, ESQLiteDatabaseOpenMode::ReadWriteCreate))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("BeginGame: failed to open game.db at %s: %s"),
-			*GameDbPath, *Db.GetLastError());
+			   *GameDbPath, *Db.GetLastError());
 		return false;
 	}
+	// 先设置 PRAGMA，再建表/迁移，保证 WAL、外键等行为从初始化阶段就一致。
 	ApplyPragmas(Db);
 	if (!EnsureSchema(Db, /*bIsMetaDb=*/false))
 	{
@@ -495,7 +524,7 @@ bool UAILiveEventStoreSubsystem::BeginGame(const FString& InGameId)
 	if (!MetaDb.Open(*MetaDbPath, ESQLiteDatabaseOpenMode::ReadWriteCreate))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("BeginGame: failed to open _meta.db at %s: %s"),
-			*MetaDbPath, *MetaDb.GetLastError());
+			   *MetaDbPath, *MetaDb.GetLastError());
 		Db.Close();
 		return false;
 	}
@@ -513,6 +542,7 @@ bool UAILiveEventStoreSubsystem::BeginGame(const FString& InGameId)
 		return false;
 	}
 
+	// CurrentGameId 必须在 LoadHashChainTail 前设置，因为查询用它过滤 events。
 	CurrentGameId = InGameId;
 
 	if (!LoadHashChainTail())
@@ -525,12 +555,13 @@ bool UAILiveEventStoreSubsystem::BeginGame(const FString& InGameId)
 	}
 
 	UE_LOG(LogAILiveMemory, Log,
-		TEXT("BeginGame('%s') OK: %s + %s (last_seq=%lld, last_hash_prefix=%s)"),
-		*CurrentGameId, *GameDbPath, *MetaDbPath,
-		CachedLastSeq, *CachedLastHash.Left(8));
+		   TEXT("BeginGame('%s') OK: %s + %s (last_seq=%lld, last_hash_prefix=%s)"),
+		   *CurrentGameId, *GameDbPath, *MetaDbPath,
+		   CachedLastSeq, *CachedLastHash.Left(8));
 	return true;
 }
 
+/** 关闭当前 game/meta 数据库连接，并清掉运行时缓存。 */
 void UAILiveEventStoreSubsystem::EndGame()
 {
 	if (Db.IsValid())
@@ -549,18 +580,20 @@ void UAILiveEventStoreSubsystem::EndGame()
 	DetectedFtsTokenizer.Reset();
 }
 
+/** 从 events 表最后一行恢复 hash 链尾；空库则使用 genesis hash。 */
 bool UAILiveEventStoreSubsystem::LoadHashChainTail()
 {
+	// 默认值代表一条事件都没有：seq=0，prev hash 为 64 个 0。
 	CachedLastSeq = 0;
 	CachedLastHash = FString(kGenesisHash);
 	CachedCurrentTickNo = 0;
 
 	FSQLitePreparedStatement Stmt;
 	if (!Stmt.Create(Db,
-		TEXT("SELECT seq, event_hash FROM events WHERE game_id=?1 ORDER BY seq DESC LIMIT 1;")))
+					 TEXT("SELECT seq, event_hash FROM events WHERE game_id=?1 ORDER BY seq DESC LIMIT 1;")))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("LoadHashChainTail: prepare failed: %s"), *Db.GetLastError());
+			   TEXT("LoadHashChainTail: prepare failed: %s"), *Db.GetLastError());
 		return false;
 	}
 	if (!Stmt.SetBindingValueByIndex(1, CurrentGameId))
@@ -571,31 +604,33 @@ bool UAILiveEventStoreSubsystem::LoadHashChainTail()
 	const ESQLitePreparedStatementStepResult Step = Stmt.Step();
 	if (Step == ESQLitePreparedStatementStepResult::Row)
 	{
+		// 找到历史事件时，用最后一条事件作为下一次 append 的前驱。
 		Stmt.GetColumnValueByIndex(0, CachedLastSeq);
 		Stmt.GetColumnValueByIndex(1, CachedLastHash);
 	}
 	else if (Step != ESQLitePreparedStatementStepResult::Done)
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("LoadHashChainTail: step failed: %s"), *Db.GetLastError());
+			   TEXT("LoadHashChainTail: step failed: %s"), *Db.GetLastError());
 		return false;
 	}
 	return true;
 }
 
-void UAILiveEventStoreSubsystem::ApplyPragmas(FSQLiteDatabase& InDb)
+/** 对一个 SQLite 连接应用本项目固定 PRAGMA 设置。 */
+void UAILiveEventStoreSubsystem::ApplyPragmas(FSQLiteDatabase &InDb)
 {
 	// journal_mode=WAL is database-level (persisted in the .db header) but
 	// repeating it is idempotent and corrects any non-WAL legacy file.
-	const TCHAR* Pragmas[] =
-	{
-		TEXT("PRAGMA journal_mode = WAL;"),
-		TEXT("PRAGMA synchronous = NORMAL;"),
-		TEXT("PRAGMA foreign_keys = ON;"),
-		TEXT("PRAGMA temp_store = MEMORY;"),
-		TEXT("PRAGMA mmap_size = 268435456;"),
-	};
-	for (const TCHAR* P : Pragmas)
+	const TCHAR *Pragmas[] =
+		{
+			TEXT("PRAGMA journal_mode = WAL;"),
+			TEXT("PRAGMA synchronous = NORMAL;"),
+			TEXT("PRAGMA foreign_keys = ON;"),
+			TEXT("PRAGMA temp_store = MEMORY;"),
+			TEXT("PRAGMA mmap_size = 268435456;"),
+		};
+	for (const TCHAR *P : Pragmas)
 	{
 		if (!InDb.Execute(P))
 		{
@@ -604,8 +639,10 @@ void UAILiveEventStoreSubsystem::ApplyPragmas(FSQLiteDatabase& InDb)
 	}
 }
 
-FString UAILiveEventStoreSubsystem::DetectFtsTokenizer(FSQLiteDatabase& InDb)
+/** 探测当前 SQLite 是否支持 FTS5 trigram tokenizer，不支持则回退 unicode61。 */
+FString UAILiveEventStoreSubsystem::DetectFtsTokenizer(FSQLiteDatabase &InDb)
 {
+	// 用 temp 表做探测，不污染正式 schema。
 	InDb.Execute(TEXT("DROP TABLE IF EXISTS temp.test_trigram;"));
 	const bool bTrigramOk = InDb.Execute(
 		TEXT("CREATE VIRTUAL TABLE temp.test_trigram USING fts5(x, tokenize='trigram');"));
@@ -615,12 +652,13 @@ FString UAILiveEventStoreSubsystem::DetectFtsTokenizer(FSQLiteDatabase& InDb)
 		return TEXT("trigram");
 	}
 	UE_LOG(LogAILiveMemory, Warning,
-		TEXT("FTS5 trigram tokenizer 不可用，降级 unicode61，模糊搜索能力受限。底层错误: %s"),
-		*InDb.GetLastError());
+		   TEXT("FTS5 trigram tokenizer 不可用，降级 unicode61，模糊搜索能力受限。底层错误: %s"),
+		   *InDb.GetLastError());
 	return TEXT("unicode61");
 }
 
-bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase& InDb, bool bIsMetaDb)
+/** 确保 game/meta DB schema 升级到当前版本，并缓存 game DB 的 FTS tokenizer。 */
+bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase &InDb, bool bIsMetaDb)
 {
 	int32 ExistingVersion = 0;
 	bool bSchemaMetaPresent = false;
@@ -629,7 +667,7 @@ bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase& InDb, bool bIsMet
 		// Probe schema_meta existence; empty result = fresh DB.
 		const int64 Rows = InDb.Execute(
 			TEXT("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta';"),
-			[&bSchemaMetaPresent](const FSQLitePreparedStatement&)
+			[&bSchemaMetaPresent](const FSQLitePreparedStatement &)
 			{
 				bSchemaMetaPresent = true;
 				return ESQLitePreparedStatementExecuteRowResult::Continue;
@@ -643,9 +681,10 @@ bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase& InDb, bool bIsMet
 
 	if (bSchemaMetaPresent)
 	{
+		// schema_meta 存在时读取版本；不存在则保持 0，走首次迁移。
 		const int64 Rows = InDb.Execute(
 			TEXT("SELECT value FROM schema_meta WHERE key='schema_version';"),
-			[&ExistingVersion](const FSQLitePreparedStatement& Stmt)
+			[&ExistingVersion](const FSQLitePreparedStatement &Stmt)
 			{
 				FString Val;
 				if (Stmt.GetColumnValueByIndex(0, Val))
@@ -670,7 +709,7 @@ bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase& InDb, bool bIsMet
 		FString ExistingFtsSql;
 		InDb.Execute(
 			TEXT("SELECT sql FROM sqlite_master WHERE name='events_fts';"),
-			[&ExistingFtsSql](const FSQLitePreparedStatement& Stmt)
+			[&ExistingFtsSql](const FSQLitePreparedStatement &Stmt)
 			{
 				Stmt.GetColumnValueByIndex(0, ExistingFtsSql);
 				return ESQLitePreparedStatementExecuteRowResult::Continue;
@@ -701,23 +740,25 @@ bool UAILiveEventStoreSubsystem::EnsureSchema(FSQLiteDatabase& InDb, bool bIsMet
 	if (ExistingVersion == kCurrentSchemaVersion)
 	{
 		UE_LOG(LogAILiveMemory, Log, TEXT("EnsureSchema(%s): schema_version=%d, no migration (fts_tokenizer=%s)"),
-			bIsMetaDb ? TEXT("meta") : TEXT("game"), ExistingVersion,
-			bIsMetaDb ? TEXT("n/a") : *DetectedFtsTokenizer);
+			   bIsMetaDb ? TEXT("meta") : TEXT("game"), ExistingVersion,
+			   bIsMetaDb ? TEXT("n/a") : *DetectedFtsTokenizer);
 		return true;
 	}
 	if (ExistingVersion > kCurrentSchemaVersion)
 	{
+		// 代码版本低于 DB 版本时拒绝打开，防止旧代码误读新 schema。
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("EnsureSchema(%s): existing schema_version=%d > supported=%d (downgrade refused)"),
-			bIsMetaDb ? TEXT("meta") : TEXT("game"), ExistingVersion, kCurrentSchemaVersion);
+			   TEXT("EnsureSchema(%s): existing schema_version=%d > supported=%d (downgrade refused)"),
+			   bIsMetaDb ? TEXT("meta") : TEXT("game"), ExistingVersion, kCurrentSchemaVersion);
 		return false;
 	}
 
-	const TCHAR* TokenizerPtr = bIsMetaDb ? nullptr : *DetectedFtsTokenizer;
+	const TCHAR *TokenizerPtr = bIsMetaDb ? nullptr : *DetectedFtsTokenizer;
 	return RunMigrations(InDb, ExistingVersion, kCurrentSchemaVersion, bIsMetaDb, TokenizerPtr);
 }
 
-bool UAILiveEventStoreSubsystem::RunMigrations(FSQLiteDatabase& InDb, int32 FromVersion, int32 ToVersion, bool bIsMetaDb, const TCHAR* FtsTokenizer)
+/** 按版本号分派 schema 迁移；当前只支持 0 -> 1。 */
+bool UAILiveEventStoreSubsystem::RunMigrations(FSQLiteDatabase &InDb, int32 FromVersion, int32 ToVersion, bool bIsMetaDb, const TCHAR *FtsTokenizer)
 {
 	if (FromVersion == 0 && ToVersion == 1)
 	{
@@ -732,7 +773,8 @@ bool UAILiveEventStoreSubsystem::RunMigrations(FSQLiteDatabase& InDb, int32 From
 	return false;
 }
 
-bool UAILiveEventStoreSubsystem::QueryMetaSchemaRegistry(TMap<FString, FString>& OutKVs)
+/** 读取 _meta.db.schema_meta 的全部 key/value，用于调试和写入时动态解析 parser_version。 */
+bool UAILiveEventStoreSubsystem::QueryMetaSchemaRegistry(TMap<FString, FString> &OutKVs)
 {
 	OutKVs.Reset();
 	if (!MetaDb.IsValid())
@@ -742,7 +784,7 @@ bool UAILiveEventStoreSubsystem::QueryMetaSchemaRegistry(TMap<FString, FString>&
 	}
 	const int64 Rows = MetaDb.Execute(
 		TEXT("SELECT key, value FROM schema_meta;"),
-		[&OutKVs](const FSQLitePreparedStatement& Stmt)
+		[&OutKVs](const FSQLitePreparedStatement &Stmt)
 		{
 			FString K, V;
 			Stmt.GetColumnValueByIndex(0, K);
@@ -753,36 +795,38 @@ bool UAILiveEventStoreSubsystem::QueryMetaSchemaRegistry(TMap<FString, FString>&
 	if (Rows == INDEX_NONE)
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("QueryMetaSchemaRegistry: SELECT failed: %s"), *MetaDb.GetLastError());
+			   TEXT("QueryMetaSchemaRegistry: SELECT failed: %s"), *MetaDb.GetLastError());
 		return false;
 	}
 	return true;
 }
 
-bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase& InMetaDb)
+/** 把当前 parser registry 信息写入 _meta.db，保证后续事件可追溯 parser 版本。 */
+bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase &InMetaDb)
 {
-	const FString RegistryDir   = AILiveParser::GetCurrentParserPromptRegistryDir();
+	const FString RegistryDir = AILiveParser::GetCurrentParserPromptRegistryDir();
 	const FString ParserVersion = AILiveParser::GetCurrentParserVersion();
-	const FString ParserModel   = AILiveParser::GetCurrentParserModel();
+	const FString ParserModel = AILiveParser::GetCurrentParserModel();
 
 	if (RegistryDir.IsEmpty() || ParserVersion.IsEmpty() || ParserModel.IsEmpty())
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("EnsureMetaRegistry: missing registry field(s) (dir='%s' ver='%s' model='%s')"),
-			*RegistryDir, *ParserVersion, *ParserModel);
+			   TEXT("EnsureMetaRegistry: missing registry field(s) (dir='%s' ver='%s' model='%s')"),
+			   *RegistryDir, *ParserVersion, *ParserModel);
 		return false;
 	}
 
 	const TPair<FString, FString> Pairs[] = {
-		{ TEXT("parser_prompt_registry_path"), RegistryDir },
-		{ TEXT("parser_version"),              ParserVersion },
-		{ TEXT("parser_model"),                ParserModel },
+		{TEXT("parser_prompt_registry_path"), RegistryDir},
+		{TEXT("parser_version"), ParserVersion},
+		{TEXT("parser_model"), ParserModel},
 	};
 
-	const TCHAR* Sql = TEXT("INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, ?2);");
+	const TCHAR *Sql = TEXT("INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, ?2);");
 
-	for (const TPair<FString, FString>& KV : Pairs)
+	for (const TPair<FString, FString> &KV : Pairs)
 	{
+		// 每个 key 独立 upsert；任一失败即认为 meta registry 不可信。
 		FSQLitePreparedStatement Stmt;
 		if (!Stmt.Create(InMetaDb, Sql) ||
 			!Stmt.SetBindingValueByIndex(1, KV.Key) ||
@@ -790,14 +834,14 @@ bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase& InMetaDb)
 			!Stmt.Execute())
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("EnsureMetaRegistry upsert '%s' failed: %s"),
-				*KV.Key, *InMetaDb.GetLastError());
+				   TEXT("EnsureMetaRegistry upsert '%s' failed: %s"),
+				   *KV.Key, *InMetaDb.GetLastError());
 			return false;
 		}
 	}
 	UE_LOG(LogAILiveMemory, Log,
-		TEXT("EnsureMetaRegistry OK: parser_version=%s parser_model=%s"),
-		*ParserVersion, *ParserModel);
+		   TEXT("EnsureMetaRegistry OK: parser_version=%s parser_model=%s"),
+		   *ParserVersion, *ParserModel);
 	return true;
 }
 
@@ -815,27 +859,31 @@ bool UAILiveEventStoreSubsystem::EnsureMetaRegistry(FSQLiteDatabase& InMetaDb)
 //   - 短中文 keyword（< 3 字）走 LIKE fallback；FTS5 trigram 不可用时也走 LIKE。
 // ---------------------------------------------------------------
 
-TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QueryEventsByActor(const FString& Actor, int32 LimitCount) const
+/** 查询某个 actor 自己可见的全部事件，主要用于按 actor 回放历史。 */
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QueryEventsByActor(const FString &Actor, int32 LimitCount) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen() || Actor.IsEmpty()) return Out;
+	if (!IsGameOpen() || Actor.IsEmpty())
+		return Out;
 
 	// self-viewer JOIN：viewer = actor 自身。task card D4 要求所有读路径走 JOIN。
 	const TArray<FString> Viewers = ExpandViewerForJoin(Actor);
-	if (Viewers.Num() == 0) return Out;
+	if (Viewers.Num() == 0)
+		return Out;
 
+	// IN (?, ?, ...) 的数量取决于 viewer 展开结果，所以 SQL 字符串需动态生成。
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.actor = ?2 "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-		     "ORDER BY e.seq%s;"),
+			 "WHERE e.game_id = ?1 AND e.actor = ?2 "
+			 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			 "ORDER BY e.seq%s;"),
 		kEventSelectColumns,
 		*MakeViewerInPlaceholders(Viewers.Num()),
 		LimitCount > 0 ? TEXT(" LIMIT ?") : TEXT(""));
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("QueryEventsByActor: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -843,8 +891,13 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QueryEventsByActor(const FStrin
 	int32 BindIdx = 1;
 	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
 	Stmt.SetBindingValueByIndex(BindIdx++, Actor);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
-	if (LimitCount > 0) Stmt.SetBindingValueByIndex(BindIdx++, (int64)LimitCount);
+	for (const FString &V : Viewers)
+	{
+		// 顺序必须和 SQL 里的占位符一致：game_id、actor、viewer...、limit。
+		Stmt.SetBindingValueByIndex(BindIdx++, V);
+	}
+	if (LimitCount > 0)
+		Stmt.SetBindingValueByIndex(BindIdx++, (int64)LimitCount);
 
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -853,7 +906,8 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QueryEventsByActor(const FStrin
 	return Out;
 }
 
-bool UAILiveEventStoreSubsystem::VerifyHashChain(int64& OutFirstBadSeq) const
+/** 重新遍历 events 并验证 hash chain，失败时返回第一条坏链的 seq。 */
+bool UAILiveEventStoreSubsystem::VerifyHashChain(int64 &OutFirstBadSeq) const
 {
 	OutFirstBadSeq = -1;
 	if (!IsGameOpen())
@@ -864,45 +918,50 @@ bool UAILiveEventStoreSubsystem::VerifyHashChain(int64& OutFirstBadSeq) const
 	int64 LastSeq = 0;
 	int64 BadCount = 0;
 	int64 FirstBadSeq = -1;
-	UAILiveEventStoreSubsystem* Self = const_cast<UAILiveEventStoreSubsystem*>(this);
+	// RecomputeHashChainOnMainConnection 不是 const；这里是只读审计，安全地复用实现。
+	UAILiveEventStoreSubsystem *Self = const_cast<UAILiveEventStoreSubsystem *>(this);
 	if (!Self->RecomputeHashChainOnMainConnection(LastSeq, BadCount, FirstBadSeq))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("VerifyHashChain: walk failed (game=%s)"), *CurrentGameId);
+			   TEXT("VerifyHashChain: walk failed (game=%s)"), *CurrentGameId);
 		return false;
 	}
 	if (BadCount > 0)
 	{
 		OutFirstBadSeq = FirstBadSeq;
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("VerifyHashChain: chain BAD bad_count=%lld first_bad_seq=%lld last_seq=%lld"),
-			BadCount, FirstBadSeq, LastSeq);
+			   TEXT("VerifyHashChain: chain BAD bad_count=%lld first_bad_seq=%lld last_seq=%lld"),
+			   BadCount, FirstBadSeq, LastSeq);
 		return false;
 	}
 	UE_LOG(LogAILiveMemory, Display,
-		TEXT("VerifyHashChain OK (game=%s, last_seq=%lld)"), *CurrentGameId, LastSeq);
+		   TEXT("VerifyHashChain OK (game=%s, last_seq=%lld)"), *CurrentGameId, LastSeq);
 	return true;
 }
 
-bool UAILiveEventStoreSubsystem::Quote(int64 InSeq, const FString& InViewer, FAILiveEvent& OutEvent) const
+/** 按 seq 取单条事件，并强制检查该 viewer 是否可见。 */
+bool UAILiveEventStoreSubsystem::Quote(int64 InSeq, const FString &InViewer, FAILiveEvent &OutEvent) const
 {
 	OutEvent = FAILiveEvent();
-	if (!IsGameOpen()) return false;
+	if (!IsGameOpen())
+		return false;
 
 	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
-	if (Viewers.Num() == 0) return false;
+	if (Viewers.Num() == 0)
+		return false;
 
+	// EXISTS 子查询是视角隔离的核心：没有可见行就像事件不存在一样返回 false。
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.seq = ?2 "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-		     "LIMIT 1;"),
+			 "WHERE e.game_id = ?1 AND e.seq = ?2 "
+			 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			 "LIMIT 1;"),
 		kEventSelectColumns,
 		*MakeViewerInPlaceholders(Viewers.Num()));
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("Quote: prepare failed: %s"), *Db.GetLastError());
 		return false;
@@ -910,7 +969,8 @@ bool UAILiveEventStoreSubsystem::Quote(int64 InSeq, const FString& InViewer, FAI
 	int32 BindIdx = 1;
 	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
 	Stmt.SetBindingValueByIndex(BindIdx++, InSeq);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	for (const FString &V : Viewers)
+		Stmt.SetBindingValueByIndex(BindIdx++, V);
 
 	if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -920,26 +980,29 @@ bool UAILiveEventStoreSubsystem::Quote(int64 InSeq, const FString& InViewer, FAI
 	return false;
 }
 
-TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByRound(int32 InRoundNo, const FString& InActor,
-                                                              const FString& InViewer) const
+/** 按 round + actor 查询该 viewer 可见的事件列表。 */
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByRound(int32 InRoundNo, const FString &InActor,
+															  const FString &InViewer) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 
 	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
-	if (Viewers.Num() == 0) return Out;
+	if (Viewers.Num() == 0)
+		return Out;
 
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.round_no = ?2 AND e.actor = ?3 "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-		     "ORDER BY e.seq;"),
+			 "WHERE e.game_id = ?1 AND e.round_no = ?2 AND e.actor = ?3 "
+			 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			 "ORDER BY e.seq;"),
 		kEventSelectColumns,
 		*MakeViewerInPlaceholders(Viewers.Num()));
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("QuoteByRound: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -948,7 +1011,8 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByRound(int32 InRoundNo, c
 	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
 	Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRoundNo);
 	Stmt.SetBindingValueByIndex(BindIdx++, InActor);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	for (const FString &V : Viewers)
+		Stmt.SetBindingValueByIndex(BindIdx++, V);
 
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -957,29 +1021,33 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByRound(int32 InRoundNo, c
 	return Out;
 }
 
+/** 查询最近 K 轮内该 viewer 可见的所有事件，用于构建上下文窗口。 */
 TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteRecentRounds(int32 InCurrentRound, int32 InK,
-                                                                    const FString& InViewer) const
+																   const FString &InViewer) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen() || InK <= 0) return Out;
+	if (!IsGameOpen() || InK <= 0)
+		return Out;
 
 	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
-	if (Viewers.Num() == 0) return Out;
+	if (Viewers.Num() == 0)
+		return Out;
 
+	// K 轮窗口包含当前轮，所以起点是 current - K + 1，且不能低于 0。
 	const int32 RoundStart = FMath::Max(0, InCurrentRound - InK + 1);
-	const int32 RoundEnd   = InCurrentRound;
+	const int32 RoundEnd = InCurrentRound;
 
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.round_no BETWEEN ?2 AND ?3 "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-		     "ORDER BY e.seq;"),
+			 "WHERE e.game_id = ?1 AND e.round_no BETWEEN ?2 AND ?3 "
+			 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			 "ORDER BY e.seq;"),
 		kEventSelectColumns,
 		*MakeViewerInPlaceholders(Viewers.Num()));
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("QuoteRecentRounds: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -988,7 +1056,8 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteRecentRounds(int32 InCurre
 	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
 	Stmt.SetBindingValueByIndex(BindIdx++, (int64)RoundStart);
 	Stmt.SetBindingValueByIndex(BindIdx++, (int64)RoundEnd);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	for (const FString &V : Viewers)
+		Stmt.SetBindingValueByIndex(BindIdx++, V);
 
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -1000,79 +1069,85 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteRecentRounds(int32 InCurre
 namespace
 {
 
-/** ListMyStatements/Notes/Reflections 共用：actor + event_type + viewer JOIN。 */
-TArray<FAILiveEvent> ListSelfEventsByType(
-	const FSQLiteDatabase& Db, const FString& GameId,
-	const FString& AgentId, const FString& EventTypeStr,
-	const TArray<FString>& Viewers,
-	bool bDescByRound, int32 LimitCount)
-{
-	TArray<FAILiveEvent> Out;
-
-	const FString OrderBy = bDescByRound
-		? FString(TEXT("ORDER BY e.round_no DESC, e.seq DESC"))
-		: FString(TEXT("ORDER BY e.seq"));
-
-	const FString LimitClause = LimitCount > 0
-		? FString(TEXT(" LIMIT ?"))
-		: FString();
-
-	const FString Sql = FString::Printf(
-		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.actor = ?2 AND e.event_type = ?3 "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-		     "%s%s;"),
-		kEventSelectColumns,
-		*MakeViewerInPlaceholders(Viewers.Num()),
-		*OrderBy, *LimitClause);
-
-	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	/** ListMyStatements/Notes/Reflections 共用：actor + event_type + viewer JOIN。 */
+	TArray<FAILiveEvent> ListSelfEventsByType(
+		const FSQLiteDatabase &Db, const FString &GameId,
+		const FString &AgentId, const FString &EventTypeStr,
+		const TArray<FString> &Viewers,
+		bool bDescByRound, int32 LimitCount)
 	{
-		UE_LOG(LogAILiveMemory, Error, TEXT("ListSelfEventsByType: prepare failed: %s"), *Db.GetLastError());
+		TArray<FAILiveEvent> Out;
+
+		// 调用者决定是按 seq 正序回放，还是按 round/seq 倒序取最近 N 条。
+		const FString OrderBy = bDescByRound
+									? FString(TEXT("ORDER BY e.round_no DESC, e.seq DESC"))
+									: FString(TEXT("ORDER BY e.seq"));
+
+		const FString LimitClause = LimitCount > 0
+										? FString(TEXT(" LIMIT ?"))
+										: FString();
+
+		const FString Sql = FString::Printf(
+			TEXT("SELECT %s FROM events e "
+				 "WHERE e.game_id = ?1 AND e.actor = ?2 AND e.event_type = ?3 "
+				 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+				 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+				 "%s%s;"),
+			kEventSelectColumns,
+			*MakeViewerInPlaceholders(Viewers.Num()),
+			*OrderBy, *LimitClause);
+
+		FSQLitePreparedStatement Stmt;
+		if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
+		{
+			UE_LOG(LogAILiveMemory, Error, TEXT("ListSelfEventsByType: prepare failed: %s"), *Db.GetLastError());
+			return Out;
+		}
+		int32 BindIdx = 1;
+		Stmt.SetBindingValueByIndex(BindIdx++, GameId);
+		Stmt.SetBindingValueByIndex(BindIdx++, AgentId);
+		Stmt.SetBindingValueByIndex(BindIdx++, EventTypeStr);
+		for (const FString &V : Viewers)
+			Stmt.SetBindingValueByIndex(BindIdx++, V);
+		if (LimitCount > 0)
+			Stmt.SetBindingValueByIndex(BindIdx++, (int64)LimitCount);
+
+		while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
+		{
+			Out.Add(RowToEvent(Stmt));
+		}
 		return Out;
 	}
-	int32 BindIdx = 1;
-	Stmt.SetBindingValueByIndex(BindIdx++, GameId);
-	Stmt.SetBindingValueByIndex(BindIdx++, AgentId);
-	Stmt.SetBindingValueByIndex(BindIdx++, EventTypeStr);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
-	if (LimitCount > 0) Stmt.SetBindingValueByIndex(BindIdx++, (int64)LimitCount);
-
-	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
-	{
-		Out.Add(RowToEvent(Stmt));
-	}
-	return Out;
-}
 
 } // namespace anonymous
 
-TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyStatements(const FString& InAgentId) const
+/** 列出 agent 自己说过的公开发言和私信，用于“自我发言不可压缩”上下文。 */
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyStatements(const FString &InAgentId) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
-	if (Viewers.Num() == 0) return Out;
+	if (Viewers.Num() == 0)
+		return Out;
 
 	// "自我发言全量追溯"（principles 硬约束 2）含 speech.public + private_msg 两通道——
 	// 协议层把这二者都视为 agent 发出的"统辞"，T6 PromptAssembler 的"自我发言不可压缩段"
 	// 也按这个集合组装。speech.intended/note/reflection 走各自的 ListMy* API。
 	// 注：private_msg 能否被 actor 自己 quote 取决于写入侧把 actor 自身放进 visibility
-	//（T5/T7 写入侧纪律）；read API 不做旁路，全部走 JOIN。
+	// （T5/T7 写入侧纪律）；read API 不做旁路，全部走 JOIN。
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.actor = ?2 "
-		     "  AND e.event_type IN ('speech.public', 'private_msg') "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-		     "ORDER BY e.seq;"),
+			 "WHERE e.game_id = ?1 AND e.actor = ?2 "
+			 "  AND e.event_type IN ('speech.public', 'private_msg') "
+			 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			 "ORDER BY e.seq;"),
 		kEventSelectColumns,
 		*MakeViewerInPlaceholders(Viewers.Num()));
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("ListMyStatements: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -1080,7 +1155,8 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyStatements(const FString&
 	int32 BindIdx = 1;
 	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
 	Stmt.SetBindingValueByIndex(BindIdx++, InAgentId);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	for (const FString &V : Viewers)
+		Stmt.SetBindingValueByIndex(BindIdx++, V);
 
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -1089,52 +1165,61 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyStatements(const FString&
 	return Out;
 }
 
-TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyNotes(const FString& InAgentId, int32 InRecentN) const
+/** 列出 agent 最近的 speech.note 事件。 */
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyNotes(const FString &InAgentId, int32 InRecentN) const
 {
-	if (!IsGameOpen()) return {};
+	if (!IsGameOpen())
+		return {};
 	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
-	if (Viewers.Num() == 0) return {};
+	if (Viewers.Num() == 0)
+		return {};
 	return ListSelfEventsByType(Db, CurrentGameId, InAgentId,
-		AILiveEvent::EventTypeToString(EAILiveEventType::SpeechNote),
-		Viewers, /*bDescByRound=*/true, /*LimitCount=*/InRecentN);
+								AILiveEvent::EventTypeToString(EAILiveEventType::SpeechNote),
+								Viewers, /*bDescByRound=*/true, /*LimitCount=*/InRecentN);
 }
 
-TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyReflections(const FString& InAgentId, int32 InRecentN) const
+/** 列出 agent 最近的 reflection.9q 事件。 */
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyReflections(const FString &InAgentId, int32 InRecentN) const
 {
-	if (!IsGameOpen()) return {};
+	if (!IsGameOpen())
+		return {};
 	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
-	if (Viewers.Num() == 0) return {};
+	if (Viewers.Num() == 0)
+		return {};
 	return ListSelfEventsByType(Db, CurrentGameId, InAgentId,
-		AILiveEvent::EventTypeToString(EAILiveEventType::Reflection9Q),
-		Viewers, /*bDescByRound=*/true, /*LimitCount=*/InRecentN);
+								AILiveEvent::EventTypeToString(EAILiveEventType::Reflection9Q),
+								Viewers, /*bDescByRound=*/true, /*LimitCount=*/InRecentN);
 }
 
-TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyPendingIntended(const FString& InAgentId, int32 InRecentN) const
+/** 列出还没有对应 speech.public 子事件的 speech.intended。 */
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyPendingIntended(const FString &InAgentId, int32 InRecentN) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 
 	const TArray<FString> Viewers = ExpandViewerForJoin(InAgentId);
-	if (Viewers.Num() == 0) return Out;
+	if (Viewers.Num() == 0)
+		return Out;
 
 	// 走 events 表 + parent 链直算——不读 agent_view_state 投影表。
 	// 即使 agent_view_state 被 DROP，本查询仍正确返回（task card 新增 L1 用例）。
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.actor = ?2 AND e.event_type = 'speech.intended' "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-		     "  AND NOT EXISTS (SELECT 1 FROM events c "
-		     "                  WHERE c.game_id = e.game_id "
-		     "                    AND c.event_type = 'speech.public' "
-		     "                    AND c.parent_event_id = e.event_id) "
-		     "ORDER BY e.seq DESC%s;"),
+			 "WHERE e.game_id = ?1 AND e.actor = ?2 AND e.event_type = 'speech.intended' "
+			 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+			 "  AND NOT EXISTS (SELECT 1 FROM events c "
+			 "                  WHERE c.game_id = e.game_id "
+			 "                    AND c.event_type = 'speech.public' "
+			 "                    AND c.parent_event_id = e.event_id) "
+			 "ORDER BY e.seq DESC%s;"),
 		kEventSelectColumns,
 		*MakeViewerInPlaceholders(Viewers.Num()),
 		InRecentN > 0 ? TEXT(" LIMIT ?") : TEXT(""));
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("ListMyPendingIntended: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -1142,8 +1227,10 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyPendingIntended(const FSt
 	int32 BindIdx = 1;
 	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
 	Stmt.SetBindingValueByIndex(BindIdx++, InAgentId);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
-	if (InRecentN > 0) Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRecentN);
+	for (const FString &V : Viewers)
+		Stmt.SetBindingValueByIndex(BindIdx++, V);
+	if (InRecentN > 0)
+		Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRecentN);
 
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -1152,27 +1239,29 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListMyPendingIntended(const FSt
 	return Out;
 }
 
-TArray<FAILiveCommitment> UAILiveEventStoreSubsystem::ListMyCommitments(const FString& InAgentId,
-                                                                         int32 InRoundStart,
-                                                                         int32 InRoundEnd) const
+/** 从 commitments 投影表读取某 agent 在轮次范围内的承诺状态。 */
+TArray<FAILiveCommitment> UAILiveEventStoreSubsystem::ListMyCommitments(const FString &InAgentId,
+																		int32 InRoundStart,
+																		int32 InRoundEnd) const
 {
 	TArray<FAILiveCommitment> Out;
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 
 	// 投影表直读（T8 落地后才会有数据；T4 阶段 commitments 表存在但通常为空）。
 	const FString Sql =
 		TEXT("SELECT game_id, agent_id, round_no, seq, commitment_type, target, text, status "
-		     "FROM commitments "
-		     "WHERE game_id = ?1 AND agent_id = ?2 "
-		     "  AND (?3 < 0 OR round_no >= ?3) "
-		     "  AND (?4 < 0 OR round_no <= ?4) "
-		     "ORDER BY round_no, seq;");
+			 "FROM commitments "
+			 "WHERE game_id = ?1 AND agent_id = ?2 "
+			 "  AND (?3 < 0 OR round_no >= ?3) "
+			 "  AND (?4 < 0 OR round_no <= ?4) "
+			 "ORDER BY round_no, seq;");
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Verbose, TEXT("ListMyCommitments: prepare failed (commitments 表不存在或无数据): %s"),
-			*Db.GetLastError());
+			   *Db.GetLastError());
 		return Out;
 	}
 	Stmt.SetBindingValueByIndex(1, CurrentGameId);
@@ -1188,32 +1277,40 @@ TArray<FAILiveCommitment> UAILiveEventStoreSubsystem::ListMyCommitments(const FS
 		FString TypeStr, StatusStr;
 		Stmt.GetColumnValueByIndex(0, C.GameId);
 		Stmt.GetColumnValueByIndex(1, C.AgentId);
-		Stmt.GetColumnValueByIndex(2, RoundNoRead); C.RoundNo = (int32)RoundNoRead;
-		Stmt.GetColumnValueByIndex(3, SeqRead);     C.Seq = SeqRead;
-		Stmt.GetColumnValueByIndex(4, TypeStr);     C.CommitmentType = AILiveEvent::CommitmentTypeFromString(TypeStr);
+		Stmt.GetColumnValueByIndex(2, RoundNoRead);
+		C.RoundNo = (int32)RoundNoRead;
+		Stmt.GetColumnValueByIndex(3, SeqRead);
+		C.Seq = SeqRead;
+		Stmt.GetColumnValueByIndex(4, TypeStr);
+		// DB 存字符串，C++ 结构体存 enum；读取时集中做转换。
+		C.CommitmentType = AILiveEvent::CommitmentTypeFromString(TypeStr);
 		Stmt.GetColumnValueByIndex(5, C.Target);
 		Stmt.GetColumnValueByIndex(6, C.Text);
-		Stmt.GetColumnValueByIndex(7, StatusStr);   C.Status = AILiveEvent::CommitmentStatusFromString(StatusStr);
+		Stmt.GetColumnValueByIndex(7, StatusStr);
+		C.Status = AILiveEvent::CommitmentStatusFromString(StatusStr);
 		Out.Add(C);
 	}
 	return Out;
 }
 
-TArray<FAILiveEvent> UAILiveEventStoreSubsystem::SearchHistory(const FString& InKeyword, const FString& InActor,
-                                                                int32 InRoundStart, int32 InRoundEnd,
-                                                                const FString& InViewer, int32 InLimit) const
+/** 在历史事件 payload_text 中搜索关键词，并应用 actor/round/viewer 过滤。 */
+TArray<FAILiveEvent> UAILiveEventStoreSubsystem::SearchHistory(const FString &InKeyword, const FString &InActor,
+															   int32 InRoundStart, int32 InRoundEnd,
+															   const FString &InViewer, int32 InLimit) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen() || InKeyword.IsEmpty()) return Out;
+	if (!IsGameOpen() || InKeyword.IsEmpty())
+		return Out;
 
 	const TArray<FString> Viewers = ExpandViewerForJoin(InViewer);
-	if (Viewers.Num() == 0) return Out;
+	if (Viewers.Num() == 0)
+		return Out;
 
 	// 双路径：< 3 字 keyword 或 trigram 不可用走 LIKE；否则 FTS5 MATCH。
 	const bool bUseLike = (InKeyword.Len() < 3) || (DetectedFtsTokenizer != TEXT("trigram"));
 	UE_LOG(LogAILiveMemory, Display,
-		TEXT("SearchHistory: keyword='%s' viewer='%s' path=%s tokenizer=%s"),
-		*InKeyword, *InViewer, bUseLike ? TEXT("LIKE") : TEXT("FTS5"), *DetectedFtsTokenizer);
+		   TEXT("SearchHistory: keyword='%s' viewer='%s' path=%s tokenizer=%s"),
+		   *InKeyword, *InViewer, bUseLike ? TEXT("LIKE") : TEXT("FTS5"), *DetectedFtsTokenizer);
 
 	const int32 ActualLimit = InLimit > 0 ? InLimit : 100;
 
@@ -1222,14 +1319,14 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::SearchHistory(const FString& In
 	{
 		Sql = FString::Printf(
 			TEXT("SELECT %s FROM events e "
-			     "WHERE e.game_id = ?1 "
-			     "  AND e.payload_text LIKE ?2 ESCAPE '\\' "
-			     "  AND (?3 = '' OR e.actor = ?3) "
-			     "  AND (?4 < 0 OR e.round_no >= ?4) "
-			     "  AND (?5 < 0 OR e.round_no <= ?5) "
-			     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-			     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-			     "ORDER BY e.seq DESC LIMIT ?;"),
+				 "WHERE e.game_id = ?1 "
+				 "  AND e.payload_text LIKE ?2 ESCAPE '\\' "
+				 "  AND (?3 = '' OR e.actor = ?3) "
+				 "  AND (?4 < 0 OR e.round_no >= ?4) "
+				 "  AND (?5 < 0 OR e.round_no <= ?5) "
+				 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+				 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+				 "ORDER BY e.seq DESC LIMIT ?;"),
 			kEventSelectColumns,
 			*MakeViewerInPlaceholders(Viewers.Num()));
 	}
@@ -1237,21 +1334,21 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::SearchHistory(const FString& In
 	{
 		Sql = FString::Printf(
 			TEXT("SELECT %s FROM events e "
-			     "JOIN events_fts f ON f.rowid = e.rowid "
-			     "WHERE e.game_id = ?1 "
-			     "  AND events_fts MATCH ?2 "
-			     "  AND (?3 = '' OR e.actor = ?3) "
-			     "  AND (?4 < 0 OR e.round_no >= ?4) "
-			     "  AND (?5 < 0 OR e.round_no <= ?5) "
-			     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-			     "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
-			     "ORDER BY e.seq DESC LIMIT ?;"),
+				 "JOIN events_fts f ON f.rowid = e.rowid "
+				 "WHERE e.game_id = ?1 "
+				 "  AND events_fts MATCH ?2 "
+				 "  AND (?3 = '' OR e.actor = ?3) "
+				 "  AND (?4 < 0 OR e.round_no >= ?4) "
+				 "  AND (?5 < 0 OR e.round_no <= ?5) "
+				 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+				 "              WHERE v.event_id = e.event_id AND v.viewer IN (%s)) "
+				 "ORDER BY e.seq DESC LIMIT ?;"),
 			kEventSelectColumns,
 			*MakeViewerInPlaceholders(Viewers.Num()));
 	}
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("SearchHistory: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -1260,17 +1357,20 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::SearchHistory(const FString& In
 	Stmt.SetBindingValueByIndex(BindIdx++, CurrentGameId);
 	if (bUseLike)
 	{
+		// LIKE 路径兼容短中文关键词与 unicode61 fallback，但需要手动 escape 通配符。
 		const FString Pattern = TEXT("%") + EscapeLikePattern(InKeyword) + TEXT("%");
 		Stmt.SetBindingValueByIndex(BindIdx++, Pattern);
 	}
 	else
 	{
+		// trigram 可用时走 FTS5 MATCH，适合更长的模糊搜索关键词。
 		Stmt.SetBindingValueByIndex(BindIdx++, InKeyword);
 	}
 	Stmt.SetBindingValueByIndex(BindIdx++, InActor);
 	Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRoundStart);
 	Stmt.SetBindingValueByIndex(BindIdx++, (int64)InRoundEnd);
-	for (const FString& V : Viewers) Stmt.SetBindingValueByIndex(BindIdx++, V);
+	for (const FString &V : Viewers)
+		Stmt.SetBindingValueByIndex(BindIdx++, V);
 	Stmt.SetBindingValueByIndex(BindIdx++, (int64)ActualLimit);
 
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
@@ -1280,10 +1380,12 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::SearchHistory(const FString& In
 	return Out;
 }
 
+/** 列出某一轮的公开 vote 原始事件，而不是 vote_history 投影行。 */
 TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListVotes(int32 InRoundNo) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 
 	// 直接查 events 表的 event_type='vote' 公开原文——返回的 FAILiveEvent 含完整
 	// EventId/PayloadJson/Visibility/EventHash/parent_event_id 等字段，调用方可
@@ -1291,14 +1393,14 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListVotes(int32 InRoundNo) cons
 	// 提取原文必须回 events）。视角隔离对协议层公开事件 hard-code 'public'。
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.round_no = ?2 AND e.event_type = 'vote' "
-		     "  AND EXISTS (SELECT 1 FROM event_visibility v "
-		     "              WHERE v.event_id = e.event_id AND v.viewer = 'public') "
-		     "ORDER BY e.seq;"),
+			 "WHERE e.game_id = ?1 AND e.round_no = ?2 AND e.event_type = 'vote' "
+			 "  AND EXISTS (SELECT 1 FROM event_visibility v "
+			 "              WHERE v.event_id = e.event_id AND v.viewer = 'public') "
+			 "ORDER BY e.seq;"),
 		kEventSelectColumns);
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("ListVotes: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -1313,18 +1415,20 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::ListVotes(int32 InRoundNo) cons
 	return Out;
 }
 
+/** 把 alliance_state 投影表序列化为 JSON 字符串，供 UI/debug 直接消费。 */
 FString UAILiveEventStoreSubsystem::ListAllianceStateJson() const
 {
-	if (!IsGameOpen()) return TEXT("[]");
+	if (!IsGameOpen())
+		return TEXT("[]");
 
 	// 投影表直读：alliance_state 全部行 → JSON 数组（T8 落地后才会有数据）。
-	const TCHAR* Sql =
+	const TCHAR *Sql =
 		TEXT("SELECT alliance_id, members, proposed_at_seq, accepted_at_seq, "
-		     "       betrayed_at_seq, terms FROM alliance_state "
-		     "WHERE game_id = ?1;");
+			 "       betrayed_at_seq, terms FROM alliance_state "
+			 "WHERE game_id = ?1;");
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), Sql))
 	{
 		UE_LOG(LogAILiveMemory, Verbose, TEXT("ListAllianceStateJson: prepare failed: %s"), *Db.GetLastError());
 		return TEXT("[]");
@@ -1333,6 +1437,7 @@ FString UAILiveEventStoreSubsystem::ListAllianceStateJson() const
 
 	FString Out;
 	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+	// 这里返回 JSON 数组字符串，而不是 C++ 结构体数组，方便 Blueprint/console 显示。
 	Writer->WriteArrayStart();
 	while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 	{
@@ -1362,22 +1467,24 @@ FString UAILiveEventStoreSubsystem::ListAllianceStateJson() const
 	return Out;
 }
 
+/** 内部查询：按 tick_no + event_type 切片，不做 viewer 过滤，给 orchestrator 逻辑使用。 */
 TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByEventTypeAndTick(
 	EAILiveEventType InEventType, int64 InTickNo) const
 {
 	TArray<FAILiveEvent> Out;
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 
 	// 内部用——orchestrator 自身调用，不做 viewer 过滤。
 	const FString EventTypeStr = AILiveEvent::EventTypeToString(InEventType);
 	const FString Sql = FString::Printf(
 		TEXT("SELECT %s FROM events e "
-		     "WHERE e.game_id = ?1 AND e.tick_no = ?2 AND e.event_type = ?3 "
-		     "ORDER BY e.seq;"),
+			 "WHERE e.game_id = ?1 AND e.tick_no = ?2 AND e.event_type = ?3 "
+			 "ORDER BY e.seq;"),
 		kEventSelectColumns);
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("QuoteByEventTypeAndTick: prepare failed: %s"), *Db.GetLastError());
 		return Out;
@@ -1399,81 +1506,92 @@ TArray<FAILiveEvent> UAILiveEventStoreSubsystem::QuoteByEventTypeAndTick(
 
 namespace
 {
-	// 解 bid payload：{ "urgency": float, "proposed_target"?: str, "rationale"?: str }
-	bool ParseBidPayload(const FString& InPayloadJson, float& OutUrgency,
-	                     FString& OutProposedTarget, FString& OutRationale)
+	/** 解 bid payload：{ "urgency": float, "proposed_target"?: str, "rationale"?: str }。 */
+	bool ParseBidPayload(const FString &InPayloadJson, float &OutUrgency,
+						 FString &OutProposedTarget, FString &OutRationale)
 	{
 		OutUrgency = 0.f;
 		TSharedPtr<FJsonObject> Obj;
 		const auto R = TJsonReaderFactory<TCHAR>::Create(InPayloadJson);
-		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid()) return false;
+		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid())
+			return false;
 		double Tmp = 0.0;
-		if (Obj->TryGetNumberField(TEXT("urgency"), Tmp)) OutUrgency = static_cast<float>(Tmp);
+		if (Obj->TryGetNumberField(TEXT("urgency"), Tmp))
+		{
+			// JSON number 先读成 double，再缩到 gameplay 用的 float。
+			OutUrgency = static_cast<float>(Tmp);
+		}
 		Obj->TryGetStringField(TEXT("proposed_target"), OutProposedTarget);
 		Obj->TryGetStringField(TEXT("rationale"), OutRationale);
 		return true;
 	}
 
-	// 从 intended payload 抽 addressed_to_hint 数组
-	TArray<FString> ParseAddressedToHint(const FString& InIntendedPayloadJson)
+	/** 从 intended payload 抽 addressed_to_hint 数组，给 runtime adjustment 判断“被 @”使用。 */
+	TArray<FString> ParseAddressedToHint(const FString &InIntendedPayloadJson)
 	{
 		TArray<FString> Out;
 		TSharedPtr<FJsonObject> Obj;
 		const auto R = TJsonReaderFactory<TCHAR>::Create(InIntendedPayloadJson);
-		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid()) return Out;
-		const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid())
+			return Out;
+		const TArray<TSharedPtr<FJsonValue>> *Arr = nullptr;
 		if (Obj->TryGetArrayField(TEXT("addressed_to_hint"), Arr) && Arr)
 		{
-			for (const TSharedPtr<FJsonValue>& V : *Arr)
+			for (const TSharedPtr<FJsonValue> &V : *Arr)
 			{
 				FString S;
-				if (V.IsValid() && V->TryGetString(S)) Out.Add(S);
+				if (V.IsValid() && V->TryGetString(S))
+					Out.Add(S);
 			}
 		}
 		return Out;
 	}
 
-	// 从 tick_resolved payload 取 winner_actor + winner_intended_seq
-	bool ParseTickResolvedPayload(const FString& InPayloadJson, FString& OutWinner,
-	                              int64& OutWinnerIntendedSeq)
+	/** 从 tick_resolved payload 取 winner_actor + winner_intended_seq。 */
+	bool ParseTickResolvedPayload(const FString &InPayloadJson, FString &OutWinner,
+								  int64 &OutWinnerIntendedSeq)
 	{
 		OutWinner.Reset();
 		OutWinnerIntendedSeq = 0;
 		TSharedPtr<FJsonObject> Obj;
 		const auto R = TJsonReaderFactory<TCHAR>::Create(InPayloadJson);
-		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid()) return false;
+		if (!FJsonSerializer::Deserialize(R, Obj) || !Obj.IsValid())
+			return false;
 		Obj->TryGetStringField(TEXT("winner_actor"), OutWinner);
 		double Tmp = 0.0;
-		if (Obj->TryGetNumberField(TEXT("winner_intended_seq"), Tmp)) OutWinnerIntendedSeq = static_cast<int64>(Tmp);
+		if (Obj->TryGetNumberField(TEXT("winner_intended_seq"), Tmp))
+			OutWinnerIntendedSeq = static_cast<int64>(Tmp);
 		return true;
 	}
 }
 
+/** 列出某 tick 的全部 bid，并把同 actor 的 speech.intended seq 关联回来。 */
 TArray<FAILiveBid> UAILiveEventStoreSubsystem::ListBidsForTick(int64 InTickNo) const
 {
 	TArray<FAILiveBid> Out;
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 
 	// 协议不变量：每 actor 每拍最多 1 条 intended + 1 条 bid。
 	// JOIN events i ON i.game_id=b.game_id AND i.tick_no=b.tick_no AND i.actor=b.actor
 	// AND i.event_type='speech.intended' 反解 IntendedSeq。
 	const FString Sql = FString::Printf(
 		TEXT("SELECT b.actor, b.seq, b.payload, COALESCE(i.seq, 0) "
-		     "FROM events b "
-		     "LEFT JOIN events i "
-		     "  ON i.game_id = b.game_id AND i.tick_no = b.tick_no "
-		     " AND i.actor = b.actor AND i.event_type = ?3 "
-		     "WHERE b.game_id = ?1 AND b.tick_no = ?2 AND b.event_type = ?4 "
-		     "ORDER BY b.seq;"));
+			 "FROM events b "
+			 "LEFT JOIN events i "
+			 "  ON i.game_id = b.game_id AND i.tick_no = b.tick_no "
+			 " AND i.actor = b.actor AND i.event_type = ?3 "
+			 "WHERE b.game_id = ?1 AND b.tick_no = ?2 AND b.event_type = ?4 "
+			 "ORDER BY b.seq;"));
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error, TEXT("ListBidsForTick: prepare failed: %s"), *Db.GetLastError());
 		return Out;
 	}
 	const FString IntendedTypeStr = AILiveEvent::EventTypeToString(EAILiveEventType::SpeechIntended);
-	const FString BidTypeStr      = AILiveEvent::EventTypeToString(EAILiveEventType::Bid);
+	const FString BidTypeStr = AILiveEvent::EventTypeToString(EAILiveEventType::Bid);
 	Stmt.SetBindingValueByIndex(1, CurrentGameId);
 	Stmt.SetBindingValueByIndex(2, InTickNo);
 	Stmt.SetBindingValueByIndex(3, IntendedTypeStr);
@@ -1487,6 +1605,7 @@ TArray<FAILiveBid> UAILiveEventStoreSubsystem::ListBidsForTick(int64 InTickNo) c
 		FString PayloadJson;
 		Stmt.GetColumnValueByIndex(2, PayloadJson);
 		Stmt.GetColumnValueByIndex(3, B.IntendedSeq);
+		// bid 的分数字段藏在 JSON payload 内，行列字段只保存通用事件结构。
 		ParseBidPayload(PayloadJson, B.Urgency, B.ProposedTarget, B.Rationale);
 		// BidOffset / FinalScore / RuntimeAdj 由 ResolveFloor 填
 		Out.Add(MoveTemp(B));
@@ -1494,35 +1613,44 @@ TArray<FAILiveBid> UAILiveEventStoreSubsystem::ListBidsForTick(int64 InTickNo) c
 	return Out;
 }
 
+/** 计算某 actor 在当前 tick 的动态加权：反霸麦、被点名、沉默补偿。 */
 float UAILiveEventStoreSubsystem::ComputeRuntimeAdjustment(
-	const FString& InActor, int64 InCurrentTickNo) const
+	const FString &InActor, int64 InCurrentTickNo) const
 {
 	float Adj = 0.f;
-	if (!IsGameOpen() || InActor.IsEmpty() || InCurrentTickNo <= 0) return Adj;
+	if (!IsGameOpen() || InActor.IsEmpty() || InCurrentTickNo <= 0)
+		return Adj;
 
 	// 反霸麦：扫 tick-1..tick-3 的 tick_resolved.winner_actor。
 	// 任务卡常量版：连续 ≥ 3 拍命中 → -1.5（一次性，不叠乘）。
 	{
 		int32 Streak = 0;
-		bool  bBroken = false;
+		bool bBroken = false;
 		for (int64 T = InCurrentTickNo - 1; T >= InCurrentTickNo - 3 && T > 0 && !bBroken; --T)
 		{
 			TArray<FAILiveEvent> TR = QuoteByEventTypeAndTick(
 				EAILiveEventType::OrchestratorTickResolved, T);
 			bool bFoundWin = false;
-			for (const FAILiveEvent& E : TR)
+			for (const FAILiveEvent &E : TR)
 			{
-				FString W; int64 _ = 0;
+				FString W;
+				int64 _ = 0;
 				if (ParseTickResolvedPayload(E.PayloadJson, W, _) && W == InActor)
 				{
+					// 只要该 tick 有一条 resolved 说此 actor 赢了，就计入连续霸麦。
 					bFoundWin = true;
 					break;
 				}
 			}
-			if (bFoundWin) ++Streak;
-			else { bBroken = true; }
+			if (bFoundWin)
+				++Streak;
+			else
+			{
+				bBroken = true;
+			}
 		}
-		if (Streak >= 3) Adj += -1.5f;
+		if (Streak >= 3)
+			Adj += -1.5f;
 	}
 
 	// 被 @ 加权：扫上一拍 tick_resolved → winner intended.addressed_to_hint 含本 actor → +2.0。
@@ -1530,24 +1658,32 @@ float UAILiveEventStoreSubsystem::ComputeRuntimeAdjustment(
 	{
 		TArray<FAILiveEvent> TR = QuoteByEventTypeAndTick(
 			EAILiveEventType::OrchestratorTickResolved, InCurrentTickNo - 1);
-		for (const FAILiveEvent& E : TR)
+		for (const FAILiveEvent &E : TR)
 		{
-			FString W; int64 IntSeq = 0;
-			if (!ParseTickResolvedPayload(E.PayloadJson, W, IntSeq) || W.IsEmpty() || IntSeq <= 0) continue;
+			FString W;
+			int64 IntSeq = 0;
+			if (!ParseTickResolvedPayload(E.PayloadJson, W, IntSeq) || W.IsEmpty() || IntSeq <= 0)
+				continue;
 
 			// 取 winner intended 事件，无 viewer 过滤（orchestrator 自己用）。
 			const FString Sql = FString::Printf(
 				TEXT("SELECT %s FROM events e WHERE e.game_id = ?1 AND e.seq = ?2;"),
 				kEventSelectColumns);
 			FSQLitePreparedStatement St;
-			if (!St.Create(const_cast<FSQLiteDatabase&>(Db), *Sql)) continue;
+			if (!St.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
+				continue;
 			St.SetBindingValueByIndex(1, CurrentGameId);
 			St.SetBindingValueByIndex(2, IntSeq);
 			if (St.Step() == ESQLitePreparedStatementStepResult::Row)
 			{
 				const FAILiveEvent IntEv = RowToEvent(St);
 				const TArray<FString> Targets = ParseAddressedToHint(IntEv.PayloadJson);
-				if (Targets.Contains(InActor)) { Adj += 2.0f; break; }
+				if (Targets.Contains(InActor))
+				{
+					// 上一拍胜者点名了当前 actor，鼓励当前 actor 接话。
+					Adj += 2.0f;
+					break;
+				}
 			}
 		}
 	}
@@ -1561,7 +1697,7 @@ float UAILiveEventStoreSubsystem::ComputeRuntimeAdjustment(
 			"WHERE game_id = ?1 AND actor = ?2 AND event_type = ?3 "
 			"  AND tick_no BETWEEN ?4 AND ?5 LIMIT 1;");
 		FSQLitePreparedStatement St;
-		if (St.Create(const_cast<FSQLiteDatabase&>(Db), *Sql))
+		if (St.Create(const_cast<FSQLiteDatabase &>(Db), *Sql))
 		{
 			St.SetBindingValueByIndex(1, CurrentGameId);
 			St.SetBindingValueByIndex(2, InActor);
@@ -1569,39 +1705,45 @@ float UAILiveEventStoreSubsystem::ComputeRuntimeAdjustment(
 			St.SetBindingValueByIndex(4, InCurrentTickNo - 5);
 			St.SetBindingValueByIndex(5, InCurrentTickNo - 1);
 			const bool bFound = (St.Step() == ESQLitePreparedStatementStepResult::Row);
-			if (!bFound) Adj += 0.5f;
+			if (!bFound)
+				Adj += 0.5f;
 		}
 	}
 
 	return Adj;
 }
 
+/** 根据 bid + offset + runtime adjustment 选择当前 tick 的发言者。 */
 FAILiveTickResolution UAILiveEventStoreSubsystem::ResolveFloor(
 	int64 InTickNo,
-	const TArray<FString>& InEligibleAgentIds,
-	const TMap<FString, float>& InAgentBidOffsets,
+	const TArray<FString> &InEligibleAgentIds,
+	const TMap<FString, float> &InAgentBidOffsets,
 	float InColdThreshold) const
 {
 	FAILiveTickResolution Out;
 	Out.TickNo = static_cast<int32>(InTickNo);
-	if (!IsGameOpen()) return Out;
+	if (!IsGameOpen())
+		return Out;
 
 	TArray<FAILiveBid> AllBids = ListBidsForTick(InTickNo);
 
 	// 过滤到 eligible 集合
 	TSet<FString> EligibleSet;
-	for (const FString& A : InEligibleAgentIds) EligibleSet.Add(A);
+	for (const FString &A : InEligibleAgentIds)
+		EligibleSet.Add(A);
 
 	float BestScore = -FLT_MAX;
 	FString BestActor;
-	int64   BestIntendedSeq = 0;
+	int64 BestIntendedSeq = 0;
 
-	for (FAILiveBid& B : AllBids)
+	for (FAILiveBid &B : AllBids)
 	{
-		if (!EligibleSet.Contains(B.Actor)) continue;
-		const float* OffPtr = InAgentBidOffsets.Find(B.Actor);
-		B.BidOffset  = OffPtr ? *OffPtr : 0.f;
+		if (!EligibleSet.Contains(B.Actor))
+			continue;
+		const float *OffPtr = InAgentBidOffsets.Find(B.Actor);
+		B.BidOffset = OffPtr ? *OffPtr : 0.f;
 		B.RuntimeAdj = ComputeRuntimeAdjustment(B.Actor, InTickNo);
+		// 最终分 = agent 自报 urgency + 外部 offset + 运行时公平性修正。
 		B.FinalScore = B.Urgency + B.BidOffset + B.RuntimeAdj;
 
 		// 同分按 lexicographic actor_id 取小（决策 #4）
@@ -1619,7 +1761,7 @@ FAILiveTickResolution UAILiveEventStoreSubsystem::ResolveFloor(
 
 	if (BestScore >= InColdThreshold && !BestActor.IsEmpty())
 	{
-		Out.WinnerActor       = BestActor;
+		Out.WinnerActor = BestActor;
 		Out.WinnerIntendedSeq = BestIntendedSeq;
 	}
 	// 否则 WinnerActor 留空（冷场）
@@ -1630,32 +1772,35 @@ FAILiveTickResolution UAILiveEventStoreSubsystem::ResolveFloor(
 // T3 — Static validation
 // ---------------------------------------------------------------
 
-bool UAILiveEventStoreSubsystem::ValidateVisibility(const TArray<FString>& InVisibility, FString& OutError)
+/** 静态校验 visibility：必须非空，且只能使用 schema 允许的 viewer 命名空间。 */
+bool UAILiveEventStoreSubsystem::ValidateVisibility(const TArray<FString> &InVisibility, FString &OutError)
 {
 	if (InVisibility.Num() == 0)
 	{
 		OutError = TEXT("visibility array must be non-empty");
 		return false;
 	}
-	for (const FString& V : InVisibility)
+	for (const FString &V : InVisibility)
 	{
 		if (V == TEXT("self"))
 		{
 			OutError = TEXT("visibility contains 'self' — must be expanded to a concrete actor "
-				"ID before AppendEvent (see schema.yaml viewer namespace)");
+							"ID before AppendEvent (see schema.yaml viewer namespace)");
 			return false;
 		}
 		if (!IsValidViewerString(V))
 		{
 			OutError = FString::Printf(TEXT("invalid viewer string: '%s' "
-				"(must be one of: public/audience/orchestrator/system/NPC<NN>/Faction<X>)"), *V);
+											"(must be one of: public/audience/orchestrator/system/NPC<NN>/Faction<X>)"),
+									   *V);
 			return false;
 		}
 	}
 	return true;
 }
 
-bool UAILiveEventStoreSubsystem::ValidatePayloadJson(const FString& InPayloadJson, FString& OutError)
+/** 静态校验 payload：必须是 JSON object，并且包含 text 字段供 FTS/UI 使用。 */
+bool UAILiveEventStoreSubsystem::ValidatePayloadJson(const FString &InPayloadJson, FString &OutError)
 {
 	if (InPayloadJson.IsEmpty())
 	{
@@ -1677,10 +1822,11 @@ bool UAILiveEventStoreSubsystem::ValidatePayloadJson(const FString& InPayloadJso
 	return true;
 }
 
+/** 软校验 addressed_to 是否包含在 visibility 内；public 可见时视为全部可见。 */
 bool UAILiveEventStoreSubsystem::IsAddressedToSubsetOfVisibility(
-	const TArray<FString>& InAddressedTo,
-	const TArray<FString>& InVisibility,
-	FString& OutError)
+	const TArray<FString> &InAddressedTo,
+	const TArray<FString> &InVisibility,
+	FString &OutError)
 {
 	if (InAddressedTo.Num() == 0)
 	{
@@ -1688,11 +1834,12 @@ bool UAILiveEventStoreSubsystem::IsAddressedToSubsetOfVisibility(
 	}
 	if (InVisibility.Contains(TEXT("public")))
 	{
+		// public 是通配可见性：任何 addressed_to 都能看到公开事件。
 		return true;
 	}
 	TSet<FString> VisSet;
 	VisSet.Append(InVisibility);
-	for (const FString& Target : InAddressedTo)
+	for (const FString &Target : InAddressedTo)
 	{
 		if (!VisSet.Contains(Target))
 		{
@@ -1718,7 +1865,8 @@ bool UAILiveEventStoreSubsystem::IsAddressedToSubsetOfVisibility(
 // (DB DEFAULT, in-memory != row), payload_text (GENERATED column).
 // ---------------------------------------------------------------
 
-FString UAILiveEventStoreSubsystem::CanonicalJsonOf(const FAILiveEvent& InEvent)
+/** 把 FAILiveEvent 写成确定性 JSON；这个字符串是 hash chain 的输入。 */
+FString UAILiveEventStoreSubsystem::CanonicalJsonOf(const FAILiveEvent &InEvent)
 {
 	FString Out;
 	const FCanonicalWriterRef W = FCanonicalWriterFactory::Create(&Out);
@@ -1727,7 +1875,7 @@ FString UAILiveEventStoreSubsystem::CanonicalJsonOf(const FAILiveEvent& InEvent)
 	W->WriteValue(TEXT("actor"), InEvent.Actor);
 
 	W->WriteArrayStart(TEXT("addressed_to"));
-	for (const FString& T : InEvent.AddressedTo)
+	for (const FString &T : InEvent.AddressedTo)
 	{
 		W->WriteValue(T);
 	}
@@ -1745,6 +1893,7 @@ FString UAILiveEventStoreSubsystem::CanonicalJsonOf(const FAILiveEvent& InEvent)
 		const TSharedRef<TJsonReader<>> Rdr = TJsonReaderFactory<>::Create(InEvent.PayloadJson);
 		if (FJsonSerializer::Deserialize(Rdr, PayloadObj) && PayloadObj.IsValid())
 		{
+			// payload 内部也走 canonical writer，避免 JSON 字段顺序导致 hash 不稳定。
 			WriteCanonicalObject(PayloadObj, *W);
 		}
 		else
@@ -1761,7 +1910,7 @@ FString UAILiveEventStoreSubsystem::CanonicalJsonOf(const FAILiveEvent& InEvent)
 	W->WriteValue(TEXT("speech_act_type"), AILiveEvent::SpeechActToString(InEvent.SpeechActType));
 
 	W->WriteArrayStart(TEXT("visibility"));
-	for (const FString& V : InEvent.Visibility)
+	for (const FString &V : InEvent.Visibility)
 	{
 		W->WriteValue(V);
 	}
@@ -1772,8 +1921,10 @@ FString UAILiveEventStoreSubsystem::CanonicalJsonOf(const FAILiveEvent& InEvent)
 	return Out;
 }
 
-FString UAILiveEventStoreSubsystem::ComputeEventHash(const FString& PrevHash, const FString& CanonicalPayload) const
+/** 计算事件 hash：SHA256(prev_hash + canonical_event_json)。 */
+FString UAILiveEventStoreSubsystem::ComputeEventHash(const FString &PrevHash, const FString &CanonicalPayload) const
 {
+	// PrevHash 串进输入里，任何历史事件变化都会级联影响后续 hash。
 	const FString Combined = PrevHash + CanonicalPayload;
 	return AILiveUtil::Sha256Fingerprint(Combined);
 }
@@ -1782,13 +1933,15 @@ FString UAILiveEventStoreSubsystem::ComputeEventHash(const FString& PrevHash, co
 // T3 — UUIDv7 (RFC 9562)
 // ---------------------------------------------------------------
 
+/** 生成 UUIDv7 字符串：前 48 bit 是毫秒时间戳，后面是随机数。 */
 FString UAILiveEventStoreSubsystem::GenerateUuidV7()
 {
 	uint8 B[16];
 
 	const FDateTime Now = FDateTime::UtcNow();
+	// UUIDv7 需要 Unix epoch 毫秒；FDateTime 的 ticks 是 100ns 精度。
 	const int64 UnixMs = Now.ToUnixTimestamp() * 1000LL +
-		(int64)((Now.GetTicks() % ETimespan::TicksPerSecond) / ETimespan::TicksPerMillisecond);
+						 (int64)((Now.GetTicks() % ETimespan::TicksPerSecond) / ETimespan::TicksPerMillisecond);
 
 	B[0] = (uint8)((UnixMs >> 40) & 0xFF);
 	B[1] = (uint8)((UnixMs >> 32) & 0xFF);
@@ -1820,12 +1973,13 @@ FString UAILiveEventStoreSubsystem::GenerateUuidV7()
 // → fall back to compile-time constant from the parser registry.
 // ---------------------------------------------------------------
 
+/** 写入时解析当前 parser_version；优先读 _meta.db，失败才回退编译期常量。 */
 FString UAILiveEventStoreSubsystem::ResolveLiveParserVersion()
 {
 	TMap<FString, FString> KVs;
 	if (QueryMetaSchemaRegistry(KVs))
 	{
-		const FString* Found = KVs.Find(TEXT("parser_version"));
+		const FString *Found = KVs.Find(TEXT("parser_version"));
 		if (Found && !Found->IsEmpty())
 		{
 			return *Found;
@@ -1839,10 +1993,11 @@ FString UAILiveEventStoreSubsystem::ResolveLiveParserVersion()
 // Updates by-ref local seq/hash trackers ONLY; never touches Cached* members.
 // ---------------------------------------------------------------
 
+/** 在已持有写锁和事务时插入单条事件；调用者负责提交/回滚。 */
 int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
-	FAILiveEvent& InOutEvent,
-	int64& InOutLocalLastSeq,
-	FString& InOutLocalLastHash)
+	FAILiveEvent &InOutEvent,
+	int64 &InOutLocalLastSeq,
+	FString &InOutLocalLastHash)
 {
 	InOutEvent.GameId = CurrentGameId;
 	InOutEvent.Seq = InOutLocalLastSeq + 1;
@@ -1864,26 +2019,27 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 	{
 		FSQLitePreparedStatement Ins;
 		if (!Ins.Create(Db, TEXT(
-			"INSERT INTO events ("
-			"  event_id, game_id, seq, round_no, phase, actor, event_type,"
-			"  speech_act_type, visibility, addressed_to, payload, parent_event_id,"
-			"  parser_version, raw_llm_output, prev_event_hash, event_hash, tick_no"
-			") VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17);")))
+								"INSERT INTO events ("
+								"  event_id, game_id, seq, round_no, phase, actor, event_type,"
+								"  speech_act_type, visibility, addressed_to, payload, parent_event_id,"
+								"  parser_version, raw_llm_output, prev_event_hash, event_hash, tick_no"
+								") VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17);")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("InsertEventBypassValidation_LockHeld: prepare failed: %s"),
-				*Db.GetLastError());
+				   TEXT("InsertEventBypassValidation_LockHeld: prepare failed: %s"),
+				   *Db.GetLastError());
 			return -1;
 		}
-		bOk = bOk && Ins.SetBindingValueByIndex(1,  InOutEvent.EventId);
-		bOk = bOk && Ins.SetBindingValueByIndex(2,  InOutEvent.GameId);
-		bOk = bOk && Ins.SetBindingValueByIndex(3,  InOutEvent.Seq);
-		bOk = bOk && Ins.SetBindingValueByIndex(4,  (int64)InOutEvent.RoundNo);
-		bOk = bOk && Ins.SetBindingValueByIndex(5,  AILiveEvent::PhaseToString(InOutEvent.Phase));
-		bOk = bOk && Ins.SetBindingValueByIndex(6,  InOutEvent.Actor);
-		bOk = bOk && Ins.SetBindingValueByIndex(7,  AILiveEvent::EventTypeToString(InOutEvent.EventType));
-		bOk = bOk && Ins.SetBindingValueByIndex(8,  AILiveEvent::SpeechActToString(InOutEvent.SpeechActType));
-		bOk = bOk && Ins.SetBindingValueByIndex(9,  AILiveEvent::ArrayToJsonString(InOutEvent.Visibility));
+		// 按 SQL 占位符顺序绑定 17 列；任何一步失败都让整条事件写入失败。
+		bOk = bOk && Ins.SetBindingValueByIndex(1, InOutEvent.EventId);
+		bOk = bOk && Ins.SetBindingValueByIndex(2, InOutEvent.GameId);
+		bOk = bOk && Ins.SetBindingValueByIndex(3, InOutEvent.Seq);
+		bOk = bOk && Ins.SetBindingValueByIndex(4, (int64)InOutEvent.RoundNo);
+		bOk = bOk && Ins.SetBindingValueByIndex(5, AILiveEvent::PhaseToString(InOutEvent.Phase));
+		bOk = bOk && Ins.SetBindingValueByIndex(6, InOutEvent.Actor);
+		bOk = bOk && Ins.SetBindingValueByIndex(7, AILiveEvent::EventTypeToString(InOutEvent.EventType));
+		bOk = bOk && Ins.SetBindingValueByIndex(8, AILiveEvent::SpeechActToString(InOutEvent.SpeechActType));
+		bOk = bOk && Ins.SetBindingValueByIndex(9, AILiveEvent::ArrayToJsonString(InOutEvent.Visibility));
 		bOk = bOk && Ins.SetBindingValueByIndex(10, AILiveEvent::ArrayToJsonString(InOutEvent.AddressedTo));
 		bOk = bOk && Ins.SetBindingValueByIndex(11, InOutEvent.PayloadJson);
 		bOk = bOk && Ins.SetBindingValueByIndex(12, InOutEvent.ParentEventId);
@@ -1896,8 +2052,8 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 		if (!bOk)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("InsertEventBypassValidation_LockHeld: events INSERT failed: %s"),
-				*Db.GetLastError());
+				   TEXT("InsertEventBypassValidation_LockHeld: events INSERT failed: %s"),
+				   *Db.GetLastError());
 			return -1;
 		}
 	}
@@ -1905,14 +2061,14 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 	{
 		FSQLitePreparedStatement Vis;
 		if (!Vis.Create(Db, TEXT(
-			"INSERT INTO event_visibility(event_id, viewer) VALUES (?1, ?2);")))
+								"INSERT INTO event_visibility(event_id, viewer) VALUES (?1, ?2);")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("InsertEventBypassValidation_LockHeld: visibility prepare failed: %s"),
-				*Db.GetLastError());
+				   TEXT("InsertEventBypassValidation_LockHeld: visibility prepare failed: %s"),
+				   *Db.GetLastError());
 			return -1;
 		}
-		for (const FString& Viewer : InOutEvent.Visibility)
+		for (const FString &Viewer : InOutEvent.Visibility)
 		{
 			Vis.Reset();
 			bOk = bOk && Vis.SetBindingValueByIndex(1, InOutEvent.EventId);
@@ -1921,8 +2077,8 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 			if (!bOk)
 			{
 				UE_LOG(LogAILiveMemory, Error,
-					TEXT("InsertEventBypassValidation_LockHeld: event_visibility INSERT failed: %s"),
-					*Db.GetLastError());
+					   TEXT("InsertEventBypassValidation_LockHeld: event_visibility INSERT failed: %s"),
+					   *Db.GetLastError());
 				return -1;
 			}
 		}
@@ -1932,14 +2088,14 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 	{
 		FSQLitePreparedStatement A;
 		if (!A.Create(Db, TEXT(
-			"INSERT INTO event_addressed_to(event_id, target) VALUES (?1, ?2);")))
+							  "INSERT INTO event_addressed_to(event_id, target) VALUES (?1, ?2);")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("InsertEventBypassValidation_LockHeld: addressed_to prepare failed: %s"),
-				*Db.GetLastError());
+				   TEXT("InsertEventBypassValidation_LockHeld: addressed_to prepare failed: %s"),
+				   *Db.GetLastError());
 			return -1;
 		}
-		for (const FString& Target : InOutEvent.AddressedTo)
+		for (const FString &Target : InOutEvent.AddressedTo)
 		{
 			A.Reset();
 			bOk = bOk && A.SetBindingValueByIndex(1, InOutEvent.EventId);
@@ -1948,13 +2104,14 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 			if (!bOk)
 			{
 				UE_LOG(LogAILiveMemory, Error,
-					TEXT("InsertEventBypassValidation_LockHeld: event_addressed_to INSERT failed: %s"),
-					*Db.GetLastError());
+					   TEXT("InsertEventBypassValidation_LockHeld: event_addressed_to INSERT failed: %s"),
+					   *Db.GetLastError());
 				return -1;
 			}
 		}
 	}
 
+	// 只有所有表都写成功，才推进调用者传入的本地 seq/hash 游标。
 	InOutLocalLastSeq = InOutEvent.Seq;
 	InOutLocalLastHash = NewHash;
 	return InOutEvent.Seq;
@@ -1966,7 +2123,8 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation_LockHeld(
 // truth-log fallback path is past its responsibility boundary.
 // ---------------------------------------------------------------
 
-int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation(FAILiveEvent& InOutEvent)
+/** 公共旁路写入：跳过静态校验，但仍使用写锁、事务和 hash chain。 */
+int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation(FAILiveEvent &InOutEvent)
 {
 	if (!IsGameOpen() || !Db.IsValid())
 	{
@@ -1976,12 +2134,13 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation(FAILiveEvent& InOu
 
 	FScopeLock Lock(&WriteMutex);
 
+	// BEGIN IMMEDIATE 提前拿写锁，避免多线程 append 之间交错分配 seq/hash。
 	if (!Db.Execute(TEXT("BEGIN IMMEDIATE;")))
 	{
 		UE_LOG(LogAILiveMemory, Fatal,
-			TEXT("InsertEventBypassValidation BEGIN IMMEDIATE failed: %s — "
-				 "EventStore is past its responsibility boundary."),
-			*Db.GetLastError());
+			   TEXT("InsertEventBypassValidation BEGIN IMMEDIATE failed: %s — "
+					"EventStore is past its responsibility boundary."),
+			   *Db.GetLastError());
 		return -1;
 	}
 
@@ -1992,21 +2151,22 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation(FAILiveEvent& InOu
 	{
 		Db.Execute(TEXT("ROLLBACK;"));
 		UE_LOG(LogAILiveMemory, Fatal,
-			TEXT("InsertEventBypassValidation INSERT failed (game=%s, actor=%s) — "
-				 "EventStore is past its responsibility boundary."),
-			*CurrentGameId, *InOutEvent.Actor);
+			   TEXT("InsertEventBypassValidation INSERT failed (game=%s, actor=%s) — "
+					"EventStore is past its responsibility boundary."),
+			   *CurrentGameId, *InOutEvent.Actor);
 		return -1;
 	}
 	if (!Db.Execute(TEXT("COMMIT;")))
 	{
 		Db.Execute(TEXT("ROLLBACK;"));
 		UE_LOG(LogAILiveMemory, Fatal,
-			TEXT("InsertEventBypassValidation COMMIT failed: %s — "
-				 "EventStore is past its responsibility boundary."),
-			*Db.GetLastError());
+			   TEXT("InsertEventBypassValidation COMMIT failed: %s — "
+					"EventStore is past its responsibility boundary."),
+			   *Db.GetLastError());
 		return -1;
 	}
 
+	// 事务提交后才把本地游标提升为全局缓存。
 	CachedLastSeq = LocalLastSeq;
 	CachedLastHash = LocalLastHash;
 	return NewSeq;
@@ -2019,11 +2179,12 @@ int64 UAILiveEventStoreSubsystem::InsertEventBypassValidation(FAILiveEvent& InOu
 // AppendSystemParseFailure even on schema conformance.
 // ---------------------------------------------------------------
 
+/** 写一条 system.parse_failed 审计事件，记录被静态校验拒绝的原始输入摘要。 */
 int64 UAILiveEventStoreSubsystem::AppendSystemParseFailure(
-	const FString& InOriginalActor,
-	const FString& InOriginalEventTypeStr,
-	const FString& InErrorReason,
-	const FString& InOriginalPayloadSnippet)
+	const FString &InOriginalActor,
+	const FString &InOriginalEventTypeStr,
+	const FString &InErrorReason,
+	const FString &InOriginalPayloadSnippet)
 {
 	const FString Snippet = InOriginalPayloadSnippet.Left(256);
 
@@ -2037,8 +2198,8 @@ int64 UAILiveEventStoreSubsystem::AppendSystemParseFailure(
 		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&PayloadJson);
 		Writer->WriteObjectStart();
 		Writer->WriteValue(TEXT("text"), FString::Printf(
-			TEXT("parse failed for actor=%s event_type=%s"),
-			*InOriginalActor, *InOriginalEventTypeStr));
+											 TEXT("parse failed for actor=%s event_type=%s"),
+											 *InOriginalActor, *InOriginalEventTypeStr));
 		Writer->WriteValue(TEXT("original_actor"), InOriginalActor);
 		Writer->WriteValue(TEXT("original_event_type"), InOriginalEventTypeStr);
 		Writer->WriteValue(TEXT("reason"), InErrorReason);
@@ -2053,7 +2214,7 @@ int64 UAILiveEventStoreSubsystem::AppendSystemParseFailure(
 	Sys.SpeechActType = EAILiveSpeechActType::None;
 	Sys.Phase = EAILivePhase::Setup;
 	Sys.RoundNo = 0;
-	Sys.Visibility = { TEXT("system") };
+	Sys.Visibility = {TEXT("system")};
 	Sys.PayloadJson = PayloadJson;
 
 	return InsertEventBypassValidation(Sys);
@@ -2063,16 +2224,19 @@ int64 UAILiveEventStoreSubsystem::AppendSystemParseFailure(
 // T3 — AppendEvent / AppendEventsAtomically
 // ---------------------------------------------------------------
 
-int64 UAILiveEventStoreSubsystem::AppendEvent(FAILiveEvent& InOutEvent)
+/** 单条事件写入的便捷包装：内部仍走 AppendEventsAtomically。 */
+int64 UAILiveEventStoreSubsystem::AppendEvent(FAILiveEvent &InOutEvent)
 {
 	TArray<FAILiveEvent> Group;
+	// MoveTemp 暂时把事件移进数组；写完后再移回给调用者拿到 seq/hash/event_id。
 	Group.Add(MoveTemp(InOutEvent));
 	const int64 FirstSeq = AppendEventsAtomically(Group);
 	InOutEvent = MoveTemp(Group[0]);
 	return FirstSeq;
 }
 
-int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& InOutEvents)
+/** 原子写入一组事件：全部成功才提交，任一失败则整组回滚。 */
+int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent> &InOutEvents)
 {
 	if (!IsGameOpen() || !Db.IsValid())
 	{
@@ -2095,8 +2259,8 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 		if (!ValidateVisibility(InOutEvents[i].Visibility, Err))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("AppendEventsAtomically rejected event[%d] (actor=%s): %s"),
-				i, *InOutEvents[i].Actor, *Err);
+				   TEXT("AppendEventsAtomically rejected event[%d] (actor=%s): %s"),
+				   i, *InOutEvents[i].Actor, *Err);
 			AppendSystemParseFailure(
 				InOutEvents[i].Actor,
 				AILiveEvent::EventTypeToString(InOutEvents[i].EventType),
@@ -2107,8 +2271,8 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 		if (!ValidatePayloadJson(InOutEvents[i].PayloadJson, Err))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("AppendEventsAtomically rejected event[%d] (actor=%s): %s"),
-				i, *InOutEvents[i].Actor, *Err);
+				   TEXT("AppendEventsAtomically rejected event[%d] (actor=%s): %s"),
+				   i, *InOutEvents[i].Actor, *Err);
 			AppendSystemParseFailure(
 				InOutEvents[i].Actor,
 				AILiveEvent::EventTypeToString(InOutEvents[i].EventType),
@@ -2125,9 +2289,9 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 				InOutEvents[i].AddressedTo, InOutEvents[i].Visibility, AddrErr))
 		{
 			UE_LOG(LogAILiveMemory, Warning,
-				TEXT("AppendEventsAtomically event[%d] (actor=%s): %s "
-					 "(proceeding with write per schema policy)"),
-				i, *InOutEvents[i].Actor, *AddrErr);
+				   TEXT("AppendEventsAtomically event[%d] (actor=%s): %s "
+						"(proceeding with write per schema policy)"),
+				   i, *InOutEvents[i].Actor, *AddrErr);
 			AppendSystemParseFailure(
 				InOutEvents[i].Actor,
 				AILiveEvent::EventTypeToString(InOutEvents[i].EventType),
@@ -2143,8 +2307,8 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 	if (!Db.Execute(TEXT("BEGIN IMMEDIATE;")))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("AppendEventsAtomically BEGIN IMMEDIATE failed (game=%s): %s"),
-			*CurrentGameId, *Db.GetLastError());
+			   TEXT("AppendEventsAtomically BEGIN IMMEDIATE failed (game=%s): %s"),
+			   *CurrentGameId, *Db.GetLastError());
 		return -1;
 	}
 
@@ -2156,6 +2320,7 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 
 	for (int32 i = 0; i < InOutEvents.Num() && bOk; ++i)
 	{
+		// 这里用同一个 LocalLastSeq/Hash 串起组内事件，保证组内 hash 顺序连续。
 		const int64 NewSeq = InsertEventBypassValidation_LockHeld(
 			InOutEvents[i], LocalLastSeq, LocalLastHash);
 		if (NewSeq < 0)
@@ -2172,8 +2337,8 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 	if (bOk && !Db.Execute(TEXT("COMMIT;")))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("AppendEventsAtomically COMMIT failed (game=%s): %s"),
-			*CurrentGameId, *Db.GetLastError());
+			   TEXT("AppendEventsAtomically COMMIT failed (game=%s): %s"),
+			   *CurrentGameId, *Db.GetLastError());
 		bOk = false;
 	}
 
@@ -2181,10 +2346,10 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 	{
 		Db.Execute(TEXT("ROLLBACK;"));
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("AppendEventsAtomically failed (game=%s, group_size=%d) — rolled back"),
-			*CurrentGameId, InOutEvents.Num());
+			   TEXT("AppendEventsAtomically failed (game=%s, group_size=%d) — rolled back"),
+			   *CurrentGameId, InOutEvents.Num());
 		// Reset assigned identity fields so caller cannot mistakenly trust them.
-		for (FAILiveEvent& Ev : InOutEvents)
+		for (FAILiveEvent &Ev : InOutEvents)
 		{
 			Ev.Seq = 0;
 			Ev.EventId.Reset();
@@ -2206,6 +2371,7 @@ int64 UAILiveEventStoreSubsystem::AppendEventsAtomically(TArray<FAILiveEvent>& I
 // to the next AppendEvent).
 // ---------------------------------------------------------------
 
+/** 开启一个 tick：写 tick_anchor 事件，并让后续 AppendEvent 继承该 tick_no。 */
 int64 UAILiveEventStoreSubsystem::BeginTick(int32 InTickNo)
 {
 	if (!IsGameOpen() || !Db.IsValid())
@@ -2221,7 +2387,7 @@ int64 UAILiveEventStoreSubsystem::BeginTick(int32 InTickNo)
 	if (!Db.Execute(TEXT("BEGIN IMMEDIATE;")))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("BeginTick BEGIN IMMEDIATE failed: %s"), *Db.GetLastError());
+			   TEXT("BeginTick BEGIN IMMEDIATE failed: %s"), *Db.GetLastError());
 		return -1;
 	}
 
@@ -2233,13 +2399,14 @@ int64 UAILiveEventStoreSubsystem::BeginTick(int32 InTickNo)
 	Anchor.SpeechActType = EAILiveSpeechActType::None;
 	Anchor.Phase = EAILivePhase::Setup;
 	Anchor.RoundNo = 0;
-	Anchor.Visibility = { TEXT("public") };
+	Anchor.Visibility = {TEXT("public")};
 	Anchor.PayloadJson = FString::Printf(
 		TEXT("{\"text\":\"tick anchor N=%d\",\"tick_no\":%d}"),
 		InTickNo, InTickNo);
 
 	int64 LocalLastSeq = CachedLastSeq;
 	FString LocalLastHash = CachedLastHash;
+	// tick_anchor 本身也进入 hash chain，所以 tick 开始动作可审计。
 	const int64 AnchorSeq = InsertEventBypassValidation_LockHeld(
 		Anchor, LocalLastSeq, LocalLastHash);
 
@@ -2247,7 +2414,7 @@ int64 UAILiveEventStoreSubsystem::BeginTick(int32 InTickNo)
 	if (bOk && !Db.Execute(TEXT("COMMIT;")))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("BeginTick COMMIT failed: %s"), *Db.GetLastError());
+			   TEXT("BeginTick COMMIT failed: %s"), *Db.GetLastError());
 		bOk = false;
 	}
 
@@ -2267,7 +2434,8 @@ int64 UAILiveEventStoreSubsystem::BeginTick(int32 InTickNo)
 // T3 — Debug helpers (used by console commands).
 // ---------------------------------------------------------------
 
-bool UAILiveEventStoreSubsystem::UpsertMetaSchemaKV(const FString& Key, const FString& Value)
+/** Debug 用：直接 upsert _meta.db.schema_meta 的一个 key/value。 */
+bool UAILiveEventStoreSubsystem::UpsertMetaSchemaKV(const FString &Key, const FString &Value)
 {
 	if (!MetaDb.IsValid())
 	{
@@ -2281,14 +2449,15 @@ bool UAILiveEventStoreSubsystem::UpsertMetaSchemaKV(const FString& Key, const FS
 		!Stmt.Execute())
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("UpsertMetaSchemaKV('%s'): %s"), *Key, *MetaDb.GetLastError());
+			   TEXT("UpsertMetaSchemaKV('%s'): %s"), *Key, *MetaDb.GetLastError());
 		return false;
 	}
 	return true;
 }
 
+/** 在主 Db 连接上重算整条 hash chain，输出最后 seq、坏链数量、第一条坏链 seq。 */
 bool UAILiveEventStoreSubsystem::RecomputeHashChainOnMainConnection(
-	int64& OutLastSeq, int64& OutBadCount, int64& OutFirstBadSeq)
+	int64 &OutLastSeq, int64 &OutBadCount, int64 &OutFirstBadSeq)
 {
 	OutLastSeq = 0;
 	OutBadCount = 0;
@@ -2297,7 +2466,7 @@ bool UAILiveEventStoreSubsystem::RecomputeHashChainOnMainConnection(
 	{
 		return false;
 	}
-	const TCHAR* Sql = TEXT(
+	const TCHAR *Sql = TEXT(
 		"SELECT seq, event_id, game_id, round_no, phase, actor, event_type,"
 		"       speech_act_type, visibility, addressed_to, payload, parent_event_id,"
 		"       parser_version, raw_llm_output, prev_event_hash, event_hash"
@@ -2309,60 +2478,63 @@ bool UAILiveEventStoreSubsystem::RecomputeHashChainOnMainConnection(
 	int64 FirstBadSeq = -1;
 
 	const int64 Rows = Db.Execute(Sql,
-		[this, &PrevHash, &LastSeq, &BadCount, &FirstBadSeq]
-		(const FSQLitePreparedStatement& Stmt)
-		{
-			FAILiveEvent Ev;
-			int64 SeqVal = 0;
-			int64 RoundNo64 = 0;
-			FString PhaseStr, EventTypeStr, SpeechActStr, VisJson, AddrJson;
-			FString PrevHashRow, EventHashRow;
-			Stmt.GetColumnValueByIndex(0,  SeqVal);
-			Stmt.GetColumnValueByIndex(1,  Ev.EventId);
-			Stmt.GetColumnValueByIndex(2,  Ev.GameId);
-			Stmt.GetColumnValueByIndex(3,  RoundNo64);
-			Stmt.GetColumnValueByIndex(4,  PhaseStr);
-			Stmt.GetColumnValueByIndex(5,  Ev.Actor);
-			Stmt.GetColumnValueByIndex(6,  EventTypeStr);
-			Stmt.GetColumnValueByIndex(7,  SpeechActStr);
-			Stmt.GetColumnValueByIndex(8,  VisJson);
-			Stmt.GetColumnValueByIndex(9,  AddrJson);
-			Stmt.GetColumnValueByIndex(10, Ev.PayloadJson);
-			Stmt.GetColumnValueByIndex(11, Ev.ParentEventId);
-			Stmt.GetColumnValueByIndex(12, Ev.ParserVersion);
-			Stmt.GetColumnValueByIndex(13, Ev.RawLLMOutput);
-			Stmt.GetColumnValueByIndex(14, PrevHashRow);
-			Stmt.GetColumnValueByIndex(15, EventHashRow);
+								  [this, &PrevHash, &LastSeq, &BadCount, &FirstBadSeq](const FSQLitePreparedStatement &Stmt)
+								  {
+									  FAILiveEvent Ev;
+									  int64 SeqVal = 0;
+									  int64 RoundNo64 = 0;
+									  FString PhaseStr, EventTypeStr, SpeechActStr, VisJson, AddrJson;
+									  FString PrevHashRow, EventHashRow;
+									  Stmt.GetColumnValueByIndex(0, SeqVal);
+									  Stmt.GetColumnValueByIndex(1, Ev.EventId);
+									  Stmt.GetColumnValueByIndex(2, Ev.GameId);
+									  Stmt.GetColumnValueByIndex(3, RoundNo64);
+									  Stmt.GetColumnValueByIndex(4, PhaseStr);
+									  Stmt.GetColumnValueByIndex(5, Ev.Actor);
+									  Stmt.GetColumnValueByIndex(6, EventTypeStr);
+									  Stmt.GetColumnValueByIndex(7, SpeechActStr);
+									  Stmt.GetColumnValueByIndex(8, VisJson);
+									  Stmt.GetColumnValueByIndex(9, AddrJson);
+									  Stmt.GetColumnValueByIndex(10, Ev.PayloadJson);
+									  Stmt.GetColumnValueByIndex(11, Ev.ParentEventId);
+									  Stmt.GetColumnValueByIndex(12, Ev.ParserVersion);
+									  Stmt.GetColumnValueByIndex(13, Ev.RawLLMOutput);
+									  Stmt.GetColumnValueByIndex(14, PrevHashRow);
+									  Stmt.GetColumnValueByIndex(15, EventHashRow);
 
-			Ev.Seq = SeqVal;
-			Ev.RoundNo = (int32)RoundNo64;
-			Ev.Phase = AILiveEvent::PhaseFromString(PhaseStr);
-			Ev.EventType = AILiveEvent::EventTypeFromString(EventTypeStr);
-			Ev.SpeechActType = AILiveEvent::SpeechActFromString(SpeechActStr);
-			Ev.Visibility = AILiveEvent::JsonStringToArray(VisJson);
-			Ev.AddressedTo = AILiveEvent::JsonStringToArray(AddrJson);
-			Ev.PrevEventHash = PrevHashRow;
-			Ev.EventHash = EventHashRow;
+									  Ev.Seq = SeqVal;
+									  Ev.RoundNo = (int32)RoundNo64;
+									  Ev.Phase = AILiveEvent::PhaseFromString(PhaseStr);
+									  Ev.EventType = AILiveEvent::EventTypeFromString(EventTypeStr);
+									  Ev.SpeechActType = AILiveEvent::SpeechActFromString(SpeechActStr);
+									  Ev.Visibility = AILiveEvent::JsonStringToArray(VisJson);
+									  Ev.AddressedTo = AILiveEvent::JsonStringToArray(AddrJson);
+									  Ev.PrevEventHash = PrevHashRow;
+									  Ev.EventHash = EventHashRow;
 
-			if (PrevHashRow != PrevHash)
-			{
-				if (FirstBadSeq < 0) FirstBadSeq = SeqVal;
-				++BadCount;
-			}
-			else
-			{
-				const FString CanonRecompute = UAILiveEventStoreSubsystem::CanonicalJsonOf(Ev);
-				const FString ExpectHash = ComputeEventHash(PrevHash, CanonRecompute);
-				if (ExpectHash != EventHashRow)
-				{
-					if (FirstBadSeq < 0) FirstBadSeq = SeqVal;
-					++BadCount;
-				}
-			}
-			PrevHash = EventHashRow;
-			LastSeq = SeqVal;
-			return ESQLitePreparedStatementExecuteRowResult::Continue;
-		});
+									  if (PrevHashRow != PrevHash)
+									  {
+										  // 第一层检查：当前行声明的 prev_event_hash 必须等于上一行 event_hash。
+										  if (FirstBadSeq < 0)
+											  FirstBadSeq = SeqVal;
+										  ++BadCount;
+									  }
+									  else
+									  {
+										  // 第二层检查：用当前行内容重算 event_hash，必须和存储值一致。
+										  const FString CanonRecompute = UAILiveEventStoreSubsystem::CanonicalJsonOf(Ev);
+										  const FString ExpectHash = ComputeEventHash(PrevHash, CanonRecompute);
+										  if (ExpectHash != EventHashRow)
+										  {
+											  if (FirstBadSeq < 0)
+												  FirstBadSeq = SeqVal;
+											  ++BadCount;
+										  }
+									  }
+									  PrevHash = EventHashRow;
+									  LastSeq = SeqVal;
+									  return ESQLitePreparedStatementExecuteRowResult::Continue;
+								  });
 	if (Rows == INDEX_NONE)
 	{
 		return false;
@@ -2373,7 +2545,8 @@ bool UAILiveEventStoreSubsystem::RecomputeHashChainOnMainConnection(
 	return true;
 }
 
-bool UAILiveEventStoreSubsystem::ExecuteDebugSqlOnMainConnection(const FString& Sql, FString& OutError)
+/** Debug 用：在主 game DB 连接上执行一条原始 SQL，并把错误字符串传回调用方。 */
+bool UAILiveEventStoreSubsystem::ExecuteDebugSqlOnMainConnection(const FString &Sql, FString &OutError)
 {
 	if (!Db.IsValid())
 	{
@@ -2388,6 +2561,7 @@ bool UAILiveEventStoreSubsystem::ExecuteDebugSqlOnMainConnection(const FString& 
 	return bOk;
 }
 
+/** Debug 用：切换 SQLite query_only，模拟写入只读失败路径。 */
 bool UAILiveEventStoreSubsystem::SetGameDbQueryOnly(bool bQueryOnly)
 {
 	if (!Db.IsValid())
@@ -2395,20 +2569,20 @@ bool UAILiveEventStoreSubsystem::SetGameDbQueryOnly(bool bQueryOnly)
 		UE_LOG(LogAILiveMemory, Error, TEXT("SetGameDbQueryOnly: Db not open"));
 		return false;
 	}
-	const TCHAR* Sql = bQueryOnly
-		? TEXT("PRAGMA query_only = 1;")
-		: TEXT("PRAGMA query_only = 0;");
+	const TCHAR *Sql = bQueryOnly
+						   ? TEXT("PRAGMA query_only = 1;")
+						   : TEXT("PRAGMA query_only = 0;");
 	if (!Db.Execute(Sql))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("SetGameDbQueryOnly(%d) failed: %s"),
-			bQueryOnly ? 1 : 0, *Db.GetLastError());
+			   TEXT("SetGameDbQueryOnly(%d) failed: %s"),
+			   bQueryOnly ? 1 : 0, *Db.GetLastError());
 		return false;
 	}
 	UE_LOG(LogAILiveMemory, Display,
-		TEXT("Db query_only=%d — subsequent INSERTs will %s"),
-		bQueryOnly ? 1 : 0,
-		bQueryOnly ? TEXT("fail with SQLITE_READONLY") : TEXT("be permitted"));
+		   TEXT("Db query_only=%d — subsequent INSERTs will %s"),
+		   bQueryOnly ? 1 : 0,
+		   bQueryOnly ? TEXT("fail with SQLITE_READONLY") : TEXT("be permitted"));
 	return true;
 }
 
@@ -2422,49 +2596,57 @@ bool UAILiveEventStoreSubsystem::SetGameDbQueryOnly(bool bQueryOnly)
 namespace
 {
 
-TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
-{
-	TSharedPtr<FJsonObject> Out;
-	if (Json.IsEmpty()) return Out;
-	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
-	FJsonSerializer::Deserialize(Reader, Out);
-	return Out;
-}
+	/** 尝试把字符串解析为 JSON object；失败时返回无效指针。 */
+	TSharedPtr<FJsonObject> ParseJsonObject(const FString &Json)
+	{
+		TSharedPtr<FJsonObject> Out;
+		if (Json.IsEmpty())
+			return Out;
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+		FJsonSerializer::Deserialize(Reader, Out);
+		return Out;
+	}
 
-FString JsonGetString(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Key)
-{
-	if (!Obj.IsValid()) return FString();
-	FString S;
-	Obj->TryGetStringField(Key, S);
-	return S;
-}
+	/** 从 JSON object 里安全读取字符串字段；对象无效或字段不存在时返回空串。 */
+	FString JsonGetString(const TSharedPtr<FJsonObject> &Obj, const TCHAR *Key)
+	{
+		if (!Obj.IsValid())
+			return FString();
+		FString S;
+		Obj->TryGetStringField(Key, S);
+		return S;
+	}
 
-/** payload.text 截断 256；text 缺失时退而取 raw payload 前缀。 */
-FString ExtractCommitmentText(const TSharedPtr<FJsonObject>& Obj, const FString& RawPayload)
-{
-	const FString T = JsonGetString(Obj, TEXT("text"));
-	const FString Base = T.IsEmpty() ? RawPayload : T;
-	return Base.Len() <= 256 ? Base : Base.Left(256);
-}
+	/** payload.text 截断 256；text 缺失时退而取 raw payload 前缀。 */
+	FString ExtractCommitmentText(const TSharedPtr<FJsonObject> &Obj, const FString &RawPayload)
+	{
+		const FString T = JsonGetString(Obj, TEXT("text"));
+		const FString Base = T.IsEmpty() ? RawPayload : T;
+		return Base.Len() <= 256 ? Base : Base.Left(256);
+	}
 
-/** speech.intended 的 deny 目标取 addressed_to_hint[0]；其它 commit/claim/deny 默认 NULL。 */
-FString ExtractDenyTarget(const TSharedPtr<FJsonObject>& Obj)
-{
-	if (!Obj.IsValid()) return FString();
-	const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
-	if (!Obj->TryGetArrayField(TEXT("addressed_to_hint"), Arr)) return FString();
-	if (!Arr || Arr->Num() == 0) return FString();
-	const TSharedPtr<FJsonValue>& V = (*Arr)[0];
-	return V.IsValid() ? V->AsString() : FString();
-}
+	/** speech.intended 的 deny 目标取 addressed_to_hint[0]；其它 commit/claim/deny 默认 NULL。 */
+	FString ExtractDenyTarget(const TSharedPtr<FJsonObject> &Obj)
+	{
+		if (!Obj.IsValid())
+			return FString();
+		const TArray<TSharedPtr<FJsonValue>> *Arr = nullptr;
+		if (!Obj->TryGetArrayField(TEXT("addressed_to_hint"), Arr))
+			return FString();
+		if (!Arr || Arr->Num() == 0)
+			return FString();
+		const TSharedPtr<FJsonValue> &V = (*Arr)[0];
+		return V.IsValid() ? V->AsString() : FString();
+	}
 
-}  // anon namespace
+} // anon namespace
 
 // ---------------------------------------------------------------
 // ProjectCommitments —— 单 SELECT 拉所有候选 events，按 (event_type,
 // speech_act_type) 二维分派为 commitment_type，写入 commitments 表。
 // ---------------------------------------------------------------
 
+/** 重建 commitments 投影表；调用者必须已持有写锁和事务。 */
 bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
 {
 	// 1) DELETE 旧投影
@@ -2473,44 +2655,44 @@ bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
 		if (!Del.Create(Db, TEXT("DELETE FROM commitments WHERE game_id = ?1;")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectCommitments: DELETE prepare failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectCommitments: DELETE prepare failed: %s"), *Db.GetLastError());
 			return false;
 		}
 		Del.SetBindingValueByIndex(1, CurrentGameId);
 		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectCommitments: DELETE step failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectCommitments: DELETE step failed: %s"), *Db.GetLastError());
 			return false;
 		}
 	}
 
 	// 2) 拉候选事件
-	const TCHAR* SelSql =
+	const TCHAR *SelSql =
 		TEXT("SELECT seq, round_no, actor, event_type, speech_act_type, payload "
-		     "FROM events WHERE game_id = ?1 "
-		     "  AND event_type IN ('vote','alliance_propose','alliance_accept',"
-		     "                     'speech.public','speech.intended') "
-		     "ORDER BY seq;");
+			 "FROM events WHERE game_id = ?1 "
+			 "  AND event_type IN ('vote','alliance_propose','alliance_accept',"
+			 "                     'speech.public','speech.intended') "
+			 "ORDER BY seq;");
 	FSQLitePreparedStatement Sel;
 	if (!Sel.Create(Db, SelSql))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ProjectCommitments: SELECT prepare failed: %s"), *Db.GetLastError());
+			   TEXT("ProjectCommitments: SELECT prepare failed: %s"), *Db.GetLastError());
 		return false;
 	}
 	Sel.SetBindingValueByIndex(1, CurrentGameId);
 
 	// 3) 每行分派 → INSERT
-	const TCHAR* InsSql =
+	const TCHAR *InsSql =
 		TEXT("INSERT OR IGNORE INTO commitments "
-		     "(game_id, agent_id, round_no, seq, commitment_type, target, text, status) "
-		     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active');");
+			 "(game_id, agent_id, round_no, seq, commitment_type, target, text, status) "
+			 "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active');");
 	FSQLitePreparedStatement Ins;
 	if (!Ins.Create(Db, InsSql))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ProjectCommitments: INSERT prepare failed: %s"), *Db.GetLastError());
+			   TEXT("ProjectCommitments: INSERT prepare failed: %s"), *Db.GetLastError());
 		return false;
 	}
 
@@ -2542,8 +2724,9 @@ bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
 			Target = JsonGetString(P, TEXT("alliance_id"));
 			Text = ExtractCommitmentText(P, Payload);
 		}
-		else  // speech.public / speech.intended — 由 speech_act_type 二次分派
+		else // speech.public / speech.intended — 由 speech_act_type 二次分派
 		{
+			// 同样是 speech 事件，只有 commit/claim/deny 会变成 commitment 投影。
 			if (SpeechAct == TEXT("commit"))
 			{
 				CommitmentType = TEXT("promise");
@@ -2562,7 +2745,7 @@ bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
 			}
 			else
 			{
-				continue;  // 其它 speech_act_type 不入 commitments
+				continue; // 其它 speech_act_type 不入 commitments
 			}
 		}
 
@@ -2575,7 +2758,7 @@ bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
 		Ins.SetBindingValueByIndex(5, CommitmentType);
 		if (Target.IsEmpty())
 		{
-			Ins.SetBindingValueByIndex(6);  // bind NULL（参数 6 = target 列）
+			Ins.SetBindingValueByIndex(6); // bind NULL（参数 6 = target 列）
 		}
 		else
 		{
@@ -2586,15 +2769,15 @@ bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
 		if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectCommitments: INSERT step failed (seq=%lld type=%s): %s"),
-				Seq, *CommitmentType, *Db.GetLastError());
+				   TEXT("ProjectCommitments: INSERT step failed (seq=%lld type=%s): %s"),
+				   Seq, *CommitmentType, *Db.GetLastError());
 			return false;
 		}
 		++InsertedCount;
 	}
 
 	UE_LOG(LogAILiveMemory, Verbose,
-		TEXT("ProjectCommitments: inserted %lld rows"), InsertedCount);
+		   TEXT("ProjectCommitments: inserted %lld rows"), InsertedCount);
 	return true;
 }
 
@@ -2603,6 +2786,7 @@ bool UAILiveEventStoreSubsystem::ProjectCommitments_LockHeld()
 // json_extract，避免 C++ 端二次解析）。
 // ---------------------------------------------------------------
 
+/** 重建 vote_history 投影表；调用者必须已持有写锁和事务。 */
 bool UAILiveEventStoreSubsystem::ProjectVoteHistory_LockHeld()
 {
 	{
@@ -2610,36 +2794,37 @@ bool UAILiveEventStoreSubsystem::ProjectVoteHistory_LockHeld()
 		if (!Del.Create(Db, TEXT("DELETE FROM vote_history WHERE game_id = ?1;")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectVoteHistory: DELETE prepare failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectVoteHistory: DELETE prepare failed: %s"), *Db.GetLastError());
 			return false;
 		}
 		Del.SetBindingValueByIndex(1, CurrentGameId);
 		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectVoteHistory: DELETE step failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectVoteHistory: DELETE step failed: %s"), *Db.GetLastError());
 			return false;
 		}
 	}
 
-	const TCHAR* InsSql =
+	const TCHAR *InsSql =
 		TEXT("INSERT OR IGNORE INTO vote_history (game_id, round_no, seq, voter, target) "
-		     "SELECT game_id, round_no, seq, actor, "
-		     "       COALESCE(json_extract(payload, '$.target'), '') "
-		     "FROM events "
-		     "WHERE game_id = ?1 AND event_type = 'vote';");
+			 "SELECT game_id, round_no, seq, actor, "
+			 "       COALESCE(json_extract(payload, '$.target'), '') "
+			 "FROM events "
+			 "WHERE game_id = ?1 AND event_type = 'vote';");
 	FSQLitePreparedStatement Ins;
 	if (!Ins.Create(Db, InsSql))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ProjectVoteHistory: INSERT prepare failed: %s"), *Db.GetLastError());
+			   TEXT("ProjectVoteHistory: INSERT prepare failed: %s"), *Db.GetLastError());
 		return false;
 	}
 	Ins.SetBindingValueByIndex(1, CurrentGameId);
+	// 这一步让 SQLite 自己从 events 派生 vote_history，减少 C++ 侧逐行解析。
 	if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ProjectVoteHistory: INSERT step failed: %s"), *Db.GetLastError());
+			   TEXT("ProjectVoteHistory: INSERT step failed: %s"), *Db.GetLastError());
 		return false;
 	}
 
@@ -2652,6 +2837,7 @@ bool UAILiveEventStoreSubsystem::ProjectVoteHistory_LockHeld()
 // accept/betray 取 MAX(seq)；members/terms 从首条 propose payload 抽。
 // ---------------------------------------------------------------
 
+/** 重建 alliance_state 投影表，把 alliance 事件流折叠成当前联盟状态。 */
 bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 {
 	{
@@ -2659,14 +2845,14 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 		if (!Del.Create(Db, TEXT("DELETE FROM alliance_state WHERE game_id = ?1;")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectAllianceState: DELETE prepare failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectAllianceState: DELETE prepare failed: %s"), *Db.GetLastError());
 			return false;
 		}
 		Del.SetBindingValueByIndex(1, CurrentGameId);
 		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectAllianceState: DELETE step failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectAllianceState: DELETE step failed: %s"), *Db.GetLastError());
 			return false;
 		}
 	}
@@ -2682,16 +2868,16 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 	};
 	TMap<FString, FAllianceAcc> ByAlliance;
 
-	const TCHAR* SelSql =
+	const TCHAR *SelSql =
 		TEXT("SELECT seq, event_type, payload FROM events "
-		     "WHERE game_id = ?1 AND event_type IN "
-		     "  ('alliance_propose','alliance_accept','alliance_betray') "
-		     "ORDER BY seq;");
+			 "WHERE game_id = ?1 AND event_type IN "
+			 "  ('alliance_propose','alliance_accept','alliance_betray') "
+			 "ORDER BY seq;");
 	FSQLitePreparedStatement Sel;
 	if (!Sel.Create(Db, SelSql))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ProjectAllianceState: SELECT prepare failed: %s"), *Db.GetLastError());
+			   TEXT("ProjectAllianceState: SELECT prepare failed: %s"), *Db.GetLastError());
 		return false;
 	}
 	Sel.SetBindingValueByIndex(1, CurrentGameId);
@@ -2706,11 +2892,13 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 
 		const TSharedPtr<FJsonObject> P = ParseJsonObject(Payload);
 		const FString AllianceId = JsonGetString(P, TEXT("alliance_id"));
-		if (AllianceId.IsEmpty()) continue;
+		if (AllianceId.IsEmpty())
+			continue;
 
-		FAllianceAcc& Acc = ByAlliance.FindOrAdd(AllianceId);
+		FAllianceAcc &Acc = ByAlliance.FindOrAdd(AllianceId);
 		if (EventType == TEXT("alliance_propose"))
 		{
+			// propose 是联盟的“创建信息”，成员与条款只取第一条 propose。
 			if (!Acc.bHasPropose)
 			{
 				Acc.bHasPropose = true;
@@ -2718,7 +2906,7 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 				Acc.Terms = JsonGetString(P, TEXT("terms"));
 				if (P.IsValid())
 				{
-					const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+					const TArray<TSharedPtr<FJsonValue>> *Arr = nullptr;
 					if (P->TryGetArrayField(TEXT("members"), Arr) && Arr)
 					{
 						FString MembersOut;
@@ -2731,6 +2919,7 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 		}
 		else if (EventType == TEXT("alliance_accept"))
 		{
+			// accept/betray 取最后一次出现的 seq，表达当前最新状态。
 			Acc.AcceptedAtSeq = Seq;
 		}
 		else if (EventType == TEXT("alliance_betray"))
@@ -2739,24 +2928,24 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 		}
 	}
 
-	const TCHAR* InsSql =
+	const TCHAR *InsSql =
 		TEXT("INSERT INTO alliance_state "
-		     "(game_id, alliance_id, members, proposed_at_seq, accepted_at_seq, "
-		     " betrayed_at_seq, terms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);");
+			 "(game_id, alliance_id, members, proposed_at_seq, accepted_at_seq, "
+			 " betrayed_at_seq, terms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);");
 	FSQLitePreparedStatement Ins;
 	if (!Ins.Create(Db, InsSql))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ProjectAllianceState: INSERT prepare failed: %s"), *Db.GetLastError());
+			   TEXT("ProjectAllianceState: INSERT prepare failed: %s"), *Db.GetLastError());
 		return false;
 	}
 
-	for (const TPair<FString, FAllianceAcc>& Pair : ByAlliance)
+	for (const TPair<FString, FAllianceAcc> &Pair : ByAlliance)
 	{
-		const FAllianceAcc& A = Pair.Value;
+		const FAllianceAcc &A = Pair.Value;
 		// alliance_propose 缺失（只有 accept / betray，少见）→ proposed_at_seq 取首次出现 seq
 		const int64 ProposedSeq = A.bHasPropose ? A.ProposedAtSeq
-			: (A.AcceptedAtSeq >= 0 ? A.AcceptedAtSeq : A.BetrayedAtSeq);
+												: (A.AcceptedAtSeq >= 0 ? A.AcceptedAtSeq : A.BetrayedAtSeq);
 		Ins.Reset();
 		Ins.ClearBindings();
 		Ins.SetBindingValueByIndex(1, CurrentGameId);
@@ -2765,7 +2954,7 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 		Ins.SetBindingValueByIndex(4, ProposedSeq);
 		if (A.AcceptedAtSeq < 0)
 		{
-			Ins.SetBindingValueByIndex(5);  // bind NULL（参数 5 = accepted_at_seq）
+			Ins.SetBindingValueByIndex(5); // bind NULL（参数 5 = accepted_at_seq）
 		}
 		else
 		{
@@ -2773,7 +2962,7 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 		}
 		if (A.BetrayedAtSeq < 0)
 		{
-			Ins.SetBindingValueByIndex(6);  // bind NULL（参数 6 = betrayed_at_seq）
+			Ins.SetBindingValueByIndex(6); // bind NULL（参数 6 = betrayed_at_seq）
 		}
 		else
 		{
@@ -2783,14 +2972,14 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 		if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectAllianceState: INSERT step failed (alliance_id=%s): %s"),
-				*Pair.Key, *Db.GetLastError());
+				   TEXT("ProjectAllianceState: INSERT step failed (alliance_id=%s): %s"),
+				   *Pair.Key, *Db.GetLastError());
 			return false;
 		}
 	}
 
 	UE_LOG(LogAILiveMemory, Verbose,
-		TEXT("ProjectAllianceState: rebuilt %d rows"), ByAlliance.Num());
+		   TEXT("ProjectAllianceState: rebuilt %d rows"), ByAlliance.Num());
 	return true;
 }
 
@@ -2801,6 +2990,7 @@ bool UAILiveEventStoreSubsystem::ProjectAllianceState_LockHeld()
 // 必须在 ProjectCommitments / ProjectVoteHistory 之后调用——本步直读那两张表。
 // ---------------------------------------------------------------
 
+/** 重建 agent_view_state 投影表，为每个 agent 写一行当前私有视图快照。 */
 bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 {
 	{
@@ -2808,14 +2998,14 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 		if (!Del.Create(Db, TEXT("DELETE FROM agent_view_state WHERE game_id = ?1;")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectAgentViewState: DELETE prepare failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectAgentViewState: DELETE prepare failed: %s"), *Db.GetLastError());
 			return false;
 		}
 		Del.SetBindingValueByIndex(1, CurrentGameId);
 		if (Del.Step() == ESQLitePreparedStatementStepResult::Error)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectAgentViewState: DELETE step failed: %s"), *Db.GetLastError());
+				   TEXT("ProjectAgentViewState: DELETE step failed: %s"), *Db.GetLastError());
 			return false;
 		}
 	}
@@ -2825,7 +3015,7 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 	{
 		FSQLitePreparedStatement Stmt;
 		if (Stmt.Create(Db,
-			TEXT("SELECT agent_id FROM agent_calibration WHERE game_id = ?1 ORDER BY agent_id;")))
+						TEXT("SELECT agent_id FROM agent_calibration WHERE game_id = ?1 ORDER BY agent_id;")))
 		{
 			Stmt.SetBindingValueByIndex(1, CurrentGameId);
 			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
@@ -2840,8 +3030,8 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 	{
 		FSQLitePreparedStatement Stmt;
 		if (Stmt.Create(Db,
-			TEXT("SELECT DISTINCT actor FROM events WHERE game_id = ?1 "
-			     "  AND actor LIKE 'NPC%' ORDER BY actor;")))
+						TEXT("SELECT DISTINCT actor FROM events WHERE game_id = ?1 "
+							 "  AND actor LIKE 'NPC%' ORDER BY actor;")))
 		{
 			Stmt.SetBindingValueByIndex(1, CurrentGameId);
 			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
@@ -2855,7 +3045,7 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 	if (Roster.Num() == 0)
 	{
 		UE_LOG(LogAILiveMemory, Verbose,
-			TEXT("ProjectAgentViewState: empty roster — nothing to project"));
+			   TEXT("ProjectAgentViewState: empty roster — nothing to project"));
 		return true;
 	}
 
@@ -2866,15 +3056,16 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 	{
 		FSQLitePreparedStatement Stmt;
 		if (Stmt.Create(Db,
-			TEXT("SELECT actor FROM events WHERE game_id = ?1 "
-			     "  AND event_type = 'system.delete_executed';")))
+						TEXT("SELECT actor FROM events WHERE game_id = ?1 "
+							 "  AND event_type = 'system.delete_executed';")))
 		{
 			Stmt.SetBindingValueByIndex(1, CurrentGameId);
 			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
 			{
 				FString A;
 				Stmt.GetColumnValueByIndex(0, A);
-				if (!A.IsEmpty()) DeletedActors.Add(A);
+				if (!A.IsEmpty())
+					DeletedActors.Add(A);
 			}
 		}
 	}
@@ -2893,10 +3084,10 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 	{
 		FSQLitePreparedStatement Stmt;
 		if (Stmt.Create(Db,
-			TEXT("SELECT event_id, actor, "
-			     "       COALESCE(json_extract(payload, '$.role'), '') "
-			     "FROM events WHERE game_id = ?1 AND event_type = 'system.role_assigned' "
-			     "ORDER BY seq;")))
+						TEXT("SELECT event_id, actor, "
+							 "       COALESCE(json_extract(payload, '$.role'), '') "
+							 "FROM events WHERE game_id = ?1 AND event_type = 'system.role_assigned' "
+							 "ORDER BY seq;")))
 		{
 			Stmt.SetBindingValueByIndex(1, CurrentGameId);
 			while (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
@@ -2905,14 +3096,15 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 				Stmt.GetColumnValueByIndex(0, R.EventId);
 				Stmt.GetColumnValueByIndex(1, R.Actor);
 				Stmt.GetColumnValueByIndex(2, R.Role);
-				if (!R.EventId.IsEmpty()) RoleEvents.Add(MoveTemp(R));
+				if (!R.EventId.IsEmpty())
+					RoleEvents.Add(MoveTemp(R));
 			}
 		}
 		// 拉每条 role_assigned 的 viewers
 		FSQLitePreparedStatement VStmt;
 		if (VStmt.Create(Db, TEXT("SELECT viewer FROM event_visibility WHERE event_id = ?1;")))
 		{
-			for (FRoleAssignment& R : RoleEvents)
+			for (FRoleAssignment &R : RoleEvents)
 			{
 				VStmt.Reset();
 				VStmt.ClearBindings();
@@ -2932,7 +3124,7 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 	{
 		FSQLitePreparedStatement Stmt;
 		if (Stmt.Create(Db,
-			TEXT("SELECT COALESCE(MAX(tick_no), 0) FROM events WHERE game_id = ?1;")))
+						TEXT("SELECT COALESCE(MAX(tick_no), 0) FROM events WHERE game_id = ?1;")))
 		{
 			Stmt.SetBindingValueByIndex(1, CurrentGameId);
 			if (Stmt.Step() == ESQLitePreparedStatementStepResult::Row)
@@ -2944,44 +3136,44 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 	const int64 PendingTickFloor = FMath::Max<int64>(0, LatestTickNo - 9);
 
 	// === 3) per-agent 拼装并 INSERT
-	const TCHAR* InsSql =
+	const TCHAR *InsSql =
 		TEXT("INSERT INTO agent_view_state "
-		     "(game_id, agent_id, as_of_seq, alive_players, known_roles, "
-		     " my_commitments, vote_history, pending_intended) "
-		     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);");
+			 "(game_id, agent_id, as_of_seq, alive_players, known_roles, "
+			 " my_commitments, vote_history, pending_intended) "
+			 "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);");
 	FSQLitePreparedStatement Ins;
 	if (!Ins.Create(Db, InsSql))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ProjectAgentViewState: INSERT prepare failed: %s"), *Db.GetLastError());
+			   TEXT("ProjectAgentViewState: INSERT prepare failed: %s"), *Db.GetLastError());
 		return false;
 	}
 
 	// 每 agent 复用三个查询语句（commitments / vote_history / pending）
 	FSQLitePreparedStatement CommitStmt;
 	CommitStmt.Create(Db,
-		TEXT("SELECT seq, commitment_type, COALESCE(target,''), text, status "
-		     "FROM commitments WHERE game_id = ?1 AND agent_id = ?2 ORDER BY seq;"));
+					  TEXT("SELECT seq, commitment_type, COALESCE(target,''), text, status "
+						   "FROM commitments WHERE game_id = ?1 AND agent_id = ?2 ORDER BY seq;"));
 	FSQLitePreparedStatement VotesStmt;
 	VotesStmt.Create(Db,
-		TEXT("SELECT round_no, seq, target FROM vote_history "
-		     "WHERE game_id = ?1 AND voter = ?2 ORDER BY seq;"));
+					 TEXT("SELECT round_no, seq, target FROM vote_history "
+						  "WHERE game_id = ?1 AND voter = ?2 ORDER BY seq;"));
 	FSQLitePreparedStatement PendingStmt;
 	PendingStmt.Create(Db,
-		TEXT("SELECT seq, tick_no, COALESCE(json_extract(payload, '$.text'), ''), "
-		     "       json_extract(payload, '$.intended_action') "
-		     "FROM events e "
-		     "WHERE e.game_id = ?1 AND e.actor = ?2 "
-		     "  AND e.event_type = 'speech.intended' "
-		     "  AND e.tick_no >= ?3 "
-		     "  AND NOT EXISTS (SELECT 1 FROM events c "
-		     "                  WHERE c.game_id = e.game_id "
-		     "                    AND c.event_type = 'speech.public' "
-		     "                    AND c.parent_event_id = e.event_id) "
-		     "ORDER BY e.seq;"));
+					   TEXT("SELECT seq, tick_no, COALESCE(json_extract(payload, '$.text'), ''), "
+							"       json_extract(payload, '$.intended_action') "
+							"FROM events e "
+							"WHERE e.game_id = ?1 AND e.actor = ?2 "
+							"  AND e.event_type = 'speech.intended' "
+							"  AND e.tick_no >= ?3 "
+							"  AND NOT EXISTS (SELECT 1 FROM events c "
+							"                  WHERE c.game_id = e.game_id "
+							"                    AND c.event_type = 'speech.public' "
+							"                    AND c.parent_event_id = e.event_id) "
+							"ORDER BY e.seq;"));
 
 	int64 InsertedRows = 0;
-	for (const FString& AgentId : Roster)
+	for (const FString &AgentId : Roster)
 	{
 		// alive_players：roster - DeletedActors
 		FString AlivePlayersJson;
@@ -2989,9 +3181,10 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 			const TSharedRef<TJsonWriter<>> W =
 				TJsonWriterFactory<>::Create(&AlivePlayersJson);
 			W->WriteArrayStart();
-			for (const FString& A : Roster)
+			for (const FString &A : Roster)
 			{
-				if (!DeletedActors.Contains(A)) W->WriteValue(A);
+				if (!DeletedActors.Contains(A))
+					W->WriteValue(A);
 			}
 			W->WriteArrayEnd();
 			W->Close();
@@ -3004,13 +3197,13 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 				TJsonWriterFactory<>::Create(&KnownRolesJson);
 			W->WriteObjectStart();
 			TSet<FString> SeenActors;
-			for (const FRoleAssignment& R : RoleEvents)
+			for (const FRoleAssignment &R : RoleEvents)
 			{
-				const bool bVisible = R.Viewers.Contains(AgentId)
-					|| R.Viewers.Contains(TEXT("public"))
-					|| R.Viewers.Contains(TEXT("audience"));
-				if (!bVisible) continue;
-				if (SeenActors.Contains(R.Actor)) continue;  // 同 actor 后续 role 覆盖：取首次
+				const bool bVisible = R.Viewers.Contains(AgentId) || R.Viewers.Contains(TEXT("public")) || R.Viewers.Contains(TEXT("audience"));
+				if (!bVisible)
+					continue;
+				if (SeenActors.Contains(R.Actor))
+					continue; // 同 actor 后续 role 覆盖：取首次
 				SeenActors.Add(R.Actor);
 				W->WriteValue(R.Actor, R.Role);
 			}
@@ -3093,12 +3286,12 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 				PendingStmt.GetColumnValueByIndex(0, PSeq);
 				PendingStmt.GetColumnValueByIndex(1, PTick);
 				PendingStmt.GetColumnValueByIndex(2, PText);
-				PendingStmt.GetColumnValueByIndex(3, IntendedActionJson);  // NULL → empty FString
+				PendingStmt.GetColumnValueByIndex(3, IntendedActionJson); // NULL → empty FString
 				W->WriteObjectStart();
 				W->WriteValue(TEXT("seq"), PSeq);
 				W->WriteValue(TEXT("tick_no"), PTick);
 				W->WriteValue(TEXT("text_snippet"),
-					PText.Len() > 80 ? PText.Left(80) : PText);
+							  PText.Len() > 80 ? PText.Left(80) : PText);
 				if (!IntendedActionJson.IsEmpty())
 				{
 					W->WriteRawJSONValue(TEXT("intended_action"), IntendedActionJson);
@@ -3112,6 +3305,7 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 		// INSERT
 		Ins.Reset();
 		Ins.ClearBindings();
+		// agent_view_state 是每个 agent 一行的快照，JSON 字段承载各段私有视图。
 		Ins.SetBindingValueByIndex(1, CurrentGameId);
 		Ins.SetBindingValueByIndex(2, AgentId);
 		Ins.SetBindingValueByIndex(3, AsOfSeq);
@@ -3123,16 +3317,16 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 		if (Ins.Step() == ESQLitePreparedStatementStepResult::Error)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ProjectAgentViewState: INSERT step failed (agent=%s): %s"),
-				*AgentId, *Db.GetLastError());
+				   TEXT("ProjectAgentViewState: INSERT step failed (agent=%s): %s"),
+				   *AgentId, *Db.GetLastError());
 			return false;
 		}
 		++InsertedRows;
 	}
 
 	UE_LOG(LogAILiveMemory, Verbose,
-		TEXT("ProjectAgentViewState: rebuilt %lld rows (as_of_seq=%lld, latest_tick=%lld)"),
-		InsertedRows, AsOfSeq, LatestTickNo);
+		   TEXT("ProjectAgentViewState: rebuilt %lld rows (as_of_seq=%lld, latest_tick=%lld)"),
+		   InsertedRows, AsOfSeq, LatestTickNo);
 	return true;
 }
 
@@ -3142,6 +3336,7 @@ bool UAILiveEventStoreSubsystem::ProjectAgentViewState_LockHeld()
 // ProjectAgentViewState（依赖前两表已写）→ COMMIT。任一步骤失败 → ROLLBACK。
 // ---------------------------------------------------------------
 
+/** 投影重建主入口：用一个事务重建所有派生表，保证快照一致。 */
 bool UAILiveEventStoreSubsystem::RebuildProjections()
 {
 	if (!IsGameOpen() || !Db.IsValid())
@@ -3154,36 +3349,35 @@ bool UAILiveEventStoreSubsystem::RebuildProjections()
 
 	FScopeLock Lock(&WriteMutex);
 
+	// 投影重建必须和写入互斥，否则会读到半截事件流。
 	if (!Db.Execute(TEXT("BEGIN IMMEDIATE;")))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("RebuildProjections: BEGIN IMMEDIATE failed: %s"), *Db.GetLastError());
+			   TEXT("RebuildProjections: BEGIN IMMEDIATE failed: %s"), *Db.GetLastError());
 		return false;
 	}
 
-	bool bOk = ProjectCommitments_LockHeld()
-	        && ProjectVoteHistory_LockHeld()
-	        && ProjectAllianceState_LockHeld()
-	        && ProjectAgentViewState_LockHeld();
+	// 顺序有依赖：agent_view_state 会读取 commitments 和 vote_history。
+	bool bOk = ProjectCommitments_LockHeld() && ProjectVoteHistory_LockHeld() && ProjectAllianceState_LockHeld() && ProjectAgentViewState_LockHeld();
 
 	if (bOk && !Db.Execute(TEXT("COMMIT;")))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("RebuildProjections: COMMIT failed: %s"), *Db.GetLastError());
+			   TEXT("RebuildProjections: COMMIT failed: %s"), *Db.GetLastError());
 		bOk = false;
 	}
 	if (!bOk)
 	{
 		Db.Execute(TEXT("ROLLBACK;"));
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("RebuildProjections: rolled back (game=%s)"), *CurrentGameId);
+			   TEXT("RebuildProjections: rolled back (game=%s)"), *CurrentGameId);
 		return false;
 	}
 
 	const double Elapsed = (FPlatformTime::Seconds() - T0) * 1000.0;
 	UE_LOG(LogAILiveMemory, Display,
-		TEXT("RebuildProjections OK (game=%s, elapsed=%.2fms)"),
-		*CurrentGameId, Elapsed);
+		   TEXT("RebuildProjections OK (game=%s, elapsed=%.2fms)"),
+		   *CurrentGameId, Elapsed);
 	return true;
 }
 
@@ -3191,18 +3385,20 @@ bool UAILiveEventStoreSubsystem::RebuildProjections()
 // T8 — 读 agent_view_state.pending_intended JSON（最新 as_of_seq 行）。
 // ---------------------------------------------------------------
 
-FString UAILiveEventStoreSubsystem::DebugReadPendingIntendedJson(const FString& InAgentId) const
+/** Debug 读接口：读取某 agent 最新投影快照里的 pending_intended JSON。 */
+FString UAILiveEventStoreSubsystem::DebugReadPendingIntendedJson(const FString &InAgentId) const
 {
-	if (!IsGameOpen()) return TEXT("[]");
+	if (!IsGameOpen())
+		return TEXT("[]");
 
 	FSQLitePreparedStatement Stmt;
-	if (!Stmt.Create(const_cast<FSQLiteDatabase&>(Db),
-		TEXT("SELECT pending_intended FROM agent_view_state "
-		     "WHERE game_id = ?1 AND agent_id = ?2 "
-		     "ORDER BY as_of_seq DESC LIMIT 1;")))
+	if (!Stmt.Create(const_cast<FSQLiteDatabase &>(Db),
+					 TEXT("SELECT pending_intended FROM agent_view_state "
+						  "WHERE game_id = ?1 AND agent_id = ?2 "
+						  "ORDER BY as_of_seq DESC LIMIT 1;")))
 	{
 		UE_LOG(LogAILiveMemory, Verbose,
-			TEXT("DebugReadPendingIntendedJson: prepare failed: %s"), *Db.GetLastError());
+			   TEXT("DebugReadPendingIntendedJson: prepare failed: %s"), *Db.GetLastError());
 		return TEXT("[]");
 	}
 	Stmt.SetBindingValueByIndex(1, CurrentGameId);
@@ -3226,36 +3422,39 @@ FString UAILiveEventStoreSubsystem::DebugReadPendingIntendedJson(const FString& 
 namespace
 {
 
-bool ExtractRequestIdFromPayload(const FString& InPayload, FString& OutRequestId)
-{
-	OutRequestId.Reset();
-	if (InPayload.IsEmpty())
+	/** 从事件 payload 里抽 request_id；用于把 in-flight 和完成/timeout 事件配对。 */
+	bool ExtractRequestIdFromPayload(const FString &InPayload, FString &OutRequestId)
 	{
-		return false;
+		OutRequestId.Reset();
+		if (InPayload.IsEmpty())
+		{
+			return false;
+		}
+		TSharedPtr<FJsonObject> Obj;
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(InPayload);
+		if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
+		{
+			return false;
+		}
+		return Obj->TryGetStringField(TEXT("request_id"), OutRequestId) && !OutRequestId.IsEmpty();
 	}
-	TSharedPtr<FJsonObject> Obj;
-	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(InPayload);
-	if (!FJsonSerializer::Deserialize(Reader, Obj) || !Obj.IsValid())
-	{
-		return false;
-	}
-	return Obj->TryGetStringField(TEXT("request_id"), OutRequestId) && !OutRequestId.IsEmpty();
-}
 
-struct FInflightRow
-{
-	int64   Seq          = 0;
-	int64   TickNo       = 0;
-	int32   RoundNo      = 0;
-	FString PhaseStr;
-	FString RequestId;
-	int32   NPCIndex     = 0;
-	FString StartedAtIso;
-};
+	/** Resume 扫描 system.llm_inflight 时使用的中间行结构。 */
+	struct FInflightRow
+	{
+		int64 Seq = 0;
+		int64 TickNo = 0;
+		int32 RoundNo = 0;
+		FString PhaseStr;
+		FString RequestId;
+		int32 NPCIndex = 0;
+		FString StartedAtIso;
+	};
 
 } // anonymous
 
-bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
+/** 恢复一局旧游戏：打开 DB，给未完成的 LLM in-flight 补 timeout，并重建投影。 */
+bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString &InGameId)
 {
 	if (InGameId.IsEmpty())
 	{
@@ -3274,12 +3473,12 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 	{
 		FSQLitePreparedStatement Stmt;
 		if (!Stmt.Create(Db,
-			TEXT("SELECT seq, tick_no, round_no, phase, payload FROM events "
-			     "WHERE game_id = ?1 AND event_type = 'system.llm_inflight' "
-			     "ORDER BY seq ASC;")))
+						 TEXT("SELECT seq, tick_no, round_no, phase, payload FROM events "
+							  "WHERE game_id = ?1 AND event_type = 'system.llm_inflight' "
+							  "ORDER BY seq ASC;")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ResumeFromGameId: prepare inflight scan failed: %s"), *Db.GetLastError());
+				   TEXT("ResumeFromGameId: prepare inflight scan failed: %s"), *Db.GetLastError());
 			return false;
 		}
 		Stmt.SetBindingValueByIndex(1, CurrentGameId);
@@ -3299,7 +3498,7 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Payload);
 			if (FJsonSerializer::Deserialize(Reader, Obj) && Obj.IsValid())
 			{
-				Obj->TryGetStringField(TEXT("request_id"),  Row.RequestId);
+				Obj->TryGetStringField(TEXT("request_id"), Row.RequestId);
 				int32 NpcInt = 0;
 				if (Obj->TryGetNumberField(TEXT("npc_index"), NpcInt))
 				{
@@ -3314,8 +3513,8 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 			else
 			{
 				UE_LOG(LogAILiveMemory, Warning,
-					TEXT("ResumeFromGameId: in-flight seq=%lld missing request_id; skipped"),
-					Row.Seq);
+					   TEXT("ResumeFromGameId: in-flight seq=%lld missing request_id; skipped"),
+					   Row.Seq);
 			}
 		}
 	}
@@ -3328,12 +3527,12 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 	{
 		FSQLitePreparedStatement Stmt;
 		if (!Stmt.Create(Db,
-			TEXT("SELECT payload FROM events "
-			     "WHERE game_id = ?1 AND event_type != 'system.llm_inflight' "
-			     "  AND payload LIKE '%request_id%';")))
+						 TEXT("SELECT payload FROM events "
+							  "WHERE game_id = ?1 AND event_type != 'system.llm_inflight' "
+							  "  AND payload LIKE '%request_id%';")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ResumeFromGameId: prepare completion scan failed: %s"), *Db.GetLastError());
+				   TEXT("ResumeFromGameId: prepare completion scan failed: %s"), *Db.GetLastError());
 			return false;
 		}
 		Stmt.SetBindingValueByIndex(1, CurrentGameId);
@@ -3344,6 +3543,7 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 			FString Rid;
 			if (ExtractRequestIdFromPayload(Payload, Rid))
 			{
+				// 已完成集合包含真实完成事件，也包含之前 resume 写过的 timeout，保证幂等。
 				CompletedRequestIds.Add(Rid);
 			}
 		}
@@ -3353,7 +3553,7 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 	const FDateTime Now = FDateTime::UtcNow();
 	const FString ResumedAtIso = Now.ToIso8601();
 	int32 TimeoutsWritten = 0;
-	for (const FInflightRow& Row : Inflights)
+	for (const FInflightRow &Row : Inflights)
 	{
 		if (CompletedRequestIds.Contains(Row.RequestId))
 		{
@@ -3371,14 +3571,15 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 		}
 
 		FAILiveEvent Out;
-		Out.RoundNo   = Row.RoundNo;
-		Out.Phase     = AILiveEvent::PhaseFromString(Row.PhaseStr);
-		Out.Actor     = TEXT("orchestrator");
+		Out.RoundNo = Row.RoundNo;
+		Out.Phase = AILiveEvent::PhaseFromString(Row.PhaseStr);
+		Out.Actor = TEXT("orchestrator");
 		Out.EventType = EAILiveEventType::SystemAgentTimeout;
-		Out.Visibility = { TEXT("system") };
+		Out.Visibility = {TEXT("system")};
+		// timeout 事件 payload 带 request_id 和 source seq，便于事后追查哪次调用未完成。
 		Out.PayloadJson = FString::Printf(
 			TEXT("{\"text\":\"agent timeout from resume\",\"npc_index\":%d,")
-			TEXT("\"request_id\":\"%s\",\"age_seconds\":%.3f,\"resumed_at\":\"%s\","),
+				TEXT("\"request_id\":\"%s\",\"age_seconds\":%.3f,\"resumed_at\":\"%s\","),
 			Row.NPCIndex, *Row.RequestId, AgeSeconds, *ResumedAtIso);
 		Out.PayloadJson += FString::Printf(
 			TEXT("\"source_inflight_seq\":%lld}"), Row.Seq);
@@ -3395,8 +3596,8 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 		if (NewSeq <= 0)
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("ResumeFromGameId: AppendEvent failed for request_id=%s"),
-				*Row.RequestId);
+				   TEXT("ResumeFromGameId: AppendEvent failed for request_id=%s"),
+				   *Row.RequestId);
 			return false;
 		}
 		++TimeoutsWritten;
@@ -3407,13 +3608,13 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 	if (!RebuildProjections())
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("ResumeFromGameId: RebuildProjections failed"));
+			   TEXT("ResumeFromGameId: RebuildProjections failed"));
 		return false;
 	}
 
 	UE_LOG(LogAILiveMemory, Display,
-		TEXT("ResumeFromGameId OK game=%s inflights=%d completed=%d timeouts_written=%d"),
-		*CurrentGameId, Inflights.Num(), CompletedRequestIds.Num(), TimeoutsWritten);
+		   TEXT("ResumeFromGameId OK game=%s inflights=%d completed=%d timeouts_written=%d"),
+		   *CurrentGameId, Inflights.Num(), CompletedRequestIds.Num(), TimeoutsWritten);
 	return true;
 }
 
@@ -3426,13 +3627,14 @@ bool UAILiveEventStoreSubsystem::ResumeFromGameId(const FString& InGameId)
 // consistency for the L2 acceptance scenario.
 // ---------------------------------------------------------------
 
+/** 执行删除桥接：写 meta 生命周期表、同步 registry、再向当前 game.db 写 delete 事件。 */
 int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
-	const FString& InAgentId,
-	const FString& InReasonSummary,
-	const FString& InReasonPayloadJson,
-	const TArray<FString>& InTombstoneVisibility,
+	const FString &InAgentId,
+	const FString &InReasonSummary,
+	const FString &InReasonPayloadJson,
+	const TArray<FString> &InTombstoneVisibility,
 	bool bAffectsPersonaContinuity,
-	FString& OutLifecycleEventId)
+	FString &OutLifecycleEventId)
 {
 	OutLifecycleEventId.Reset();
 	if (!IsGameOpen())
@@ -3447,12 +3649,12 @@ int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
 	}
 	{
 		FString TmpErr;
-		const TArray<FString> AgentIdAsViewer = { InAgentId };
+		const TArray<FString> AgentIdAsViewer = {InAgentId};
 		if (!ValidateVisibility(AgentIdAsViewer, TmpErr))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("TriggerDeleteExecuted: agent_id '%s' is not a valid viewer string: %s"),
-				*InAgentId, *TmpErr);
+				   TEXT("TriggerDeleteExecuted: agent_id '%s' is not a valid viewer string: %s"),
+				   *InAgentId, *TmpErr);
 			return -1;
 		}
 	}
@@ -3462,28 +3664,28 @@ int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
 	// === Step 1 — INSERT _meta.db.agent_lifecycle_events =====================
 	const FString TombVisJson = AILiveEvent::ArrayToJsonString(InTombstoneVisibility);
 	const FString ReasonPayload = InReasonPayloadJson.IsEmpty()
-		? FString::Printf(TEXT("{\"text\":%s}"), *AILiveUtil::EscapeJsonString(InReasonSummary))
-		: InReasonPayloadJson;
+									  ? FString::Printf(TEXT("{\"text\":%s}"), *AILiveUtil::EscapeJsonString(InReasonSummary))
+									  : InReasonPayloadJson;
 
 	{
 		if (!MetaDb.Execute(TEXT("BEGIN IMMEDIATE;")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("TriggerDeleteExecuted: meta BEGIN failed: %s"), *MetaDb.GetLastError());
+				   TEXT("TriggerDeleteExecuted: meta BEGIN failed: %s"), *MetaDb.GetLastError());
 			return -1;
 		}
 		bool bRollback = false;
 		{
 			FSQLitePreparedStatement Ins;
 			if (!Ins.Create(MetaDb, TEXT(
-				"INSERT INTO agent_lifecycle_events ("
-				"  event_id, agent_id, lifecycle_event_type, triggered_in_game_id,"
-				"  triggered_at_seq, reason_summary, reason_payload, tombstone_visibility,"
-				"  affects_persona_continuity"
-				") VALUES (?1, ?2, 'delete_executed', ?3, ?4, ?5, ?6, ?7, ?8);")))
+										"INSERT INTO agent_lifecycle_events ("
+										"  event_id, agent_id, lifecycle_event_type, triggered_in_game_id,"
+										"  triggered_at_seq, reason_summary, reason_payload, tombstone_visibility,"
+										"  affects_persona_continuity"
+										") VALUES (?1, ?2, 'delete_executed', ?3, ?4, ?5, ?6, ?7, ?8);")))
 			{
 				UE_LOG(LogAILiveMemory, Error,
-					TEXT("TriggerDeleteExecuted: prepare insert failed: %s"), *MetaDb.GetLastError());
+					   TEXT("TriggerDeleteExecuted: prepare insert failed: %s"), *MetaDb.GetLastError());
 				bRollback = true;
 			}
 			else
@@ -3501,8 +3703,8 @@ int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
 				if (!bOk)
 				{
 					UE_LOG(LogAILiveMemory, Error,
-						TEXT("TriggerDeleteExecuted: lifecycle INSERT failed: %s"),
-						*MetaDb.GetLastError());
+						   TEXT("TriggerDeleteExecuted: lifecycle INSERT failed: %s"),
+						   *MetaDb.GetLastError());
 					bRollback = true;
 				}
 			}
@@ -3515,7 +3717,7 @@ int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
 		if (!MetaDb.Execute(TEXT("COMMIT;")))
 		{
 			UE_LOG(LogAILiveMemory, Error,
-				TEXT("TriggerDeleteExecuted: meta COMMIT failed: %s"), *MetaDb.GetLastError());
+				   TEXT("TriggerDeleteExecuted: meta COMMIT failed: %s"), *MetaDb.GetLastError());
 			MetaDb.Execute(TEXT("ROLLBACK;"));
 			return -1;
 		}
@@ -3525,18 +3727,18 @@ int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
 	if (!AILiveAgentRegistry::SyncRegistryFromLifecycle(MetaDb, LifecycleEventId))
 	{
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("TriggerDeleteExecuted: SyncRegistryFromLifecycle failed for agent=%s eid=%s"),
-			*InAgentId, *LifecycleEventId);
+			   TEXT("TriggerDeleteExecuted: SyncRegistryFromLifecycle failed for agent=%s eid=%s"),
+			   *InAgentId, *LifecycleEventId);
 		return -1;
 	}
 
 	// === Step 3 — Append system.delete_executed to the live game .db ========
 	FAILiveEvent Sys;
-	Sys.RoundNo    = 0; // 与 §11 验收一致——orchestrator 内部事件，round 取 BeginTick 之外的兜底值
-	Sys.Phase      = EAILivePhase::Setup;
-	Sys.Actor      = TEXT("orchestrator");
-	Sys.EventType  = EAILiveEventType::SystemDeleteExecuted;
-	Sys.Visibility = { TEXT("public") };
+	Sys.RoundNo = 0; // 与 §11 验收一致——orchestrator 内部事件，round 取 BeginTick 之外的兜底值
+	Sys.Phase = EAILivePhase::Setup;
+	Sys.Actor = TEXT("orchestrator");
+	Sys.EventType = EAILiveEventType::SystemDeleteExecuted;
+	Sys.Visibility = {TEXT("public")};
 	Sys.PayloadJson = FString::Printf(
 		TEXT("{\"text\":%s,\"lifecycle_event_id\":\"%s\",\"agent_id\":\"%s\","),
 		*AILiveUtil::EscapeJsonString(
@@ -3549,17 +3751,18 @@ int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
 	const int64 NewSeq = AppendEvent(Sys);
 	if (NewSeq <= 0)
 	{
+		// meta 侧已经提交，game 侧失败只能记录补偿风险，不能用单事务回滚两个 DB。
 		UE_LOG(LogAILiveMemory, Error,
-			TEXT("TriggerDeleteExecuted: AppendEvent system.delete_executed failed; "
-			     "lifecycle row %s already committed (compensation deferred — see DevLog)"),
-			*LifecycleEventId);
+			   TEXT("TriggerDeleteExecuted: AppendEvent system.delete_executed failed; "
+					"lifecycle row %s already committed (compensation deferred — see DevLog)"),
+			   *LifecycleEventId);
 		return -1;
 	}
 
 	OutLifecycleEventId = LifecycleEventId;
 	UE_LOG(LogAILiveMemory, Display,
-		TEXT("TriggerDeleteExecuted OK agent=%s lifecycle_event_id=%s system_seq=%lld"),
-		*InAgentId, *LifecycleEventId, NewSeq);
+		   TEXT("TriggerDeleteExecuted OK agent=%s lifecycle_event_id=%s system_seq=%lld"),
+		   *InAgentId, *LifecycleEventId, NewSeq);
 	return NewSeq;
 }
 
@@ -3570,8 +3773,8 @@ int64 UAILiveEventStoreSubsystem::TriggerDeleteExecuted(
 static FAutoConsoleCommand GAILiveTestBeginGame(
 	TEXT("AILive.Test.BeginGame"),
 	TEXT("AILive.Test.BeginGame <game_id> — open Saved/Games/<game_id>.db + _meta.db, run schema migration"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.BeginGame <game_id>"));
@@ -3580,25 +3783,23 @@ static FAutoConsoleCommand GAILiveTestBeginGame(
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys) return;
 		const bool bOk = Sys->BeginGame(Args[0]);
-		UE_LOG(LogAILiveMemory, Display, TEXT("AILive.Test.BeginGame('%s') -> %s"), *Args[0], bOk ? TEXT("OK") : TEXT("FAIL"));
-	}));
+		UE_LOG(LogAILiveMemory, Display, TEXT("AILive.Test.BeginGame('%s') -> %s"), *Args[0], bOk ? TEXT("OK") : TEXT("FAIL")); }));
 
 static FAutoConsoleCommand GAILiveTestEndGame(
 	TEXT("AILive.Test.EndGame"),
 	TEXT("AILive.Test.EndGame — close currently open game.db + _meta.db"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys) return;
 		Sys->EndGame();
-		UE_LOG(LogAILiveMemory, Display, TEXT("AILive.Test.EndGame OK"));
-	}));
+		UE_LOG(LogAILiveMemory, Display, TEXT("AILive.Test.EndGame OK")); }));
 
 static FAutoConsoleCommand GAILiveTestSchemaSelfCheck(
 	TEXT("AILive.Test.SchemaSelfCheck"),
 	TEXT("AILive.Test.SchemaSelfCheck — list tables / triggers / schema_version / events table_xinfo / agent_calibration columns; both DBs"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys) return;
 		if (!Sys->IsGameOpen())
@@ -3659,8 +3860,7 @@ static FAutoConsoleCommand GAILiveTestSchemaSelfCheck(
 			TEXT("meta.schema_version"), 1);
 		MetaReader.Close();
 
-		UE_LOG(LogAILiveMemory, Display, TEXT("SchemaSelfCheck done"));
-	}));
+		UE_LOG(LogAILiveMemory, Display, TEXT("SchemaSelfCheck done")); }));
 
 // ---------------------------------------------------------------
 // T3 — debug/test console commands.
@@ -3669,41 +3869,42 @@ static FAutoConsoleCommand GAILiveTestSchemaSelfCheck(
 namespace
 {
 
-FAILiveEvent MakeSyntheticEvent(int32 InIndex)
-{
-	FAILiveEvent Ev;
-	Ev.Actor = TEXT("orchestrator");
-	Ev.EventType = EAILiveEventType::SystemRoleAssigned;
-	Ev.Phase = EAILivePhase::Setup;
-	Ev.RoundNo = 0;
+	/** 生成测试用事件；按 index 轮换 visibility，用于 append/hash/visibility 压测。 */
+	FAILiveEvent MakeSyntheticEvent(int32 InIndex)
+	{
+		FAILiveEvent Ev;
+		Ev.Actor = TEXT("orchestrator");
+		Ev.EventType = EAILiveEventType::SystemRoleAssigned;
+		Ev.Phase = EAILivePhase::Setup;
+		Ev.RoundNo = 0;
 
-	const int32 Mode = InIndex % 3;
-	if (Mode == 0)
-	{
-		Ev.Visibility = { TEXT("public") };
-	}
-	else if (Mode == 1)
-	{
-		Ev.Visibility = { TEXT("NPC01"), TEXT("NPC02") };
-	}
-	else
-	{
-		Ev.Visibility = { TEXT("orchestrator") };
-	}
+		const int32 Mode = InIndex % 3;
+		if (Mode == 0)
+		{
+			Ev.Visibility = {TEXT("public")};
+		}
+		else if (Mode == 1)
+		{
+			Ev.Visibility = {TEXT("NPC01"), TEXT("NPC02")};
+		}
+		else
+		{
+			Ev.Visibility = {TEXT("orchestrator")};
+		}
 
-	Ev.PayloadJson = FString::Printf(
-		TEXT("{\"text\":\"synthetic event #%d\",\"index\":%d}"),
-		InIndex, InIndex);
-	return Ev;
-}
+		Ev.PayloadJson = FString::Printf(
+			TEXT("{\"text\":\"synthetic event #%d\",\"index\":%d}"),
+			InIndex, InIndex);
+		return Ev;
+	}
 
 } // namespace
 
 static FAutoConsoleCommand GAILiveTestAppendOne(
 	TEXT("AILive.Test.AppendOne"),
 	TEXT("AILive.Test.AppendOne <text> — append a single public speech with payload.text=<text>"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.AppendOne <text>"));
@@ -3727,14 +3928,13 @@ static FAutoConsoleCommand GAILiveTestAppendOne(
 		const int64 Seq = Sys->AppendEvent(Ev);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("AppendOne -> seq=%lld event_id=%s parser_version=%s"),
-			Seq, *Ev.EventId, *Ev.ParserVersion);
-	}));
+			Seq, *Ev.EventId, *Ev.ParserVersion); }));
 
 static FAutoConsoleCommand GAILiveTestAppend100(
 	TEXT("AILive.Test.Append100"),
 	TEXT("AILive.Test.Append100 — append 100 synthetic events; logs total_visibility_entries"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -3754,14 +3954,13 @@ static FAutoConsoleCommand GAILiveTestAppend100(
 		const double Dt = FPlatformTime::Seconds() - T0;
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("Append100 done: failures=%d, total_visibility_entries=%lld, elapsed_ms=%.1f"),
-			Failures, TotalVisibility, Dt * 1000.0);
-	}));
+			Failures, TotalVisibility, Dt * 1000.0); }));
 
 static FAutoConsoleCommand GAILiveTestAppendBadVisSelf(
 	TEXT("AILive.Test.AppendBadVisSelf"),
 	TEXT("AILive.Test.AppendBadVisSelf — try to append with visibility containing 'self' (should be rejected)"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -3776,14 +3975,13 @@ static FAutoConsoleCommand GAILiveTestAppendBadVisSelf(
 		Ev.PayloadJson = TEXT("{\"text\":\"intended speech\"}");
 		const int64 Seq = Sys->AppendEvent(Ev);
 		UE_LOG(LogAILiveMemory, Display,
-			TEXT("AppendBadVisSelf -> seq=%lld (expect -1)"), Seq);
-	}));
+			TEXT("AppendBadVisSelf -> seq=%lld (expect -1)"), Seq); }));
 
 static FAutoConsoleCommand GAILiveTestAppendBadVisFreeText(
 	TEXT("AILive.Test.AppendBadVisFreeText"),
 	TEXT("AILive.Test.AppendBadVisFreeText — try to append with arbitrary viewer string (should be rejected)"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -3798,14 +3996,13 @@ static FAutoConsoleCommand GAILiveTestAppendBadVisFreeText(
 		Ev.PayloadJson = TEXT("{\"text\":\"hi\"}");
 		const int64 Seq = Sys->AppendEvent(Ev);
 		UE_LOG(LogAILiveMemory, Display,
-			TEXT("AppendBadVisFreeText -> seq=%lld (expect -1)"), Seq);
-	}));
+			TEXT("AppendBadVisFreeText -> seq=%lld (expect -1)"), Seq); }));
 
 static FAutoConsoleCommand GAILiveTestAppendBadPayloadNoText(
 	TEXT("AILive.Test.AppendBadPayloadNoText"),
 	TEXT("AILive.Test.AppendBadPayloadNoText — try to append with payload missing 'text' (should be rejected)"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -3820,14 +4017,13 @@ static FAutoConsoleCommand GAILiveTestAppendBadPayloadNoText(
 		Ev.PayloadJson = TEXT("{\"foo\":\"bar\"}");
 		const int64 Seq = Sys->AppendEvent(Ev);
 		UE_LOG(LogAILiveMemory, Display,
-			TEXT("AppendBadPayloadNoText -> seq=%lld (expect -1)"), Seq);
-	}));
+			TEXT("AppendBadPayloadNoText -> seq=%lld (expect -1)"), Seq); }));
 
 static FAutoConsoleCommand GAILiveTestAppendAddressedToOutsideVis(
 	TEXT("AILive.Test.AppendAddressedToOutsideVis"),
 	TEXT("AILive.Test.AppendAddressedToOutsideVis — append with addressed_to=[NPC07], visibility=[NPC03]; expect Warning + parse_failed but event STILL gets written"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -3844,14 +4040,13 @@ static FAutoConsoleCommand GAILiveTestAppendAddressedToOutsideVis(
 		const int64 Seq = Sys->AppendEvent(Ev);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("AppendAddressedToOutsideVis -> seq=%lld (expect >0; one parse_failed audit row should also exist)"),
-			Seq);
-	}));
+			Seq); }));
 
 static FAutoConsoleCommand GAILiveTestBeginTickCmd(
 	TEXT("AILive.Test.BeginTick"),
 	TEXT("AILive.Test.BeginTick <N> — write a tick_anchor event and set CachedCurrentTickNo=N"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.BeginTick <N>"));
@@ -3867,14 +4062,13 @@ static FAutoConsoleCommand GAILiveTestBeginTickCmd(
 		const int64 AnchorSeq = Sys->BeginTick(N);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("BeginTick(%d) -> anchor_seq=%lld, GetCurrentTickNo=%lld"),
-			N, AnchorSeq, Sys->GetCurrentTickNo());
-	}));
+			N, AnchorSeq, Sys->GetCurrentTickNo()); }));
 
 static FAutoConsoleCommand GAILiveTestConcurrentAppend(
 	TEXT("AILive.Test.ConcurrentAppend"),
 	TEXT("AILive.Test.ConcurrentAppend <Threads> <PerThread> — fan out to N threads, each calls AppendEventsAtomically(<PerThread> events)"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 2)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ConcurrentAppend <Threads> <PerThread>"));
@@ -3929,14 +4123,13 @@ static FAutoConsoleCommand GAILiveTestConcurrentAppend(
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("ConcurrentAppend(%d x %d) done: success=%d, failed=%d, elapsed_ms=%.1f"),
 			NThreads, NPerThread,
-			SuccessGroups.GetValue(), FailedGroups.GetValue(), Dt * 1000.0);
-	}));
+			SuccessGroups.GetValue(), FailedGroups.GetValue(), Dt * 1000.0); }));
 
 static FAutoConsoleCommand GAILiveTestRecomputeChain(
 	TEXT("AILive.Test.RecomputeAndVerifyChain"),
 	TEXT("AILive.Test.RecomputeAndVerifyChain — walk events on main connection and recompute hash chain"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -3960,14 +4153,13 @@ static FAutoConsoleCommand GAILiveTestRecomputeChain(
 			UE_LOG(LogAILiveMemory, Error,
 				TEXT("chain BAD, bad_count=%lld, first_bad_seq=%lld, last_seq=%lld"),
 				BadCount, FirstBadSeq, LastSeq);
-		}
-	}));
+		} }));
 
 static FAutoConsoleCommand GAILiveTestTryUpdate(
 	TEXT("AILive.Test.TryUpdate"),
 	TEXT("AILive.Test.TryUpdate <seq> — issue UPDATE events SET payload='x' WHERE seq=<seq>; expect events_no_update trigger to ABORT"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.TryUpdate <seq>"));
@@ -3987,14 +4179,13 @@ static FAutoConsoleCommand GAILiveTestTryUpdate(
 		const bool bOk = Sys->ExecuteDebugSqlOnMainConnection(Sql, Err);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("TryUpdate seq=%s -> %s (err='%s'; expect failure containing 'append-only')"),
-			*Args[0], bOk ? TEXT("UNEXPECTED SUCCESS") : TEXT("rejected"), *Err);
-	}));
+			*Args[0], bOk ? TEXT("UNEXPECTED SUCCESS") : TEXT("rejected"), *Err); }));
 
 static FAutoConsoleCommand GAILiveTestTryDelete(
 	TEXT("AILive.Test.TryDelete"),
 	TEXT("AILive.Test.TryDelete <seq> — issue DELETE FROM events WHERE seq=<seq>; expect events_no_delete trigger to ABORT"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.TryDelete <seq>"));
@@ -4012,14 +4203,13 @@ static FAutoConsoleCommand GAILiveTestTryDelete(
 		const bool bOk = Sys->ExecuteDebugSqlOnMainConnection(Sql, Err);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("TryDelete seq=%s -> %s (err='%s'; expect failure containing 'append-only')"),
-			*Args[0], bOk ? TEXT("UNEXPECTED SUCCESS") : TEXT("rejected"), *Err);
-	}));
+			*Args[0], bOk ? TEXT("UNEXPECTED SUCCESS") : TEXT("rejected"), *Err); }));
 
 static FAutoConsoleCommand GAILiveTestSetMetaSchemaKV(
 	TEXT("AILive.Test.SetMetaSchemaKV"),
 	TEXT("AILive.Test.SetMetaSchemaKV <key> <value> — INSERT OR REPLACE into _meta.db.schema_meta"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 2)
 		{
 			UE_LOG(LogAILiveMemory, Error,
@@ -4035,14 +4225,13 @@ static FAutoConsoleCommand GAILiveTestSetMetaSchemaKV(
 		const bool bOk = Sys->UpsertMetaSchemaKV(Args[0], Args[1]);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("SetMetaSchemaKV('%s'='%s') -> %s"),
-			*Args[0], *Args[1], bOk ? TEXT("OK") : TEXT("FAIL"));
-	}));
+			*Args[0], *Args[1], bOk ? TEXT("OK") : TEXT("FAIL")); }));
 
 static FAutoConsoleCommand GAILiveTestSha256(
 	TEXT("AILive.Test.Sha256"),
 	TEXT("AILive.Test.Sha256 <text> — log Sha256Fingerprint of <text>"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.Sha256 <text>"));
@@ -4052,14 +4241,13 @@ static FAutoConsoleCommand GAILiveTestSha256(
 		const FString Hex = AILiveUtil::Sha256Fingerprint(Text);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("Sha256(\"%s\") = %s (len=%d)"),
-			*Text, *Hex, Hex.Len());
-	}));
+			*Text, *Hex, Hex.Len()); }));
 
 static FAutoConsoleCommand GAILiveTestSetQueryOnly(
 	TEXT("AILive.Test.SetQueryOnly"),
 	TEXT("AILive.Test.SetQueryOnly — apply PRAGMA query_only=1 to the live game.db connection (debug only)"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -4068,14 +4256,13 @@ static FAutoConsoleCommand GAILiveTestSetQueryOnly(
 		}
 		const bool bOk = Sys->SetGameDbQueryOnly(true);
 		UE_LOG(LogAILiveMemory, Display,
-			TEXT("SetQueryOnly -> %s"), bOk ? TEXT("OK") : TEXT("FAIL"));
-	}));
+			TEXT("SetQueryOnly -> %s"), bOk ? TEXT("OK") : TEXT("FAIL")); }));
 
 static FAutoConsoleCommand GAILiveTestCanonicalEcho(
 	TEXT("AILive.Test.CanonicalEcho"),
 	TEXT("AILive.Test.CanonicalEcho — verify CanonicalJsonOf is byte-for-byte idempotent and structurally excludes tick_no / wall_clock / *_event_hash"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		FAILiveEvent Ev;
 		Ev.GameId = TEXT("g1");
 		Ev.Seq = 42;
@@ -4113,8 +4300,7 @@ static FAutoConsoleCommand GAILiveTestCanonicalEcho(
 			     "float_round_trip=%d, empty_string_kept=%d, nested_keys_sorted=%d"),
 			bByteForByte ? 1 : 0, bNoTickNo ? 1 : 0,
 			bNoPrevHash ? 1 : 0, bNoEventHash ? 1 : 0, bNoWallClock ? 1 : 0,
-			bHasFloat ? 1 : 0, bHasEmpty ? 1 : 0, bNestedSorted ? 1 : 0);
-	}));
+			bHasFloat ? 1 : 0, bHasEmpty ? 1 : 0, bNestedSorted ? 1 : 0); }));
 
 // ---------------------------------------------------------------
 // T4 — debug/test console commands (read API + deterministic seed).
@@ -4123,25 +4309,25 @@ static FAutoConsoleCommand GAILiveTestCanonicalEcho(
 namespace
 {
 
-/** Helper：打印 FAILiveEvent 简要信息——console 命令日志统一格式。 */
-void LogEventBrief(const TCHAR* Label, const FAILiveEvent& Ev)
-{
-	UE_LOG(LogAILiveMemory, Display,
-		TEXT("[%s] seq=%lld type=%s actor=%s round=%d event_id=%s text=%s"),
-		Label, Ev.Seq,
-		*AILiveEvent::EventTypeToString(Ev.EventType),
-		*Ev.Actor, Ev.RoundNo, *Ev.EventId,
-		*Ev.PayloadJson.Left(120));
-}
+	/** Helper：打印 FAILiveEvent 简要信息——console 命令日志统一格式。 */
+	void LogEventBrief(const TCHAR *Label, const FAILiveEvent &Ev)
+	{
+		UE_LOG(LogAILiveMemory, Display,
+			   TEXT("[%s] seq=%lld type=%s actor=%s round=%d event_id=%s text=%s"),
+			   Label, Ev.Seq,
+			   *AILiveEvent::EventTypeToString(Ev.EventType),
+			   *Ev.Actor, Ev.RoundNo, *Ev.EventId,
+			   *Ev.PayloadJson.Left(120));
+	}
 
 } // namespace anonymous
 
 static FAutoConsoleCommand GAILiveTestSeedReadAcceptance(
 	TEXT("AILive.Test.SeedReadAcceptance"),
 	TEXT("AILive.Test.SeedReadAcceptance — write deterministic event set covering all T4 L1 acceptance shapes "
-	     "(public/intended/orphan-intended/system_inflight/NPC07-only/multi-vis-dedupe/bid)"),
+		 "(public/intended/orphan-intended/system_inflight/NPC07-only/multi-vis-dedupe/bid)"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -4275,14 +4461,13 @@ static FAutoConsoleCommand GAILiveTestSeedReadAcceptance(
 		Sys->AppendEvent(VoteEv);
 		LogEventBrief(TEXT("seed.vote.NPC03"), VoteEv);
 
-		UE_LOG(LogAILiveMemory, Display, TEXT("SeedReadAcceptance done — 13 events written"));
-	}));
+		UE_LOG(LogAILiveMemory, Display, TEXT("SeedReadAcceptance done — 13 events written")); }));
 
 static FAutoConsoleCommand GAILiveTestQuoteByRoundCmd(
 	TEXT("AILive.Test.QuoteByRound"),
 	TEXT("AILive.Test.QuoteByRound <round> <actor> <viewer> — list events of <actor> at <round> visible to <viewer>"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 3)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.QuoteByRound <round> <actor> <viewer>"));
@@ -4299,14 +4484,13 @@ static FAutoConsoleCommand GAILiveTestQuoteByRoundCmd(
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("QuoteByRound(round=%d, actor=%s, viewer=%s) -> %d rows"),
 			R, *Args[1], *Args[2], Rows.Num());
-		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("QuoteByRound"), E);
-	}));
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("QuoteByRound"), E); }));
 
 static FAutoConsoleCommand GAILiveTestQuoteSeqCmd(
 	TEXT("AILive.Test.QuoteSeq"),
 	TEXT("AILive.Test.QuoteSeq <seq> <viewer> — Quote single event by seq, viewer-isolation enforced"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 2)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.QuoteSeq <seq> <viewer>"));
@@ -4330,14 +4514,13 @@ static FAutoConsoleCommand GAILiveTestQuoteSeqCmd(
 			UE_LOG(LogAILiveMemory, Display,
 				TEXT("QuoteSeq(seq=%lld, viewer=%s) -> NOT VISIBLE / NOT FOUND"),
 				Seq, *Args[1]);
-		}
-	}));
+		} }));
 
 static FAutoConsoleCommand GAILiveTestSearchHistoryCmd(
 	TEXT("AILive.Test.SearchHistory"),
 	TEXT("AILive.Test.SearchHistory <keyword> <viewer> [limit] — fuzzy search; auto-routes between LIKE and FTS5 trigram"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 2)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.SearchHistory <keyword> <viewer> [limit]"));
@@ -4355,15 +4538,14 @@ static FAutoConsoleCommand GAILiveTestSearchHistoryCmd(
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("SearchHistory(keyword='%s', viewer='%s', limit=%d) -> %d rows"),
 			*Args[0], *Args[1], Limit, Rows.Num());
-		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("SearchHistory"), E);
-	}));
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("SearchHistory"), E); }));
 
 static FAutoConsoleCommand GAILiveTestListMyPendingIntendedCmd(
 	TEXT("AILive.Test.ListMyPendingIntended"),
 	TEXT("AILive.Test.ListMyPendingIntended <actor> <recentN> — list speech.intended without speech.public child; "
-	     "events-table-only, does NOT depend on agent_view_state projection"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+		 "events-table-only, does NOT depend on agent_view_state projection"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 2)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ListMyPendingIntended <actor> <recentN>"));
@@ -4380,14 +4562,13 @@ static FAutoConsoleCommand GAILiveTestListMyPendingIntendedCmd(
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("ListMyPendingIntended(actor=%s, recentN=%d) -> %d rows"),
 			*Args[0], N, Rows.Num());
-		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("PendingIntended"), E);
-	}));
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("PendingIntended"), E); }));
 
 static FAutoConsoleCommand GAILiveTestQuoteByEventTypeAndTickCmd(
 	TEXT("AILive.Test.QuoteByEventTypeAndTick"),
 	TEXT("AILive.Test.QuoteByEventTypeAndTick <event_type_str> <tick_no> — internal slice by tick (no viewer filter)"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 2)
 		{
 			UE_LOG(LogAILiveMemory, Error,
@@ -4407,15 +4588,14 @@ static FAutoConsoleCommand GAILiveTestQuoteByEventTypeAndTickCmd(
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("QuoteByEventTypeAndTick(type='%s', tick_no=%lld) -> %d rows"),
 			*Args[0], TickNo, Rows.Num());
-		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("ByEventTypeAndTick"), E);
-	}));
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("ByEventTypeAndTick"), E); }));
 
 static FAutoConsoleCommand GAILiveTestListMyStatementsCmd(
 	TEXT("AILive.Test.ListMyStatements"),
 	TEXT("AILive.Test.ListMyStatements <agentId> — list speech.public + private_msg of <agentId>; "
-	     "validates principles 硬约束 2 (self-utterance full traceability)"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+		 "validates principles 硬约束 2 (self-utterance full traceability)"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ListMyStatements <agentId>"));
@@ -4430,15 +4610,14 @@ static FAutoConsoleCommand GAILiveTestListMyStatementsCmd(
 		const TArray<FAILiveEvent> Rows = Sys->ListMyStatements(Args[0]);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("ListMyStatements(agentId=%s) -> %d rows"), *Args[0], Rows.Num());
-		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("MyStatements"), E);
-	}));
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("MyStatements"), E); }));
 
 static FAutoConsoleCommand GAILiveTestListVotesCmd(
 	TEXT("AILive.Test.ListVotes"),
 	TEXT("AILive.Test.ListVotes <round> — list public vote events of round; queries events table directly, "
-	     "returns full FAILiveEvent (not vote_history projection synthesis)"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+		 "returns full FAILiveEvent (not vote_history projection synthesis)"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ListVotes <round>"));
@@ -4454,15 +4633,14 @@ static FAutoConsoleCommand GAILiveTestListVotesCmd(
 		const TArray<FAILiveEvent> Rows = Sys->ListVotes(R);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("ListVotes(round=%d) -> %d rows"), R, Rows.Num());
-		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("Votes"), E);
-	}));
+		for (const FAILiveEvent& E : Rows) LogEventBrief(TEXT("Votes"), E); }));
 
 static FAutoConsoleCommand GAILiveTestExecDebugSqlCmd(
 	TEXT("AILive.Test.ExecDebugSql"),
 	TEXT("AILive.Test.ExecDebugSql <raw_sql...> — debug-only: run raw SQL on main game-db connection. "
-	     "Used by T4 acceptance to DROP TABLE agent_view_state and re-run ListMyPendingIntended"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+		 "Used by T4 acceptance to DROP TABLE agent_view_state and re-run ListMyPendingIntended"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Test.ExecDebugSql <raw_sql...>"));
@@ -4481,17 +4659,16 @@ static FAutoConsoleCommand GAILiveTestExecDebugSqlCmd(
 			TEXT("ExecDebugSql(%s) -> %s%s%s"),
 			*Sql, bOk ? TEXT("OK") : TEXT("FAIL"),
 			bOk ? TEXT("") : TEXT(" err="),
-			bOk ? TEXT("") : *Err);
-	}));
+			bOk ? TEXT("") : *Err); }));
 
 // === T8 — projector 重建 console 入口 =========================================
 
 static FAutoConsoleCommand GAILiveMemoryRebuildProjectionsCmd(
 	TEXT("AILive.Memory.RebuildProjections"),
 	TEXT("AILive.Memory.RebuildProjections — rebuild commitments / vote_history / "
-	     "alliance_state / agent_view_state from events (idempotent)"),
+		 "alliance_state / agent_view_state from events (idempotent)"),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -4500,16 +4677,15 @@ static FAutoConsoleCommand GAILiveMemoryRebuildProjectionsCmd(
 		}
 		const bool bOk = Sys->RebuildProjections();
 		UE_LOG(LogAILiveMemory, Display,
-			TEXT("RebuildProjections -> %s"), bOk ? TEXT("OK") : TEXT("FAIL"));
-	}));
+			TEXT("RebuildProjections -> %s"), bOk ? TEXT("OK") : TEXT("FAIL")); }));
 
 static FAutoConsoleCommand GAILiveMemoryCompareInlinePendingCmd(
 	TEXT("AILive.Memory.CompareInlinePending"),
 	TEXT("AILive.Memory.CompareInlinePending <agent_id> — compare T4 inline "
-	     "ListMyPendingIntended vs T8 agent_view_state.pending_intended seq sets. "
-	     "注意：投影表只保留最近 10 拍内的 pending；T4 inline 无 tick 上限，故对照前先过滤 inline。"),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+		 "ListMyPendingIntended vs T8 agent_view_state.pending_intended seq sets. "
+		 "注意：投影表只保留最近 10 拍内的 pending；T4 inline 无 tick 上限，故对照前先过滤 inline。"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Memory.CompareInlinePending <agent_id>"));
@@ -4585,17 +4761,16 @@ static FAutoConsoleCommand GAILiveMemoryCompareInlinePendingCmd(
 			UE_LOG(LogAILiveMemory, Warning,
 				TEXT("  only inline: %s  |  only proj: %s"),
 				*JoinSet(OnlyInline), *JoinSet(OnlyProj));
-		}
-	}));
+		} }));
 
 // === T9 — VerifyHashChain / Resume / Delete console commands ====================
 
 static FAutoConsoleCommand GAILiveMemoryVerifyHashChainCmd(
 	TEXT("AILive.Memory.VerifyHashChain"),
 	TEXT("AILive.Memory.VerifyHashChain — walk events and verify hash chain integrity. "
-	     "OK on success; on tamper writes ERROR with first_bad_seq."),
+		 "OK on success; on tamper writes ERROR with first_bad_seq."),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -4612,16 +4787,15 @@ static FAutoConsoleCommand GAILiveMemoryVerifyHashChainCmd(
 		{
 			UE_LOG(LogAILiveMemory, Error,
 				TEXT("VerifyHashChain -> FAIL first_bad_seq=%lld"), FirstBad);
-		}
-	}));
+		} }));
 
 static FAutoConsoleCommand GAILiveMemoryResumeFromGameIdCmd(
 	TEXT("AILive.Memory.ResumeFromGameId"),
 	TEXT("AILive.Memory.ResumeFromGameId <game_id> — open Saved/Games/<game_id>.db, "
-	     "convert unpaired system.llm_inflight to system.agent_timeout, "
-	     "then RebuildProjections."),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+		 "convert unpaired system.llm_inflight to system.agent_timeout, "
+		 "then RebuildProjections."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error, TEXT("Usage: AILive.Memory.ResumeFromGameId <game_id>"));
@@ -4635,16 +4809,15 @@ static FAutoConsoleCommand GAILiveMemoryResumeFromGameIdCmd(
 		}
 		const bool bOk = Sys->ResumeFromGameId(Args[0]);
 		UE_LOG(LogAILiveMemory, Display,
-			TEXT("ResumeFromGameId('%s') -> %s"), *Args[0], bOk ? TEXT("OK") : TEXT("FAIL"));
-	}));
+			TEXT("ResumeFromGameId('%s') -> %s"), *Args[0], bOk ? TEXT("OK") : TEXT("FAIL")); }));
 
 static FAutoConsoleCommand GAILiveMemoryTriggerDeleteExecutedCmd(
 	TEXT("AILive.Memory.TriggerDeleteExecuted"),
 	TEXT("AILive.Memory.TriggerDeleteExecuted <agent_id> [reason_summary] — three-step "
-	     "Delete bridge: write _meta.db.agent_lifecycle_events row, sync agent_registry, "
-	     "append system.delete_executed (visibility=public) to live game .db."),
-	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
-	{
+		 "Delete bridge: write _meta.db.agent_lifecycle_events row, sync agent_registry, "
+		 "append system.delete_executed (visibility=public) to live game .db."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString> &Args)
+												  {
 		if (Args.Num() < 1)
 		{
 			UE_LOG(LogAILiveMemory, Error,
@@ -4680,16 +4853,15 @@ static FAutoConsoleCommand GAILiveMemoryTriggerDeleteExecutedCmd(
 		{
 			UE_LOG(LogAILiveMemory, Error,
 				TEXT("TriggerDeleteExecuted -> FAIL"));
-		}
-	}));
+		} }));
 
 static FAutoConsoleCommand GAILiveTestAppendBadAddressedToCmd(
 	TEXT("AILive.Test.AppendBadAddressedTo"),
 	TEXT("AILive.Test.AppendBadAddressedTo — append speech.public with "
-	     "visibility=[\"NPC03\"] addressed_to=[\"NPC07\"]; expect AppendEvent to "
-	     "succeed but log Warning + emit one system.parse_failed audit row."),
+		 "visibility=[\"NPC03\"] addressed_to=[\"NPC07\"]; expect AppendEvent to "
+		 "succeed but log Warning + emit one system.parse_failed audit row."),
 	FConsoleCommandDelegate::CreateLambda([]()
-	{
+										  {
 		UAILiveEventStoreSubsystem* Sys = GetSubsystemForConsole();
 		if (!Sys || !Sys->IsGameOpen())
 		{
@@ -4708,5 +4880,4 @@ static FAutoConsoleCommand GAILiveTestAppendBadAddressedToCmd(
 		const int64 Seq = Sys->AppendEvent(Ev);
 		UE_LOG(LogAILiveMemory, Display,
 			TEXT("AppendBadAddressedTo -> seq=%lld (expect Warning above + extra system.parse_failed row)"),
-			Seq);
-	}));
+			Seq); }));

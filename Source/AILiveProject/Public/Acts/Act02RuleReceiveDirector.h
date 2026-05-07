@@ -76,18 +76,28 @@ struct IConsoleCommand;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FAct02CompletedDelegate);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FAct02FailedDelegate, FString, Reason);
 
+/** Act02 的运行状态机；控制预散布、LLM 请求、发言播放和反应轮推进。 */
 UENUM(BlueprintType)
 enum class EAct02State : uint8
 {
-	Idle,
-	PrescatterToTV,
-	SeedDispatch,
-	SeedAwait,
-	SeedSpeak,
-	GatedAwaitNext,
-	ReactionDispatch,
-	ReactionAwait,
-	ReactionSpeak,
+	/** 空闲状态：Act02 尚未运行，允许 BeginAct02 启动。 */
+	Idle UMETA(ToolTip = "空闲状态：Act02 尚未运行，允许 BeginAct02 启动。"),
+	/** 预散布阶段：NPC 正在移动到电视前的开局站位。 */
+	PrescatterToTV UMETA(ToolTip = "预散布阶段：NPC 正在移动到电视前的开局站位。"),
+	/** 种子轮下发阶段：向所有 NPC 并行发送开局 Reasoner/Parser 请求。 */
+	SeedDispatch UMETA(ToolTip = "种子轮下发阶段：向所有 NPC 并行发送开局 Reasoner/Parser 请求。"),
+	/** 种子轮等待阶段：等待所有 NPC 的 LLM 与解析结果返回。 */
+	SeedAwait UMETA(ToolTip = "种子轮等待阶段：等待所有 NPC 的 LLM 与解析结果返回。"),
+	/** 种子轮发言阶段：播放被选中 NPC 的 TTS/A2F 发言。 */
+	SeedSpeak UMETA(ToolTip = "种子轮发言阶段：播放被选中 NPC 的 TTS/A2F 发言。"),
+	/** 等待下一拍阶段：当前发言结束，等待玩家按键推进 reaction。 */
+	GatedAwaitNext UMETA(ToolTip = "等待下一拍阶段：当前发言结束，等待玩家按键推进 reaction。"),
+	/** 反应轮下发阶段：带历史上下文向所有 NPC 发送下一拍请求。 */
+	ReactionDispatch UMETA(ToolTip = "反应轮下发阶段：带历史上下文向所有 NPC 发送下一拍请求。"),
+	/** 反应轮等待阶段：等待所有 NPC 的反应结果和 bid 返回。 */
+	ReactionAwait UMETA(ToolTip = "反应轮等待阶段：等待所有 NPC 的反应结果和 bid 返回。"),
+	/** 反应轮发言阶段：根据 bid 决定赢家并播放公开发言。 */
+	ReactionSpeak UMETA(ToolTip = "反应轮发言阶段：根据 bid 决定赢家并播放公开发言。"),
 };
 
 struct FAct02NPCRuntime

@@ -35,12 +35,16 @@
 #include "AILiveAgentRoster.generated.h"    // ⚠️ 必须最后一个 include；UHT 生成的反射代码
 
 // LLM 厂商三选一。底层 uint8 是 BlueprintType 必需。
+/** NPC 使用的 LLM 厂商；Director 会据此解析 API key、endpoint 和模型名。 */
 UENUM(BlueprintType)
 enum class ELLMProvider : uint8
 {
-	DeepSeek UMETA(DisplayName = "DeepSeek"),
-	GLM      UMETA(DisplayName = "GLM"),
-	Qwen3    UMETA(DisplayName = "Qwen3"),
+	/** DeepSeek 模型厂商；用于把 NPC 的推理请求路由到 DeepSeek endpoint。 */
+	DeepSeek UMETA(DisplayName = "DeepSeek", ToolTip = "DeepSeek 模型厂商；用于把 NPC 的推理请求路由到 DeepSeek endpoint。"),
+	/** GLM / 智谱模型厂商；用于把 NPC 的推理请求路由到 GLM endpoint。 */
+	GLM      UMETA(DisplayName = "GLM", ToolTip = "GLM / 智谱模型厂商；用于把 NPC 的推理请求路由到 GLM endpoint。"),
+	/** Qwen3 / 通义千问模型厂商；用于把 NPC 的推理请求路由到 Qwen endpoint。 */
+	Qwen3    UMETA(DisplayName = "Qwen3", ToolTip = "Qwen3 / 通义千问模型厂商；用于把 NPC 的推理请求路由到 Qwen endpoint。"),
 };
 
 // 一个 NPC 的完整配置。BlueprintType 让蓝图能 Make / Break。

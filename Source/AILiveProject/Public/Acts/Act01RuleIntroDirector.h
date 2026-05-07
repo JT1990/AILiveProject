@@ -62,13 +62,18 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FAct01CompletedDelegate);
 // 失败事件：带原因（FString Reason 透传给 BP 监听器）
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FAct01FailedDelegate, FString, Reason);
 
+/** Act01 的运行状态机；控制开门、NPC 移动到电视前、播放视频这条剧情链。 */
 UENUM(BlueprintType)
 enum class EAct01State : uint8
 {
-	Idle,
-	OpeningDoors,
-	NPCsMovingToTV,
-	PlayingVideo,
+	/** 空闲状态：Act01 尚未运行，允许 BeginAct01 启动。 */
+	Idle UMETA(ToolTip = "空闲状态：Act01 尚未运行，允许 BeginAct01 启动。"),
+	/** 开门阶段：牢房门正在播放打开动画。 */
+	OpeningDoors UMETA(ToolTip = "开门阶段：牢房门正在播放打开动画。"),
+	/** NPC 移动阶段：NPC 正在散布/移动到电视前的目标位置。 */
+	NPCsMovingToTV UMETA(ToolTip = "NPC 移动阶段：NPC 正在散布/移动到电视前的目标位置。"),
+	/** 播放视频阶段：NPC 已到位，电视视频正在播放或等待播放结束。 */
+	PlayingVideo UMETA(ToolTip = "播放视频阶段：NPC 已到位，电视视频正在播放或等待播放结束。"),
 };
 
 UCLASS(BlueprintType, Blueprintable)

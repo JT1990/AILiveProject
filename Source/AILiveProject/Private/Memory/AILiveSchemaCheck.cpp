@@ -41,10 +41,14 @@
 
 namespace
 {
+	/** schema.yaml 字段在 UE 反射系统里应该对应的属性类型。 */
 	enum class EExpectedKind : uint8
 	{
+		/** 期望字段在 UE 反射里是字符串属性，对应 FString。 */
 		StrProperty,
+		/** 期望字段在 UE 反射里是整数属性，对应 int32 / int64 等整型。 */
 		IntProperty,
+		/** 期望字段是 EAILiveVoicePresentation 枚举属性。 */
 		EnumVoicePresentation,
 	};
 

@@ -135,11 +135,16 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+	/** StoryScenarioDirector 的内部状态机；只在 C++ 内部使用，不暴露给蓝图。 */
 	enum class EStoryScenarioState : uint8
 	{
+		/** 空闲状态：场景未运行，允许开始新的双 NPC 演出。 */
 		Idle,
+		/** 前往会面点：NPC2 正在移动到 NPC1 附近的临时目标点。 */
 		MovingToMeeting,
+		/** 对话中：NPC 已到位，正在按 DialogueLines 轮流播放台词。 */
 		Dialogue,
+		/** 返回原位：对话结束后 NPC2 正在回到初始位置。 */
 		Returning
 	};
 

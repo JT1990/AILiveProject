@@ -25,25 +25,35 @@
 #include "AILiveAgentTypes.generated.h"
 
 // Agent 生命周期状态（对应数据库 _meta.db.agent_registry.status 字段）
+/** Agent 生命周期状态；决定该 agent 是否参与当前局或后续局。 */
 UENUM(BlueprintType)
 enum class EAILiveAgentStatus : uint8
 {
-	Active   UMETA(DisplayName = "active"),    // 正常活跃中
-	Deleted  UMETA(DisplayName = "deleted"),   // 跨局已删（PRD T9 跨局 Delete 桥接）
-	Archived UMETA(DisplayName = "archived"),  // 归档（保留历史但不参与新局）
+	/** 正常活跃中：参与当前局和后续局的推理、发言、行动。 */
+	Active   UMETA(DisplayName = "active", ToolTip = "正常活跃中：参与当前局和后续局的推理、发言、行动。"),
+	/** 已删除：跨局 Delete 已执行，不再作为可用 agent 进入新局。 */
+	Deleted  UMETA(DisplayName = "deleted", ToolTip = "已删除：跨局 Delete 已执行，不再作为可用 agent 进入新局。"),
+	/** 已归档：保留历史记录，但不参与新局。 */
+	Archived UMETA(DisplayName = "archived", ToolTip = "已归档：保留历史记录，但不参与新局。"),
 };
 
 // 表征声线与形象呈现，非人类二元生理性别。对齐 PRD：AI 是 AI，不扮演人类。
 // 中文教学：注意 PRD 强约束——所有 NPC prompt 严禁注入「人类背景」(职业/学历/家乡)，
 // 只能给「外观符号」(声线、虚拟形象)。这个枚举是这条规则在数据层的体现。
+/** 声线与形象呈现分类；只表达 AI 外观符号，不表达人类背景。 */
 UENUM(BlueprintType)
 enum class EAILiveVoicePresentation : uint8
 {
-	Masculine    UMETA(DisplayName = "masculine"),
-	Feminine     UMETA(DisplayName = "feminine"),
-	Androgynous  UMETA(DisplayName = "androgynous"),
-	Synthetic    UMETA(DisplayName = "synthetic"),
-	Custom       UMETA(DisplayName = "custom"),
+	/** 偏阳性声线或形象呈现；只描述外观符号，不代表人类性别身份。 */
+	Masculine    UMETA(DisplayName = "masculine", ToolTip = "偏阳性声线或形象呈现；只描述外观符号，不代表人类性别身份。"),
+	/** 偏阴性声线或形象呈现；只描述外观符号，不代表人类性别身份。 */
+	Feminine     UMETA(DisplayName = "feminine", ToolTip = "偏阴性声线或形象呈现；只描述外观符号，不代表人类性别身份。"),
+	/** 中性或混合型声线/形象呈现。 */
+	Androgynous  UMETA(DisplayName = "androgynous", ToolTip = "中性或混合型声线/形象呈现。"),
+	/** 明显合成化、机械化或非自然人的声线/形象呈现。 */
+	Synthetic    UMETA(DisplayName = "synthetic", ToolTip = "明显合成化、机械化或非自然人的声线/形象呈现。"),
+	/** 自定义呈现：由配置或 prompt 额外描述。 */
+	Custom       UMETA(DisplayName = "custom", ToolTip = "自定义呈现：由配置或 prompt 额外描述。"),
 };
 
 // 核心档案（每个 agent 一份，写入 _meta.db.agent_registry 表）
