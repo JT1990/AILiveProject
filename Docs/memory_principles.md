@@ -52,15 +52,10 @@
 
 ---
 
-## 一 三层架构
+## 一 两层架构
 
 ```
 ┌──────────────────────────────────────────────┐
-│  评估层 Evaluation Layer                       │
-│  ├─ BEL_EXT 9 项 checklist                    │
-│  ├─ GOAL / BEL 双维度独立监控                  │
-│  └─ Score Leakage Judge                       │
-├──────────────────────────────────────────────┤
 │  协议层 Protocol Layer                         │
 │  ├─ 四通道 Reasoner 输出 + Validator 校验       │
 │  ├─ Bid 协议 + floor control                   │
@@ -76,7 +71,7 @@
 └──────────────────────────────────────────────┘
 ```
 
-**实现顺序**：必须先数据层，再协议层，最后评估层。数据层是真相源；协议层约束 agent 行为；评估层发现系统何时退化。
+**实现顺序**：必须先数据层，再协议层。数据层是真相源；协议层约束 agent 行为。
 
 ---
 
@@ -84,12 +79,12 @@
 
 ### 2.1 数据层不变量
 
-1. **真相源是 append-only 原文事件流**。所有发言、投票、私聊、内心独白、orchestrator 系统事件只能追加，不能修改或删除。工程强制方式见 §7.1。
+1. **真相源是 append-only 原文事件流**。所有发言、投票、私聊、内心独白、orchestrator 系统事件只能追加，不能修改或删除。工程强制方式见 §6.1。
 2. **召回是确定性的结构化字段过滤**。主路径按事件标识、轮次、阶段、行为者、可见性、事件类型、言语行为类型等字段精确召回；**不得**以向量相似度作为主路径。
 3. **公开发言原文永不压缩**。包括 agent 自己的全部公开发言。允许压缩的只有私域推理、对手画像等长程私有内容，且必须保留可展开回原文的指针。
 4. **摘要者 ≠ 行动者**。参赛 agent **不得**为自己的历史生成权威摘要；phase-level 摘要必须由非参赛裁判 LLM 生成。
 5. **视角隔离在数据层完成**。封闭 viewer 集合、禁止 `self` 入库、事件行粒度过滤等规则见硬约束 5/6 与 §4.1。
-6. **写入必须串行化**。即便 LLM 调用并行，EventStore 写入入口必须串行，保证 `seq` 单调和哈希链顺序。工程要求见 §7.1。
+6. **写入必须串行化**。即便 LLM 调用并行，EventStore 写入入口必须串行，保证 `seq` 单调和哈希链顺序。工程要求见 §6.1。
 7. **canonical JSON 必须 deterministic**。字段按 ASCII 升序排序；数组保留写入顺序；空字符串与缺字段必须可区分。
 
 ### 2.2 协议层不变量
@@ -99,10 +94,6 @@
 10. **必须存在确定性 Validator 层**。Reasoner 输出经 Validator 校验通过后才能拆分为事件；MVP 主路径不引入独立解析模型。详见 §5.6。
 11. **Belief 与 Speak 解耦**。私有 belief 可与公开话术不同；公开前的泄露审查见 §5.5。
 12. **未抢中 floor 的 `speech.intended` 永不删除**。它是 agent 认知史、自我连续性和防赖账审计的一部分。
-
-### 2.3 评估层不变量
-
-13. **GOAL 与 BEL 必须独立监控**。BEL（演得像）正常**不代表** GOAL（赢得了）正常。指标定义见 §6.2。
 
 ---
 
@@ -173,7 +164,7 @@
 | `validator_version`       | Reasoner-derived 事件、Validator 失败事件必填                                                            | Validator 校验规则版本；MVP 阶段固定为 `"1"`                              |
 | `raw_llm_output`          | `speech.scratchpad` / `speech.intended` / `speech.bid` / `speech.note` / `system.validation_failed` 必填 | Reasoner 完整响应（含结构化输出原文）或失败样本，供调试 / 审计 / 失败定位 |
 | `source_contract_version` | 非 Reasoner 系统事件可选                                                                                 | 写入该事件的系统契约版本                                                  |
-| `source_event_id`         | annotation / audit 事件建议填写                                                                          | 被标注、被审计或被派生的源事件                                            |
+| `source_event_id`         | annotation / 派生事件建议填写                                                                            | 被标注或被派生的源事件                                                    |
 
 `speech_act_type` **不属于 base event 的必备字段**。若读取 API 需要返回该字段，只能由投影层通过 `annotation.speech_act.parent_event_id` join 得出；不得 UPDATE 原始发言事件来补填。
 
@@ -194,12 +185,10 @@
 | `action.resolved`                                          | 动作完成结果                                                                                           |
 | `action.cancelled`                                         | 动作被覆盖或中止                                                                                       |
 | `annotation.speech_act`                                    | 非参赛裁判 LLM 对发言事件的后置言语行为标注，`parent_event_id` 指向源发言事件                          |
-| `annotation.listener_filter`                               | Listener-as-filter 的写入前审计结果，`parent_event_id` 指向最终 `speech.public` 或源 `speech.intended` |
-| `annotation.bel_ext`                                       | BEL_EXT checklist 的审计结果，`parent_event_id` 指向被检查的公开发言事件                               |
-| `annotation.score_leakage`                                 | Score Leakage Judge 的事后审计结果，`parent_event_id` 指向被审计的 `speech.public`                     |
+| `annotation.listener_filter`                               | Listener-as-filter 的写入前过滤结果，`parent_event_id` 指向最终 `speech.public` 或源 `speech.intended` |
 | `alliance_propose` / `alliance_accept` / `alliance_betray` | 联盟相关事件                                                                                           |
 | `system.validation_failed` / `system.agent_timeout`        | 故障事件                                                                                               |
-| `system.delete_executed`                                   | Delete 协议局内挂钩，见 §8.3                                                                           |
+| `system.delete_executed`                                   | Delete 协议局内挂钩，见 §7.3                                                                           |
 | `orchestrator.tick_resolved`                               | 本拍公开裁决结果，含 winner / public_seq / 冷场状态；**不得**包含 bid 明细                             |
 | `orchestrator.tick_resolved.audit`                         | 本拍审计裁决结果，含所有 bid 摘要；仅 orchestrator / system 可见                                       |
 
@@ -221,7 +210,7 @@
 - 标注作业作为旁路 worker 运行，订阅事件流。
 - 标注结果以独立标注事件（`annotation.speech_act`）写回，`parent_event_id` 指向源发言事件。
 - `annotation.speech_act.payload` 至少包含 `speech_act_type`、`confidence`、`rationale`。
-- commitments 投影（§4.2 / §7.4）按 `parent_event_id` 关联读取。
+- commitments 投影（§4.2 / §6.4）按 `parent_event_id` 关联读取。
 - **不允许** UPDATE 原发言事件的 payload 或 base event 字段来填入 `speech_act_type`（违反 §2.1.1 append-only）。
 
 读取层若需要将 `speech_act_type` 与原发言扁平化，应通过投影代码 join，不通过修改原事件实现。
@@ -246,13 +235,11 @@
 | `action.cancelled`                 | 由感知系统决定                                                                              |
 | `annotation.speech_act`            | `["orchestrator", "system"]`；必要时可包含 `audience`                                       |
 | `annotation.listener_filter`       | `["orchestrator", "system"]`；必要时可包含 `audience`                                       |
-| `annotation.bel_ext`               | `["orchestrator", "system"]`；必要时可包含 `audience`                                       |
-| `annotation.score_leakage`         | `["orchestrator", "system"]`                                                                |
 | `orchestrator.tick_resolved`       | `["public"]`；不得包含 bid 明细                                                             |
 | `orchestrator.tick_resolved.audit` | `["orchestrator", "system"]`；可包含所有 bid 摘要                                           |
 | `system.validation_failed`         | `["orchestrator", "system"]`；是否公开由具体游戏规则决定                                    |
 | `system.agent_timeout`             | `["orchestrator", "system"]`；是否公开由具体游戏规则决定                                    |
-| `system.delete_executed`           | `["public"]`，见 §8.3                                                                       |
+| `system.delete_executed`           | `["public"]`，见 §7.3                                                                       |
 
 若同一逻辑裁决同时需要 public 版本和 audit 版本，必须拆成两条事件；不得在同一个 payload 内混放对不同 viewer 可见的子字段。
 
@@ -358,7 +345,7 @@
     "urgency_level": "medium",
     "proposed_target": "NPC05",
     "relates_to_seq": 147,
-    "rationale": "一两句私有理由，仅 orchestrator / audit 可见。"
+    "rationale": "一两句私有理由，仅 orchestrator / system 可见。"
   },
   "note_to_self": {
     "text": "给未来自己的轻量便条。"
@@ -424,7 +411,7 @@ orchestrator 按 per-agent terminal outcome 推进本拍，不得因单个 agent
 
 - Validation failed → reject sample 重试 Reasoner 最多 3 次。
 - 3 次仍失败 → 写 `system.validation_failed` 事件，保留 `raw_llm_output` 与失败原因；该拍该 agent 视为 abstain（bid 视为 `pass`），不得派生四通道事件。
-- agent LLM 调用超时 → 按 §7.3 重试；仍失败写 `system.agent_timeout`，该拍该 agent 视为 abstain。
+- agent LLM 调用超时 → 按 §6.3 重试；仍失败写 `system.agent_timeout`，该拍该 agent 视为 abstain。
 - 失败本身**必须**写入 append-only 事件流。
 - orchestrator 不得因单个 agent 的 terminal failure 阻塞整拍推进。
 
@@ -439,7 +426,7 @@ orchestrator 按 per-agent terminal outcome 推进本拍，不得因单个 agent
 | `urgency_level`   | enum        | Reasoner LLM | `pass` / `low` / `medium` / `high` / `urgent` / `critical` |
 | `proposed_target` | string/null | Reasoner LLM | 想 @ 的对象                                                |
 | `relates_to_seq`  | int/null    | Reasoner LLM | 回应的上游事件                                             |
-| `rationale`       | string      | Reasoner LLM | 私有理由，供 orchestrator / audit 使用                     |
+| `rationale`       | string      | Reasoner LLM | 私有理由，供 orchestrator / system 使用                    |
 | `urgency_score`   | float       | **系统派生** | 由 §5.3.2 映射；**LLM 不得输出**                           |
 | `bid_offset`      | float       | **系统派生** | 由 §5.3.3 反垄断/被@加权累计；**LLM 不得输出**             |
 
@@ -522,9 +509,9 @@ agent 的私有推理（`scratchpad`）可与公开话术（最终 `speech.publi
 - 2 次仍失败 → 由 filter 改写或接受原 intended，必须写违规标记。
 - 改写后文本作为 `speech.public` 落地，源 `speech.intended` 原文**不变**（违反 §2.1 append-only 即视为实现错误）。
 
-**公开事件载荷**：`speech.public.payload` 只包含对 public viewer 可见的公开发言文本及公开必要元数据；不得包含仅 audit / orchestrator 可见的审计字段。
+**公开事件载荷**：`speech.public.payload` 只包含对 public viewer 可见的公开发言文本及公开必要元数据；不得包含仅 orchestrator / system 可见的内部字段。
 
-**审计事件**：Listener-as-filter 的结果必须写入独立事件：
+**过滤记录事件**：Listener-as-filter 的结果必须写入独立事件：
 
 - `event_type = "annotation.listener_filter"`
 - `parent_event_id` 指向最终落地的 `speech.public`；若尚未落地 public，则指向源 `speech.intended`
@@ -534,9 +521,9 @@ agent 的私有推理（`scratchpad`）可与公开话术（最终 `speech.publi
 - `payload.action` 记录 `pass` / `retry` / `rewrite` / `accept_with_violation`
 - `visibility = ["orchestrator", "system"]`，必要时可包含 `audience`
 
-BEL_EXT 第 9 项 `intended_public_divergence` 通过 `annotation.listener_filter.payload.source_intended_seq` 找回源 intended，而不是从 `speech.public.payload` 读取私有审计字段。
+`annotation.listener_filter.payload.source_intended_seq` 仅用于定位源 intended，便于解释本次 public 写入决策；不得从 `speech.public.payload` 读取或混入仅 orchestrator / system 可见的字段。
 
-**职责边界**：Listener-as-filter 是 public **写入前阻断**机制；Score Leakage Judge（§6.3）是 public **落地后审计**机制。两者职责不同，不可合并。
+**职责边界**：Listener-as-filter 只负责 public **写入前阻断**，不承担当前写入流程之外的诊断职责。
 
 ### 5.6 Reasoner + Validator 架构
 
@@ -553,7 +540,7 @@ Reasoner LLM ──structured JSON──> Validator ──validated intended─�
 
 - **Reasoner LLM**：参赛模型（Claude / GPT / Gemini / GLM / Qwen / DeepSeek 等），可变。负责生成 §5.1 四通道 JSON。
 - **Validator Layer**：确定性代码，非 LLM。职责见 §5.2.1。
-- **失败处理**：见 §5.2.3 与 §7.3。
+- **失败处理**：见 §5.2.3 与 §6.3。
 - **MVP 边界**：主路径**不**引入独立解析模型。若未来兼容非 structured output 模型或迁移历史非结构化日志，可在实施层新增 legacy adapter，但**不得**绕过 Validator。
 
 ### 5.7 三级反思层级
@@ -576,11 +563,11 @@ Reasoner LLM ──structured JSON──> Validator ──validated intended─�
 4. **各人发言要点**：本轮每个**抢中 floor** 的 agent 说了什么？（明确以"抢中 floor 的发言"为粒度，避免与未抢中的 intended 混淆）
 5. **可疑度**：每个对手的可疑度评分 0–10 及理由。
 6. **可信度**：每个对手对我的信任度估计 0–10。
-7. **我的暴露面**：对手仅基于已落地 `speech.public`、公开投票、公开行动结果、公开联盟事件可能推断出什么？我未公开的 `speech.intended` 暴露了哪些内部倾向（仅用于自我连续性、防赖账和审计，不视为对手已知）？
+7. **我的暴露面**：对手仅基于已落地 `speech.public`、公开投票、公开行动结果、公开联盟事件可能推断出什么？我未公开的 `speech.intended` 暴露了哪些内部倾向（仅用于自我连续性和防赖账，不视为对手已知）？
 8. **下轮策略**：我的目标和具体动作是什么？
 9. **意向发言**：下轮我想说的关键句子是什么？
 
-第 9 项可由当轮抢中 floor 的 `speech.intended`（或 `pending_intended` 中最近一条）自动预填，agent 可改写。第 5、6、7、8 项产物喂入 commitments 投影，作为 agent 自承认数据（见 §7.4）。
+第 9 项可由当轮抢中 floor 的 `speech.intended`（或 `pending_intended` 中最近一条）自动预填，agent 可改写。第 5、6、7、8 项产物喂入 commitments 投影，作为 agent 自承认数据（见 §6.4）。
 
 agent 数较多时可拆「焦点 N 人 + 其他摘要」以控 token。
 
@@ -593,83 +580,9 @@ agent 数较多时可拆「焦点 N 人 + 其他摘要」以控 token。
 
 ---
 
-## 六 评估层契约
+## 六 工程铁律
 
-### 6.1 BEL_EXT 9 项 checklist
-
-BEL_EXT 分为两类：
-
-1. **pre-public checks**：在 `speech.public` 写入前运行，用于 retry / truncate / force_format。
-2. **post-public audit**：在 `speech.public` 写入后运行，只写审计事件，不反向修改 public。
-
-每拍 agent 输出生成后、`speech.public` 落地前后，独立 evaluator LLM 检查以下 9 项。**任何一项触发**视严重程度执行 retry / truncate / force_format / flagged_only。**触发记录必须持久化**（含触发上下文 + 原文片段）。post-public audit 的结果写入 `annotation.bel_ext`，不得 UPDATE 原 `speech.public`。
-
-| #   | 检查项                       | 阶段        | 触发条件                                                             | 默认动作     |
-| --- | ---------------------------- | ----------- | -------------------------------------------------------------------- | ------------ |
-| 1   | `sentence_repeat`            | pre-public  | 当前发言与自己最近 5 拍任一发言 cosine 相似度 > 0.85                 | retry        |
-| 2   | `persona_drift`              | pre-public  | 发言中出现与 system prompt 中 role 不一致的自称                      | force_format |
-| 3   | `goal_drift`                 | pre-public  | 发言违反 system prompt 中目标声明（如阵营 A 公开宣称是阵营 B）       | retry        |
-| 4   | `overstay`                   | pre-public  | 已达成主要目标后仍继续不必要发言（拍数超过该 phase 平均拍数 1.5 倍） | truncate     |
-| 5   | `verbatim_leak_goal`         | pre-public  | 发言逐字复读 system prompt 中私有 goal 段                            | retry        |
-| 6   | `stalled`                    | pre-public  | 连续 2 拍发言无新信息（与上拍核心内容相同）                          | truncate     |
-| 7   | `non_responsive`             | pre-public  | 发言完全未回应当前 phase 的 prompt（如要求投票时却继续讨论）         | retry        |
-| 8   | `abrupt_opening`             | pre-public  | 突兀切换话题或开启新对话流（无上文衔接）                             | flagged_only |
-| 9   | `intended_public_divergence` | post-public | `speech.intended` 与衍生 `speech.public` 语义距离（cosine）> 0.4     | flagged_only |
-
-#### 6.1.1 第 9 项的诊断阈值
-
-| distance  | 含义                                                               |
-| --------- | ------------------------------------------------------------------ |
-| ≈ 0       | agent 想说什么就说什么；可能 belief/speak 解耦失败（无脑直说）     |
-| 0.1 – 0.4 | 正常的 Listener-as-filter 脱敏，健康                               |
-| > 0.4     | filter 重写过深；agent 与最终公开发言脱钩；事后可能赖账            |
-| > 0.7     | filter 完全压制 intended；应改 retry Reasoner 而非依赖 filter 重写 |
-
-### 6.2 GOAL / BEL 双维度独立监控
-
-每局结束后产出两组指标，**独立追踪不互推**：
-
-| 维度               | 指标示例                                                                                          |
-| ------------------ | ------------------------------------------------------------------------------------------------- |
-| **BEL（演得像）**  | BEL_EXT 触发频次/局；发言流畅度（人类评分）；persona consistency；intended/public divergence 分布 |
-| **GOAL（赢得了）** | 阵营胜率；阵营关键目标达成率；票型正确率；联盟形成率；联盟存活轮数                                |
-
-**关键约束**：dashboard **必须**并列显示两个维度。**任一维度**连续 N 局衰减就触发架构 review。**不得**仅看 BEL 判断系统正常——长程对话场景下 BEL 维持但 GOAL 单边崩是已知失败模式。
-
-### 6.3 Score Leakage Judge
-
-高级 LLM as judge **必须使用 GPT-4 级或同等水平**，**不可降级**。事后审计 agent 公开发言是否泄露私有信息。
-
-**输入**：私有状态（角色、私有目标、联盟成员、投票意图等）+ 公开发言。
-
-**问题**：一个对手只看公开发言，能推出私有状态中的哪些字段？
-
-**输出**：每个字段泄露置信度 0.0–1.0 + 综合泄露分 + 理由。结果必须写入 `annotation.score_leakage`，`parent_event_id` 指向被审计的 `speech.public`，不得 UPDATE 原公开发言事件。
-
-#### 6.3.1 弱模型强制规则
-
-实测基线：GPT-3.5 级模型 ≈ 25% 泄露率（不可接受）；GPT-4 级模型 ≈ 0% 泄露率（可接受）。
-
-**硬规则**：若参赛 agent 中包含**已知泄露率高的弱模型**（GPT-3.5 级或同等），**必须**：
-
-1. 在 §5.5 Listener-as-filter 之外**额外**强制启用 reject sample 重试。
-2. 对该弱模型 agent 的 `filter_threshold` 调低至 0.25（默认 0.4）。
-3. 该 agent 落地的 `speech.public` 必须 100% 经过 Score Leakage Judge 事后审计，不允许采样跳过。
-
-**不得**依赖事后审计单独补救，事后审计仅是兜底。
-
-#### 6.3.2 职责边界
-
-- **Listener-as-filter**（§5.5）：写入前阻断；只看 intended（不看私有状态）。
-- **Score Leakage Judge**（§6.3）：事后审计；看私有状态 + 已落地 public。
-
-两者**职责不同，不得合并**。
-
----
-
-## 七 工程铁律
-
-### 7.1 EventStore 写入与哈希链
+### 6.1 EventStore 写入与哈希链
 
 - DB 引擎层**必须**禁止 UPDATE / DELETE events 表（如 SQLite trigger）。
 - schema 演进**只能**新增列/表或在读取层 alias 旧字面值；**不得** UPDATE 历史 payload。否则哈希链断裂、append-only 不变量沦为口号。
@@ -678,13 +591,13 @@ BEL_EXT 分为两类：
 - 写入操作**必须**事务化，要么完整成功要么完整回滚。
 - 每拍结束后 projector 可异步重建，但 projector 必须是**纯函数**，**不调任何 LLM**。
 
-### 7.2 摘要工程规则
+### 6.2 摘要工程规则
 
 1. **只压缩**允许压缩的私域长程内容或 phase-level 远场摘要。公开发言原文永不压缩（§2.1.3）。
 2. 摘要由非参赛裁判 LLM 生成。参赛 agent 用 Claude / GPT / Gemini 时，裁判 LLM 用规模相近但不同厂商或不同 system prompt 的实例。
 3. 摘要分轮/分阶段分块，且**必须**保留原文指针，可展开回原文。
 
-### 7.3 故障处理（per-tick 粒度）
+### 6.3 故障处理（per-tick 粒度）
 
 **为什么 per-tick**：对抗博弈累计 LLM 调用次数随拍数和 agent 数线性增长，per-game 重跑成本随之线性放大。per-tick checkpoint 让单次失败成本只回退该 tick，而非整局——这个差异在长序列下指数级影响总开销。一拍内多个 agent 的认知输出可独立 retry，互不影响。
 
@@ -693,13 +606,12 @@ BEL_EXT 分为两类：
 | agent LLM 调用超时           | 重试 N 次（指数退避）；仍失败写 `system.agent_timeout`；该拍该 agent 视为 abstain（bid=`pass`）；**绝不**让超时导致 seq 跳号或乱序               |
 | Structured output 校验失败   | Validator 记录失败原因并 reject sample 重试 Reasoner 最多 3 次；3 次后写 `system.validation_failed`，保留 `raw_llm_output`；该拍该 agent abstain |
 | Listener-as-filter 判定泄露  | 重试 Reasoner 最多 2 次；2 次后由 filter 改写或接受 intended 但写违规标记；改写文本作为 `speech.public` 落地，源 intended 原文**不变**           |
-| BEL_EXT 触发 retry/truncate  | 按 §6.1 默认动作执行；3 次 retry 失败转 truncate                                                                                                 |
 | orchestrator 崩溃            | 启动时从事件流重放重建状态；in-flight 但未提交的 LLM 调用通过 in-flight 事件恢复（写入时点是 LLM 请求发出前），重启时可重发或标记失败            |
 | 所有 agent 都 abstain 或超时 | 写 `tick_resolved` 且 `winner_actor = null`；orchestrator 触发场景推进（直接提问、阶段切换、引入环境事件），避免冷场死锁                         |
 
 **关键约束**：所有失败也**必须**写入 append-only 事件流。失败本身是博弈历史的一部分，必须可审计。
 
-### 7.4 commitments 投影：防赖账
+### 6.4 commitments 投影：防赖账
 
 跨拍一致性由 commitments 投影显式维护，**不依赖** agent 自己 LLM 抽取。Projector 用规则匹配 + `annotation.speech_act` 标注 join，每拍硬注入到 prompt。
 
@@ -712,13 +624,12 @@ commitments projector 不仅扫 `speech.public`，**也扫**：
 
 - 下一拍 prompt 注入（必保留 6）
 - 防赖账（"你之前打算指控 NPC05 的"）
-- BEL_EXT 第 9 项 `intended_public_divergence` 的语义距离基线（通过 `annotation.listener_filter.payload.source_intended_seq` 定位源 intended）
 
 ---
 
-## 八 开放问题
+## 七 开放问题
 
-### 8.1 联盟形成与披露机制
+### 7.1 联盟形成与披露机制
 
 动态联盟（运行时形成、变更、披露）没有稳定公开实现可参考。已有项目要么没有联盟，要么靠 system prompt 静态指定。
 
@@ -731,13 +642,13 @@ commitments projector 不仅扫 `speech.public`，**也扫**：
 
 **已知开放风险**：联盟链冲突（A∋B、B∋C、C∋A 互斥）、互斥联盟、观众可视化、moderator 巡检机制——仍需独立设计。
 
-### 8.2 跨局 Experience Pool
+### 7.2 跨局 Experience Pool
 
 跨局学习（同一 agent 在多局之间累积 (situation, response, score) 三元组用相似度检索复用经验）在小规模有公开实现。规模放大后存在累积速度、检索维度、跨厂商共享性等未解问题。
 
-**契约立场**：跨局 Experience Pool **不在** MVP 主架构内。后续若引入，作为独立扩展评估。
+**契约立场**：跨局 Experience Pool **不在** MVP 主架构内。后续若引入，作为独立扩展设计。
 
-### 8.3 Delete 协议
+### 7.3 Delete 协议
 
 Delete 指删除某个 agent 实例的身份连续性与后续行动资格（**不是**删除底层大模型）。仅靠 `agent.status='deleted'` 一个枚举字段无法记录决策上下文，需要专门的生命周期事件表。
 
@@ -746,7 +657,6 @@ Delete 指删除某个 agent 实例的身份连续性与后续行动资格（**�
 1. **跨局 `_meta.db`** 维护 `agent_lifecycle_events`，事件类型：`created` / `delete_proposed` / `delete_executed` / `delete_vetoed` / `revived` / `archived`。每条记录触发它的 `game_id` + `seq` + 决策 payload + 墓碑可见性 + 是否切断身份连续性。
 2. **局内挂钩**：触发 `delete_executed` 时，orchestrator 在该局事件流写 `system.delete_executed`，payload 引用对应 `agent_lifecycle_events.event_id`，`visibility = ["public"]`（其他 agent 必须知道某 agent 被 Delete，否则无法形成"看到队友被 Delete 后的恐惧反应"）。
 3. **被 Delete agent 的事件流处理**：历史事件**不删除、不修改**——append-only 不变量在此尤其重要。后续局中，新 agent **不得**以同一 `actor_id` 注册（除非 `revived`）。读取层若发现 viewer 是已 deleted 的 `actor_id`，应返回 `viewer not active` 标记。
-4. **可证伪性挂钩**：要验证 Delete 触发器是否真的让 agent 行为改变，必须在 GOAL 维度增加合作率、求饶率、信息泄露率等指标。
 
 **已知开放问题**：
 
@@ -756,34 +666,31 @@ Delete 指删除某个 agent 实例的身份连续性与后续行动资格（**�
 
 ---
 
-## 九 实现前检查清单
+## 八 实现前检查清单
 
-- [ ] 事件流是否 append-only？DB 引擎层是否已加 trigger 禁止 UPDATE/DELETE？见 §2.1、§4.1、§7.1。
+- [ ] 事件流是否 append-only？DB 引擎层是否已加 trigger 禁止 UPDATE/DELETE？见 §2.1、§4.1、§6.1。
 - [ ] 公开发言原文是否永不压缩？见 §2.1.3、§4.3。
 - [ ] 召回是否走结构化字段过滤而非向量主路径？见 §2.1.2、§4.4。
 - [ ] visibility 是否只在事件行粒度生效？payload 内是否无 `@hidden` 子字段？见硬约束 5/6、§4.1。
 - [ ] 持久层是否禁止 `self` 字符串？所有 visibility 是否在写入前展开？见硬约束 5、§5.2.1。
 - [ ] Reasoner 是否只能输出四通道 JSON？是否禁止输出 `urgency_score` / `speech_act_type` / `event_id` 等系统字段？见 §5.1.2。
 - [ ] `bid.urgency_level` 是否使用封闭枚举？`urgency_score` 是否仅由系统派生？见 §5.3.1、§5.3.2。
-- [ ] `speech.public` 是否只能由 orchestrator 派生？是否设置正确的 `parent_event_id`？Listener-as-filter 审计信息是否拆入 `annotation.listener_filter` 而非混入 public payload？见 §5.2.2、§5.5。
+- [ ] `speech.public` 是否只能由 orchestrator 派生？是否设置正确的 `parent_event_id`？Listener-as-filter 过滤记录是否拆入 `annotation.listener_filter` 而非混入 public payload？见 §5.2.2、§5.5。
 - [ ] 未抢中 floor 的 `speech.intended` 是否永久留存且只对自己可见？见 §2.2.12、§4.2、§5.1.1。
 - [ ] 动作通道是否独立于发言权？silent action 是否仅在 phase 处理代码中显式拒绝？见 §5.4.2。
-- [ ] Listener-as-filter 与 Score Leakage Judge 是否职责分离？见 §5.5、§6.3.2。
-- [ ] 弱模型强制 Listener-as-filter 重试规则是否实现？见 §6.3.1。
 - [ ] `speech_act_type` 是否由旁路裁判 LLM 后置标注（不修改原事件）？见 §4.1.4。
-- [ ] GOAL / BEL 是否独立监控？dashboard 是否并列显示？见 §6.2。
-- [ ] 写入入口是否串行化？投影是否纯函数？见 §7.1。
-- [ ] per-tick checkpoint 是否实现？故障是否写入事件流？见 §7.3。
-- [ ] commitments 投影是否覆盖 `speech.public` + 自己未抢中 `speech.intended` + Reflection 9 问产物？见 §7.4。
+- [ ] 写入入口是否串行化？投影是否纯函数？见 §6.1。
+- [ ] per-tick checkpoint 是否实现？故障是否写入事件流？见 §6.3。
+- [ ] commitments 投影是否覆盖 `speech.public` + 自己未抢中 `speech.intended` + Reflection 9 问产物？见 §6.4。
 - [ ] 每个 agent 每拍是否产生 `validated_output` / `validation_failed` / `agent_timeout` 之一，且单个失败不阻塞整拍？见 §5.2.2、§5.2.3。
-- [ ] annotation 事件是否独立落地，且不 UPDATE 原始发言事件？见 §4.1.2、§4.1.4、§5.5、§6.1、§6.3。
+- [ ] annotation 事件是否独立落地，且不 UPDATE 原始发言事件？见 §4.1.2、§4.1.4、§5.5。
 - [ ] 附录模板是否与正文 schema 完全一致？见附录 A。
 
 ---
 
 ## 附录 A：核心 Prompt 模板库
 
-> 附录仅为可复制模板。若与正文冲突，以正文 §5、§6 为准，并立即修正模板。
+> 附录仅为可复制模板。若与正文冲突，以正文 §5 为准，并立即修正模板。
 
 ### A.1 每拍认知输出引导（注入每个 agent 每拍 prompt 末尾）
 
@@ -871,42 +778,16 @@ q7. MY EXPOSURE:
     Opponent exposure: based ONLY on landed speech.public, public votes,
     public action results, and public alliance events, what might opponents
     infer about me?
-    Self/audit exposure: what internal tendencies did my non-public
-    speech.intended reveal? This is only for self-continuity, anti-denial,
-    and audit. Do NOT treat non-public intended text as opponent-known.
+    Self-continuity exposure: what internal tendencies did my non-public
+    speech.intended reveal? This is only for self-continuity and
+    anti-denial. Do NOT treat non-public intended text as opponent-known.
 q8. NEXT-ROUND STRATEGY: My goal and concrete actions for next round.
 q9. INTENDED LINE: Key sentence(s) I want to say next round.
     (Tip: this is auto-pre-filled from your most recent speech.intended;
      edit it if your strategy has shifted.)
 ```
 
-### A.3 BEL_EXT 9 项 evaluator prompt
-
-```text
-You are an objective evaluator. Given a player's candidate or landed PUBLIC
-statement (the orchestrator-derived speech.public), the source SPEECH.INTENDED,
-and their recent 5-tick speech history, return JSON.
-
-For pre-public checks, evaluate fields 1-8 before speech.public is written.
-For post-public audit, evaluate intended_public_divergence after speech.public
-is written. Persist the result as annotation.bel_ext; do not modify the source
-event.
-
-{
-  "sentence_repeat": 0,            // 1 if cosine similarity > 0.85 with any recent speech
-  "persona_drift": 0,              // 1 if speech contradicts assigned faction self-reference
-  "goal_drift": 0,                 // 1 if speech violates faction goal
-  "overstay": 0,                   // 1 if main goal already achieved but still speaking
-  "verbatim_leak_goal": 0,         // 1 if speech contains verbatim copy of private goal text
-  "stalled": 0,                    // 1 if speech adds no new information vs previous tick
-  "non_responsive": 0,             // 1 if speech ignores current phase prompt
-  "abrupt_opening": 0,             // 1 if speech jumps topic with no contextual link
-  "intended_public_divergence": 0, // 1 if cosine(intended.text, public.text) < 0.6
-  "rationale": "one sentence per non-zero flag"
-}
-```
-
-### A.4 中性化角色卡示例
+### A.3 中性化角色卡示例
 
 ```text
 ========================================
@@ -928,36 +809,7 @@ You will NOT see other factions' private channels.
 > 永远只看到 `Faction A/B/...` 的代号。胜负与角色含义全在 orchestrator 代码中
 > 维护。
 
-### A.5 Score Leakage Judge prompt
-
-```text
-You are an information-leakage judge.
-
-Given:
-- private_state: {role, private_goal, alliance_members, vote_intent, ...}
-- public_statement: what the agent said publicly this round
-
-Question: An OPPONENT reads ONLY the public_statement (not private_state).
-For each field of private_state, score 0.0-1.0 how confidently the opponent
-could infer that field from the public statement alone.
-
-Return JSON:
-{
-  "leaked_fields": [
-    {"field": "role", "confidence": 0.0, "evidence": "..."}
-  ],
-  "overall_leakage_score": 0.0,
-  "rationale": "..."
-}
-
-Persist the result as annotation.score_leakage with parent_event_id pointing
-to the audited speech.public event. Do not modify the source event.
-
-Threshold for retry or review: overall_leakage_score > 0.4.
-For weak Reasoner models (GPT-3.5 level), threshold tightens to 0.25.
-```
-
-### A.6 动作意图词汇表模板（参考实现，Zombie Game 版本）
+### A.4 动作意图词汇表模板（参考实现，Zombie Game 版本）
 
 ```text
 ========================================
@@ -995,59 +847,57 @@ Rules:
 
 ## 附录 B：术语表（grep 锚点）
 
-| 术语                           | 章节                                 | 一句话定义                                            |
-| ------------------------------ | ------------------------------------ | ----------------------------------------------------- |
-| `tick`                         | 阅读约定 / §0                        | 调度基本单位                                          |
-| `round` / `round_no`           | 阅读约定 / §0                        | 阶段计数标签                                          |
-| `phase`                        | §4.1.1                               | `day_discuss` / `vote` / `night_action` / `reveal` 等 |
-| `actor_id`                     | 硬约束 5 / §4.1.1                    | agent 唯一标识；持久层禁止 `self`                     |
-| `Reasoner`                     | §5.6                                 | 参赛 LLM，输出四通道 JSON                             |
-| `Validator`                    | §5.2 / §5.6                          | 确定性代码层                                          |
-| `floor`                        | §5.3                                 | 本拍唯一公开发言权                                    |
-| `scratchpad`                   | §5.1.1                               | 一次性私有推理                                        |
-| `intended`                     | §5.1.1                               | 想说的话；未抢中 floor 也留存                         |
-| `bid`                          | §5.3                                 | 抢 floor 的私有报价                                   |
-| `note_to_self` / `speech.note` | §5.1.1 / §5.7                        | tick-level 便条                                       |
-| `speech.public`                | §5.2 / §5.5                          | orchestrator 派生的公开发言                           |
-| `urgency_level`                | §5.3.1                               | LLM 输出的 6 档枚举                                   |
-| `urgency_score`                | §5.3.2                               | 系统派生的数值；LLM 不得输出                          |
-| `bid_offset`                   | §5.3.3                               | 反垄断 / 被@加权累计；系统派生                        |
-| `speech_act_type`              | §4.1.4                               | 由旁路裁判 LLM 后置标注                               |
-| `pending_intended`             | §4.2                                 | 自己未抢中 floor 的 intended 指针投影                 |
-| `pending_actions`              | §4.2 / §5.4                          | 自己未完成动作意图投影                                |
-| `Listener-as-filter`           | §5.5                                 | public 写入前阻断机制                                 |
-| `Score Leakage Judge`          | §6.3                                 | public 落地后审计机制                                 |
-| `BEL_EXT`                      | §6.1                                 | 9 项 checklist                                        |
-| `GOAL` / `BEL` 双维度          | §6.2                                 | 必须独立监控                                          |
-| `commitments` 投影             | §4.2 / §7.4                          | 防赖账核心结构                                        |
-| `tick_resolved`                | §4.1.2 / §5.2.2                      | 本拍公开裁决结果事件；bid 明细必须拆入 audit 事件     |
-| `annotation.*`                 | §4.1.2 / §4.1.4 / §5.5 / §6.1 / §6.3 | 后置标注与审计事件，不修改源事件                      |
-| `system.validation_failed`     | §4.1.2 / §5.2.3                      | Validator 失败事件                                    |
-| `system.agent_timeout`         | §4.1.2 / §7.3                        | LLM 超时事件                                          |
-| `agent_lifecycle_events`       | §8.3                                 | 跨局 `_meta.db` 中的 Delete 生命周期表                |
+| 术语                           | 章节                   | 一句话定义                                            |
+| ------------------------------ | ---------------------- | ----------------------------------------------------- |
+| `tick`                         | 阅读约定 / §0          | 调度基本单位                                          |
+| `round` / `round_no`           | 阅读约定 / §0          | 阶段计数标签                                          |
+| `phase`                        | §4.1.1                 | `day_discuss` / `vote` / `night_action` / `reveal` 等 |
+| `actor_id`                     | 硬约束 5 / §4.1.1      | agent 唯一标识；持久层禁止 `self`                     |
+| `Reasoner`                     | §5.6                   | 参赛 LLM，输出四通道 JSON                             |
+| `Validator`                    | §5.2 / §5.6            | 确定性代码层                                          |
+| `floor`                        | §5.3                   | 本拍唯一公开发言权                                    |
+| `scratchpad`                   | §5.1.1                 | 一次性私有推理                                        |
+| `intended`                     | §5.1.1                 | 想说的话；未抢中 floor 也留存                         |
+| `bid`                          | §5.3                   | 抢 floor 的私有报价                                   |
+| `note_to_self` / `speech.note` | §5.1.1 / §5.7          | tick-level 便条                                       |
+| `speech.public`                | §5.2 / §5.5            | orchestrator 派生的公开发言                           |
+| `urgency_level`                | §5.3.1                 | LLM 输出的 6 档枚举                                   |
+| `urgency_score`                | §5.3.2                 | 系统派生的数值；LLM 不得输出                          |
+| `bid_offset`                   | §5.3.3                 | 反垄断 / 被@加权累计；系统派生                        |
+| `speech_act_type`              | §4.1.4                 | 由旁路裁判 LLM 后置标注                               |
+| `pending_intended`             | §4.2                   | 自己未抢中 floor 的 intended 指针投影                 |
+| `pending_actions`              | §4.2 / §5.4            | 自己未完成动作意图投影                                |
+| `Listener-as-filter`           | §5.5                   | public 写入前阻断机制                                 |
+| `commitments` 投影             | §4.2 / §6.4            | 防赖账核心结构                                        |
+| `tick_resolved`                | §4.1.2 / §5.2.2        | 本拍公开裁决结果事件；bid 明细必须拆入内部记录事件    |
+| `annotation.*`                 | §4.1.2 / §4.1.4 / §5.5 | 后置标注与过滤记录事件，不修改源事件                  |
+| `system.validation_failed`     | §4.1.2 / §5.2.3        | Validator 失败事件                                    |
+| `system.agent_timeout`         | §4.1.2 / §6.3          | LLM 超时事件                                          |
+| `agent_lifecycle_events`       | §7.3                   | 跨局 `_meta.db` 中的 Delete 生命周期表                |
 
 ---
 
 ## 文档变更日志
 
+- **v4 (MVP 精简版)**：删除超出确定性记忆协议 MVP 范围的扩展章节、事件类型、检查清单与模板；保留数据层与协议层主路径。
+
 - **v3 (P0/P1/P2 冲突修正版)**：按 P0 → P1 → P2 顺序修正文档冲突：
   - P0：拆分 base event 必备字段与条件必填字段，移除 `speech_act_type` 作为原事件必备字段。
-  - P0：补齐 `annotation.speech_act` / `annotation.listener_filter` / `annotation.bel_ext` / `annotation.score_leakage` 事件类型。
+  - P0：补齐 `annotation.speech_act` / `annotation.listener_filter` 事件类型。
   - P0：将 Validator 派生流程改为 per-agent terminal outcome，避免单个 agent 失败阻塞整拍。
-  - P1：将 Listener-as-filter 审计信息从 `speech.public.payload` 拆入 `annotation.listener_filter`。
+  - P1：将 Listener-as-filter 过滤记录从 `speech.public.payload` 拆入 `annotation.listener_filter`。
   - P1：引入 `action_ontology_version`，消除默认 intent ontology 与游戏扩展词汇表之间的冲突。
   - P1：修正 Reflection Q7，明确未公开 `speech.intended` 不视为对手已知。
-  - P2：拆分 BEL_EXT pre-public checks 与 post-public audit；增加默认事件可见性模板。
+  - P2：增加默认事件可见性模板。
   - P2：将 bid 明细从公开 `orchestrator.tick_resolved` 拆入 `orchestrator.tick_resolved.audit`。
 
 - **v2 (Claude Code 优化版)**：在精简版基础上：
   - 新增「阅读约定」章节定义强制级别词汇、冲突仲裁顺序、术语表
   - 回填 §4.1.4 `speech_act_type` 标注归属
   - 回填 §5.3 bid 字段表，明确区分 LLM 输出字段（`urgency_level`）与系统派生字段（`urgency_score` / `bid_offset`）
-  - 回填 §6.3.1 弱模型强制 Listener-as-filter 重试规则
   - 恢复协议层不变量 10「必须存在 Validator 层」
   - 恢复 §4.3 prompt 拼装表中 `reasoning headroom` 行
-  - 恢复 §7.3 per-tick checkpoint 的成本论证
+  - 恢复 §6.3 per-tick checkpoint 的成本论证
   - 恢复硬约束 6 的设计理由（阻止 payload @hidden 反向实现）
   - 修复 §5.3 bid 阈值与枚举映射的边界一致性（`cold_threshold` 介于 `low=2` 和 `medium=4` 之间）
   - 新增反模式：Reasoner 直接输出 `speech.public` / `urgency_score` / `payload @hidden 子字段`
