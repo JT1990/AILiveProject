@@ -1,4 +1,4 @@
-# 多智能体对抗博弈：确定性记忆协议契约
+# 多智能体对抗博弈：记忆系统协议契约
 
 > **目的**：本文档定义对抗博弈记忆系统的协议契约，作为下游代码生成的权威输入。
 > **范围**：与具体存储后端、实现语言、编排框架无关。任何符合本契约的实现都必须满足本文定义的语义。
@@ -143,7 +143,7 @@
 
 | 字段语义                   | 用途                                                      |
 | -------------------------- | --------------------------------------------------------- |
-| `seq`（事件标识）          | 一局内全局唯一、严格递增；所有回放与定位以它为准          |
+| `seq`（事件标识）          | 一局内全局唯一、严格递增；所有事件定位以它为准            |
 | `game_id`（局标识）        | 区分不同博弈实例                                          |
 | `round_no`                 | 阶段计数标签，**不**代表多人同步发言点                    |
 | `phase`                    | `day_discuss` / `vote` / `night_action` / `reveal` 等枚举 |
@@ -188,7 +188,9 @@
 | `annotation.listener_filter`                               | Listener-as-filter 的写入前过滤结果，`parent_event_id` 指向最终 `speech.public` 或源 `speech.intended` |
 | `alliance_propose` / `alliance_accept` / `alliance_betray` | 联盟相关事件                                                                                           |
 | `system.validation_failed` / `system.agent_timeout`        | 故障事件                                                                                               |
+| `system.ingress_rejected`                                  | 执行端（如 UE）入口白名单校验拒绝事件，与 `system.validation_failed`（Reasoner schema 失败）独立        |
 | `system.delete_executed`                                   | Delete 协议局内挂钩，见 §7.3                                                                           |
+| `speech.playback_resolved`                                 | 公开发言播放完成结果（成功 / 失败 / 时长），与动作通道 `action.resolved` 平行且不复用                 |
 | `orchestrator.tick_resolved`                               | 本拍公开裁决结果，含 winner / public_seq / 冷场状态；**不得**包含 bid 明细                             |
 | `orchestrator.tick_resolved.audit`                         | 本拍审计裁决结果，含所有 bid 摘要；仅 orchestrator / system 可见                                       |
 
@@ -239,7 +241,9 @@
 | `orchestrator.tick_resolved.audit` | `["orchestrator", "system"]`；可包含所有 bid 摘要                                           |
 | `system.validation_failed`         | `["orchestrator", "system"]`；是否公开由具体游戏规则决定                                    |
 | `system.agent_timeout`             | `["orchestrator", "system"]`；是否公开由具体游戏规则决定                                    |
+| `system.ingress_rejected`          | `["orchestrator", "system"]`；不得默认公开（payload 可能间接暴露未抢中的 intended）         |
 | `system.delete_executed`           | `["public"]`，见 §7.3                                                                       |
+| `speech.playback_resolved`         | `["orchestrator", "system"]`；不得默认公开；如需观众调试视图，另派生 audience 可见的衍生事件 |
 
 若同一逻辑裁决同时需要 public 版本和 audit 版本，必须拆成两条事件；不得在同一个 payload 内混放对不同 viewer 可见的子字段。
 
@@ -249,7 +253,7 @@
 
 | 投影             | 内容                                                   | 生成方式                                |
 | ---------------- | ------------------------------------------------------ | --------------------------------------- |
-| agent 视角状态   | 当前 agent 视角下的存活玩家、已知角色、承诺、投票历史  | 代码重放事件并按可见性过滤              |
+| agent 视角状态   | 当前 agent 视角下的存活玩家、已知角色、承诺、投票历史  | 代码按可见性过滤事件并派生              |
 | commitments      | 每个 agent 的承诺、认领、否认、投票                    | 规则匹配 + `annotation.speech_act` join |
 | vote_history     | 所有公开投票历史                                       | 从投票事件派生                          |
 | claims           | 角色声称、阵营声称、能力声称                           | 从发言事件派生                          |
@@ -257,7 +261,7 @@
 | alliance_state   | 显式联盟、接受状态、背叛状态                           | 从联盟事件派生                          |
 | pending_actions  | 每个 agent 当前未完成动作意图（最多 1 行/agent）       | 从 `action.intent` 派生                 |
 | pending_intended | 自己最近 K 拍未衍生为 public 的 `speech.intended` 指针 | 从 `speech.intended` 派生               |
-| game_state       | 当前轮次、阶段、最后事件标识、胜负状态                 | 代码重放事件                            |
+| game_state       | 当前轮次、阶段、最后事件标识、胜负状态                 | 代码从事件流派生                        |
 
 **约束**：
 
@@ -606,7 +610,6 @@ agent 数较多时可拆「焦点 N 人 + 其他摘要」以控 token。
 | agent LLM 调用超时           | 重试 N 次（指数退避）；仍失败写 `system.agent_timeout`；该拍该 agent 视为 abstain（bid=`pass`）；**绝不**让超时导致 seq 跳号或乱序               |
 | Structured output 校验失败   | Validator 记录失败原因并 reject sample 重试 Reasoner 最多 3 次；3 次后写 `system.validation_failed`，保留 `raw_llm_output`；该拍该 agent abstain |
 | Listener-as-filter 判定泄露  | 重试 Reasoner 最多 2 次；2 次后由 filter 改写或接受 intended 但写违规标记；改写文本作为 `speech.public` 落地，源 intended 原文**不变**           |
-| orchestrator 崩溃            | 启动时从事件流重放重建状态；in-flight 但未提交的 LLM 调用通过 in-flight 事件恢复（写入时点是 LLM 请求发出前），重启时可重发或标记失败            |
 | 所有 agent 都 abstain 或超时 | 写 `tick_resolved` 且 `winner_actor = null`；orchestrator 触发场景推进（直接提问、阶段切换、引入环境事件），避免冷场死锁                         |
 
 **关键约束**：所有失败也**必须**写入 append-only 事件流。失败本身是博弈历史的一部分，必须可审计。
