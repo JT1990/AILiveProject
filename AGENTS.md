@@ -6,7 +6,7 @@ The AI Live 是一个多智能体社会博弈系统。将多个来自不同模�
 
 ## 架构边界（重要）
 
-**脑层（LLM 推理 / Prompt / Memory / Parser / Provider 路由 / Agent 状态机）外置 Python Brain Service**（仓库另起，目前未实现 —— 见 `Docs/brain-seam-todo.md`）。
+**脑层（LLM 推理 / Prompt / Memory / Parser / Provider 路由 / Agent 状态机）外置 Python Brain Service** 。
 
 UE 这边只负责身体侧：
 

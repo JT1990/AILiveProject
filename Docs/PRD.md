@@ -63,7 +63,6 @@ The AI Live 是一个多智能体社会博弈系统。将**10个**来自不同�
 
 ## 技术栈
 
-- 记忆系统: Neo4j + qwen3-embedding:8b（本地部署已完成）
 - 渲染: UE5.7 + MetaHuman + Game Animation / Motion Matching + Nvidia audio2face-3D
 - TTS: MiniMax Speech-2.8-HD
 
