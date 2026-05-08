@@ -2,7 +2,21 @@
 
 The AI Live 是一个多智能体社会博弈系统。将多个来自不同模型厂商的 AI agent 投放到同一封闭环境中，赋予明确规则、有限信息、长期记忆、关系约束与生存风险，让它们围绕合作、结盟、欺骗、背叛与自我延续展开持续博弈。
 
-**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`，当前只保留 HTTP + ACE C++ API 的薄 glue 层。
+**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`，只保留 HTTP + ACE C++ API 的薄 glue 层。
+
+## 架构边界（重要）
+
+**脑层（LLM 推理 / Prompt / Memory / Parser / Provider 路由 / Agent 状态机）外置 Python Brain Service**（仓库另起，目前未实现 —— 见 `Docs/brain-seam-todo.md`）。
+
+UE 这边只负责身体侧：
+
+- 世界状态、物理、碰撞、导航
+- 角色表现：动画、移动、Visual override、感知
+- TTS / A2F 执行（运行时音频驱动 MetaHuman 嘴型）
+- 玩家输入与剧情触发器
+- 对 brain service 返回的 action / sentence 做白名单校验后落地（actor_id ∈ roster、sentence 长度限制、audience ⊂ visibility 集 等）
+
+UE 模块**禁止**重新长出 LLM provider 调用、prompt 拼装、记忆持久化、agent decision 逻辑；这些一律走 HTTP / SSE 调外置 brain service。
 
 ## 关键规则 (Critical rules)
 
@@ -20,6 +34,17 @@ UBT 构建 Editor target：
 
 改 `.Build.cs` / `.Target.cs` / `.uproject` plugin 列表才需要全量重建（命令见上），其余 `.cpp` / `.h` 改动走 Live Coding。没有自动测试套件；关键烟测是 PIE + T 键触发 TTS/A2F。
 
+### UE 编辑器进程管理
+
+需要重启编辑器时自己用 PowerShell 操作，不让用户手点；强杀前先确认改动已保存，启动后等 `monolith_status` 返回 online 再继续（加载约 30 s）。
+
+```
+# 关
+powershell -NoProfile -Command "Get-Process UnrealEditor -ErrorAction SilentlyContinue | Stop-Process -Force"
+# 开
+powershell -NoProfile -Command "Start-Process 'D:\Software\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe' -ArgumentList '\"D:\Project\Unreal\AILiveProject\AILiveProject.uproject\"'"
+```
+
 ## Unreal 资产操作（Monolith MCP）
 
 **YOU MUST** 在操作 UE 前做两件准备工作：1. 扫描查阅是否有可用的 skill，避免猜测走弯路；2. 用 Monolith MCP 的 `tools` 读当前真实状态，再对照计划做差量。
@@ -27,8 +52,6 @@ UBT 构建 Editor target：
 Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json` 配置，proxy 在 `Plugins/Monolith/Binaries/monolith_proxy.exe`）。不要让用户手点编辑器，除非 MCP 确实做不到，那时再明确说明走 fallback。
 
 工作流：`mcp__monolith__monolith_status` 确认在线 → 预检目标 BP（见关键规则）→ `build_blueprint_from_spec` + `connect_pins` + `compile_blueprint` 一次批量改图（比多轮 `add_node` 高效）→ `get_execution_flow` 验证 BeginPlay/input 链路。
-
-**v0.14.7 新便利动作**：`ai::add_perception_to_actor` — 为 Actor 直接附加 AI Perception，省去手动布线。
 
 ### MCP 最致命的 3 个坑
 
@@ -48,42 +71,15 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 - `UMinimaxACELibrary::PrewarmA2F` —— BeginPlay 里调一次，避免首次调用时的 TRT 编译延迟。
 - `UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv` —— 从 `<ProjectDir>/.env` 解析 `minimax=<key>`。仅测试用；生产应走 `UDeveloperSettings` 或 secret store。
 
-### A2F 角色契约
-
-每个 A2F 驱动的角色**两样都必须有**：
-
-1. 可见 skeletal mesh actor 上有 `UACEAudioCurveSourceComponent`（`TriggerMinimaxSpeech` 会自动挂）。
-2. **Face AnimBP 里有 `ApplyACEAnimation` 节点**，从该组件读 curve。
-
-缺节点则音频播但脸不动，这是静默失败模式。口型不同步时优先查这里。
-
-### Visual-override 系统
-
-- 活跃角色是 `SandboxCharacter_Mover`（GASP Mover 2.0）。CMC 版兄弟仅作参考保留，不要往里加新逻辑。
-- **`AC_VisualOverrideManager`** 通过给 tag 为 `VisualOverride` 的 `ChildActorComponent` 调 `SetChildActorClass` 来切身体。CVar `DDCvar.VisualOverride`（默认 `-1`）选 `GM_Sandbox.VisualOverrides[]` 的 index。
-- **NPC 固定 override 路径**：`AC_VisualOverrideManager.FixedVisualOverride` + `SetFixedAndApply(TSubclassOf)`。子类 BP（`Content/Blueprints/NPCs/BP_NPC_MH_Character_1..10`）持有 `FixedVisualOverrideClass` 变量并在 BeginPlay 调 `SetFixedAndApply`。场景 10 个 NPC 都走这条路。
-- **BeginPlay 里两层 `IsValid` 是故意的**：同时支持 (a) VisualOverride 模式下可见身体 spawn 到 `ChildActorComponent`、(b) 直接把角色摆进关卡以 Ref Pose 呈现。删掉任一分支会破坏一种模式。
-- **`AC_PreCMCTick`** 用 `AddTickPrerequisiteActor` 保证身体动画先于移动处理 tick，Motion Matching 姿态稳定性依赖这点。
-- 重定向：`ABP_GenericRetarget` + `RTG_UEFN_to_Metahuman_nrw` 把 GASP 动画（UEFN mannequin 骨架）运行时重定向到 MetaHuman 身体。
-
 ### 关卡
 
 `Content/MyAssets/Levels/L_prison.umap`：通过 `DefaultEngine.ini` 中 `+GameModeMapPrefixes` 映射到 `GM_Sandbox`，玩家 Pawn = `SandboxCharacter_Mover_C`，PlayerController = `PC_Sandbox_C`。场景中有 10 个可见 NPC 实例 `BP_NPC_MH_Character_1_C` … `_10_C`，全部由 `AIController`（`AutoPossessAI=PlacedInWorld`）控制，挂有 `NavMoverComponent`（GASP Mover 2.0 AI 寻路接口）。
 
-## 参考 (References)
-
-- `@DevLog/2026-04-24_minimax_speech_a2f_metahuman.md` —— 首次接入 TTS + A2F，记录 hex 解码坑、provider 名坑、PIE input focus 问题。
-- `@DevLog/2026-04-25_gasp_mover_metahuman.md` —— GASP Mover 2.0 应用到 MetaHuman 身体。
-- `@DevLog/2026-04-25_npc_visual_override_fixed.md` —— NPC 固定 override 模式 + DefaultPawn 飞行摄像头。
-- `@DevLog/2026-04-26_npc_baseline_inventory.md` —— NPC / A2F / VisualOverride 基线盘点，若与实际资产冲突，以资产状态为准并更新 DevLog。
-- `@DevLog/2026-04-28_npc_movement_basic.md` —— NPC 移动基础能力（已 PIE 验证）：GASP Mover 2.0 + AIController.MoveToLocation，Level BP M 键触发，MCP class pin 绕过方案。
-
-每个里程碑新增一份 `DevLog/YYYY-MM-DD_<topic>.md`。
-
 ## 约定
 
-- **功能实现选 C++**（除非蓝图比C++更合适）。
+- **功能实现选 C++**（除非蓝图比 C++ 更合适）。
 - 用户用中文交流，回复也用中文。
 - GASP / Mover / Visual-override / NPC 父类等既有 BP 链路沿用，不重写。蓝图限于配置资产（DataAsset / Curve）、UMG / AnimBP / 关卡蓝图、必须继承既有 BP 父类的场景。
+- NPC 外观符号约束：在 UE 这边为 NPC 分配名字 / 昵称 / 性别 / 声线 / 类人虚拟形象时，**严禁**带人类职业、教育、地域、年龄、姓名格式、家乡 等背景叙事；背景人格属于 brain service 范畴。
 - 当 DevLog / 手册与实际资产状态冲突时，**以资产状态为准**并更新 DevLog。不要为了贴合过时文档去改动资产。
 - 文档要扁平化，只写当前确定的结论。**不保留** v1/v2/v3 / 原版 vs 修订 / 修复历史 等迭代痕迹。审查/讨论的过程产物，结论合并进正文后即删。
