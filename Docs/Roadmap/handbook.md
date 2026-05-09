@@ -2,7 +2,6 @@
 
 > 配套：`Docs/Roadmap/00_total_plan.md`（总计划，已永久化）。
 > 用途：把总计划切成 **10 张独立窗口可执行的子任务卡**，避免单个 ClaudeCode 对话过长导致输出质量下降。
-> 颗粒度原则：**强内聚的子号合卡，独立模块单卡**。
 
 ---
 
@@ -46,18 +45,18 @@
 
 ## 1. 子任务卡片清单（10 张）
 
-| 卡号 | 名称 | 合并自原子号 | 主仓库 | 状态 |
-|---|---|---|---|---|
-| **T1** | 协议骨架定稿 + BrainService 仓库初始化 | 0.1 + 0.1.5 + 0.2 + 0.3 + 0.4 | BrainService + UE Docs | ⬜ |
-| **T2** | Brain 数据层骨架（EventStore + Schema + 视角隔离 + 投影 + 召回 + `_meta.db`） | 1.1–1.6 + 2.7 commitments | BrainService | ⬜ |
-| **T3** | Brain Reasoner + Validator 主链 | 2.1 + 2.2 + 2.3 | BrainService | ⬜ |
-| **T4** | Brain Floor Control + Listener-as-filter | 2.4 + 2.5 | BrainService | ⬜ |
-| **T5** | Brain 三级反思 + prompt 拼装 | 2.6 + 2.8 | BrainService | ⬜ |
-| **T6** | UE 协议基础设施 + 世界状态采集 | 3.1 + 3.2 + 3.3 + 3.4 | UE C++ | ⬜ |
-| **T7** | UE 动作 / 语音 dispatcher + 完成回调 wrapper + IngressValidator + 测试键退役 | 3.5 + 3.6 + 3.7 + 3.8 + 3.9 | UE C++ + BP | ⬜ |
-| **T8** | 物品 / Delete / Faction 占位 / 配置整理 | 4.1 + 4.2 + 4.3 + 4.4 + 4.5 | UE C++ + BP + Brain | ⬜ |
-| **T9** | 02 病毒游戏规则 spec + Brain 机制 | 5.1 + 5.2 | Brain Docs + BrainService | ⬜ |
-| **T10** | UE touch 检测 + 一局完整 PIE 联合验证 | 5.3 + 5.4 | UE C++ + BP + 联调 | ⬜ |
+| 卡号    | 名称                                                                          | 合并自原子号                  | 主仓库                    | 状态 |
+| ------- | ----------------------------------------------------------------------------- | ----------------------------- | ------------------------- | ---- |
+| **T1**  | 协议骨架定稿 + BrainService 仓库初始化                                        | 0.1 + 0.1.5 + 0.2 + 0.3 + 0.4 | BrainService + UE Docs    | ✅   |
+| **T2**  | Brain 数据层骨架（EventStore + Schema + 视角隔离 + 投影 + 召回 + `_meta.db`） | 1.1–1.6 + 2.7 commitments     | BrainService              | ⬜   |
+| **T3**  | Brain Reasoner + Validator 主链                                               | 2.1 + 2.2 + 2.3               | BrainService              | ⬜   |
+| **T4**  | Brain Floor Control + Listener-as-filter                                      | 2.4 + 2.5                     | BrainService              | ⬜   |
+| **T5**  | Brain 三级反思 + prompt 拼装                                                  | 2.6 + 2.8                     | BrainService              | ⬜   |
+| **T6**  | UE 协议基础设施 + 世界状态采集                                                | 3.1 + 3.2 + 3.3 + 3.4         | UE C++                    | ⬜   |
+| **T7**  | UE 动作 / 语音 dispatcher + 完成回调 wrapper + IngressValidator + 测试键退役  | 3.5 + 3.6 + 3.7 + 3.8 + 3.9   | UE C++ + BP               | ⬜   |
+| **T8**  | 物品 / Delete / Faction 占位 / 配置整理                                       | 4.1 + 4.2 + 4.3 + 4.4 + 4.5   | UE C++ + BP + Brain       | ⬜   |
+| **T9**  | 02 病毒游戏规则 spec + Brain 机制                                             | 5.1 + 5.2                     | Brain Docs + BrainService | ⬜   |
+| **T10** | UE touch 检测 + 一局完整 PIE 联合验证                                         | 5.3 + 5.4                     | UE C++ + BP + 联调        | ⬜   |
 
 ---
 
@@ -76,6 +75,7 @@ T1 (协议骨架)
 ```
 
 **硬约束**：
+
 - T1 必须最先（所有人共用同一份 protocol）。
 - T2 必须先于 T3（schema 决定 Validator 校验内容）。
 - T3 必须先于 T4 / T5 / T9（机制都依赖 Validator 通过的事件）。
@@ -135,8 +135,8 @@ T1 (协议骨架)
 子任务完成时由人类（不是 ClaudeCode）维护。把上面表格中对应行的"状态"列从 ⬜ 改为 ✅，并在下面追加完成记录：
 
 | 日期 | 卡号 | 完成人 | 备注 |
-|---|---|---|---|
-| | | | |
+| ---- | ---- | ------ | ---- |
+|      |      |        |      |
 
 ---
 

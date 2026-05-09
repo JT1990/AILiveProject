@@ -73,18 +73,18 @@
   - `Idempotency-Key: <uuid v4>` —— **所有 POST 写入型 endpoint 必带，`POST /v1/games` 除外**（session 创建本身不幂等，每次必新建）。覆盖范围：`roster` / `world_state` / `actions/result` / `speech/result` / `ingress_reject`。
   - `Content-Type: application/json` —— 所有带 body 的请求必带。
 
-  | endpoint | Required Headers |
-  |---|---|
-  | `GET  /health` | （无） |
-  | `POST /v1/games` | Authorization, Content-Type |
-  | `POST /v1/games/{game_id}/roster` | Authorization, Idempotency-Key, Content-Type |
-  | `POST /v1/games/{game_id}/world_state` | Authorization, Idempotency-Key, Content-Type |
-  | `GET  /v1/games/{game_id}/actions/pull` | Authorization |
+  | endpoint                                  | Required Headers                             |
+  | ----------------------------------------- | -------------------------------------------- |
+  | `GET  /health`                            | （无）                                       |
+  | `POST /v1/games`                          | Authorization, Content-Type                  |
+  | `POST /v1/games/{game_id}/roster`         | Authorization, Idempotency-Key, Content-Type |
+  | `POST /v1/games/{game_id}/world_state`    | Authorization, Idempotency-Key, Content-Type |
+  | `GET  /v1/games/{game_id}/actions/pull`   | Authorization                                |
   | `POST /v1/games/{game_id}/actions/result` | Authorization, Idempotency-Key, Content-Type |
-  | `GET  /v1/games/{game_id}/speech/pull` | Authorization |
-  | `POST /v1/games/{game_id}/speech/result` | Authorization, Idempotency-Key, Content-Type |
+  | `GET  /v1/games/{game_id}/speech/pull`    | Authorization                                |
+  | `POST /v1/games/{game_id}/speech/result`  | Authorization, Idempotency-Key, Content-Type |
   | `POST /v1/games/{game_id}/ingress_reject` | Authorization, Idempotency-Key, Content-Type |
-  | `GET  /v1/games/{game_id}/events` | Authorization |
+  | `GET  /v1/games/{game_id}/events`         | Authorization                                |
 
   各 endpoint 语义：
   - `GET  /health` —— 健康检查（brain 端进程是否在线，响应含当前 `protocol_version`）。
@@ -97,6 +97,7 @@
   - `POST /v1/games/{game_id}/speech/result` —— UE 上报 speech 播放完成（成功 / 失败 / 时长 / 失败原因），brain 写入新事件类型 `speech.playback_resolved`。**不写入 `action.resolved`**——speech.public 没有对应的 `action.intent`，没有 action 因果链。
   - `POST /v1/games/{game_id}/ingress_reject` —— UE IngressValidator 拒绝时上报，brain 写入 `system.ingress_rejected`（**本卡冻结此事件类型**）。
   - `GET  /v1/games/{game_id}/events?since_seq=N` —— 事件查询（UE 调试 / 审计查看时用）。
+
 - **action ontology v1 冻结**：`move_to / sit / wait` 三个 intent + 各自参数 schema。**`speak` 不进 ontology**——明确写在文档里"speech.public 走独立 endpoint，不属于 action.intent"。
 - **T1 新增事件类型的默认 visibility**（与 memory_principles §4.1.5 表对齐，沿用系统类事件惯例）：
   - `speech.playback_resolved`：默认 `["orchestrator", "system"]`。携带成功/失败/时长/失败原因等调试信息，**不得**默认对参赛 agent 可见，避免泄露执行内幕。需要观众调试视图时另派生 audience 可见的衍生事件。
@@ -124,15 +125,31 @@
 - `event_query.schema.json`
 
 约束：
+
 - `additionalProperties: false`（所有 object 严格无多余字段）。
 - `actor_id` 用 enum，把 `NPC01..NPC10` 全列出。
 - `viewer` 类型在 `common.schema.json` 用 `anyOf` 表达封闭集合 + Faction pattern：
   ```json
   {
     "anyOf": [
-      { "enum": ["public", "audience", "orchestrator", "system",
-                  "NPC01","NPC02","NPC03","NPC04","NPC05",
-                  "NPC06","NPC07","NPC08","NPC09","NPC10"] },
+      {
+        "enum": [
+          "public",
+          "audience",
+          "orchestrator",
+          "system",
+          "NPC01",
+          "NPC02",
+          "NPC03",
+          "NPC04",
+          "NPC05",
+          "NPC06",
+          "NPC07",
+          "NPC08",
+          "NPC09",
+          "NPC10"
+        ]
+      },
       { "type": "string", "pattern": "^Faction[A-Za-z0-9_]+$" }
     ]
   }
@@ -166,7 +183,7 @@
 - ❌ 不实现 Bid / Listener-as-filter / 反思（属 T4 / T5）。
 - ❌ 不写 UE C++ USTRUCT / `UAILiveProjectSettings` / HTTP polling 客户端（属 T6）。
 - ❌ 不实现 brain HTTP server 路由代码（属 T2 后期或独立子任务）。
-- ❌ 不动任何 UE 资产 / Source/AILiveProject/* 代码（除了创建 `Docs/protocol_pointer.md`）。
+- ❌ 不动任何 UE 资产 / Source/AILiveProject/\* 代码（除了创建 `Docs/protocol_pointer.md`）。
 - ❌ 不写 ontology v2（pickup / use_item / inspect / follow / flee_from）—— 属 T8。
 - ❌ 不在 `protocol.md` 写病毒游戏专属规则（属 T9）。
 - ❌ 不配置 Python venv / `requirements.txt` / `pyproject.toml`（留给 T2 起步时按需选）。
@@ -175,26 +192,26 @@
 
 ## 5. 交付清单
 
-| 路径 | 类型 | 一句话职责 |
-|---|---|---|
-| `BrainService/.git/` | git repo init | 独立 git 历史 |
-| `BrainService/.gitignore` | 新建 | Python 常规忽略 |
-| `BrainService/README.md` | 新建 | 仓库简介 + protocol/ 真相源说明 + protocol_version 规则 |
-| `BrainService/protocol/protocol.md` | 新建 | 人读协议契约（endpoint + 命名空间 + 失败码 + 通道分离声明） |
-| `BrainService/protocol/schemas/common.schema.json` | 新建 | 公共类型抽取 |
-| `BrainService/protocol/schemas/error_response.schema.json` | 新建 | 统一失败响应结构，供失败样例和 endpoint error 响应复用 |
-| `BrainService/protocol/schemas/health.schema.json` | 新建 | 健康检查（响应含 protocol_version） |
-| `BrainService/protocol/schemas/session_create.schema.json` | 新建 | session 握手（`POST /v1/games`）—— UE 拿 game_id 的唯一入口 |
-| `BrainService/protocol/schemas/roster_register.schema.json` | 新建 | roster 注册请求/响应 |
-| `BrainService/protocol/schemas/world_state_push.schema.json` | 新建 | UE → brain 状态推送 transport（落库由 brain 拆条） |
-| `BrainService/protocol/schemas/action_pull.schema.json` | 新建 | brain → UE 动作意图拉取（cursor + next_cursor） |
-| `BrainService/protocol/schemas/action_result.schema.json` | 新建 | UE → brain 动作执行结果（成功/失败；**不含 interrupted / cancelled 语义**——cancelled 由 brain 派生新 intent 同事务写） |
-| `BrainService/protocol/schemas/speech_pull.schema.json` | 新建 | brain → UE 公开发言拉取（cursor + next_cursor） |
-| `BrainService/protocol/schemas/speech_result.schema.json` | 新建 | UE → brain speech 播放结果（落库为 speech.playback_resolved） |
-| `BrainService/protocol/schemas/ingress_reject.schema.json` | 新建 | UE → brain 白名单拒绝上报（落库为 system.ingress_rejected） |
-| `BrainService/protocol/schemas/event_query.schema.json` | 新建 | 事件查询 |
-| `BrainService/protocol/examples/*.json` | 新建若干 | 每个 schema 至少 2 个样例（happy + failure） |
-| `Docs/protocol_pointer.md` | 新建 | UE 仓指针文件，记 BrainService commit hash + protocol_version |
+| 路径                                                         | 类型          | 一句话职责                                                                                                             |
+| ------------------------------------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `BrainService/.git/`                                         | git repo init | 独立 git 历史                                                                                                          |
+| `BrainService/.gitignore`                                    | 新建          | Python 常规忽略                                                                                                        |
+| `BrainService/README.md`                                     | 新建          | 仓库简介 + protocol/ 真相源说明 + protocol_version 规则                                                                |
+| `BrainService/protocol/protocol.md`                          | 新建          | 人读协议契约（endpoint + 命名空间 + 失败码 + 通道分离声明）                                                            |
+| `BrainService/protocol/schemas/common.schema.json`           | 新建          | 公共类型抽取                                                                                                           |
+| `BrainService/protocol/schemas/error_response.schema.json`   | 新建          | 统一失败响应结构，供失败样例和 endpoint error 响应复用                                                                 |
+| `BrainService/protocol/schemas/health.schema.json`           | 新建          | 健康检查（响应含 protocol_version）                                                                                    |
+| `BrainService/protocol/schemas/session_create.schema.json`   | 新建          | session 握手（`POST /v1/games`）—— UE 拿 game_id 的唯一入口                                                            |
+| `BrainService/protocol/schemas/roster_register.schema.json`  | 新建          | roster 注册请求/响应                                                                                                   |
+| `BrainService/protocol/schemas/world_state_push.schema.json` | 新建          | UE → brain 状态推送 transport（落库由 brain 拆条）                                                                     |
+| `BrainService/protocol/schemas/action_pull.schema.json`      | 新建          | brain → UE 动作意图拉取（cursor + next_cursor）                                                                        |
+| `BrainService/protocol/schemas/action_result.schema.json`    | 新建          | UE → brain 动作执行结果（成功/失败；**不含 interrupted / cancelled 语义**——cancelled 由 brain 派生新 intent 同事务写） |
+| `BrainService/protocol/schemas/speech_pull.schema.json`      | 新建          | brain → UE 公开发言拉取（cursor + next_cursor）                                                                        |
+| `BrainService/protocol/schemas/speech_result.schema.json`    | 新建          | UE → brain speech 播放结果（落库为 speech.playback_resolved）                                                          |
+| `BrainService/protocol/schemas/ingress_reject.schema.json`   | 新建          | UE → brain 白名单拒绝上报（落库为 system.ingress_rejected）                                                            |
+| `BrainService/protocol/schemas/event_query.schema.json`      | 新建          | 事件查询                                                                                                               |
+| `BrainService/protocol/examples/*.json`                      | 新建若干      | 每个 schema 至少 2 个样例（happy + failure）                                                                           |
+| `Docs/protocol_pointer.md`                                   | 新建          | UE 仓指针文件，记 BrainService commit hash + protocol_version                                                          |
 
 ---
 
@@ -221,15 +238,15 @@
 
 **下游消费者**：
 
-| 后续卡 | 依赖 T1 的什么 |
-|---|---|
-| T2 (Brain 数据层) | `common.schema.json` 的 viewer / actor_id / event_meta 类型；`protocol.md` 的 endpoint 与失败码 |
-| T3 (Reasoner + Validator) | `protocol.md` 的命名空间约束 + `action_pull.schema.json` 的 ontology v1 限制 |
-| T4 / T5 (Brain 协议层余下) | 同 T3 |
-| T6 (UE 协议基础设施) | 全部 schemas + examples（写 UE USTRUCT 镜像 + round-trip 测试）；`Docs/protocol_pointer.md` 是单一指针 |
-| T7 (UE Dispatcher) | `action_pull.schema.json` / `speech_pull.schema.json` 的硬边界 |
-| T8 (物品 / Delete) | T8 启动时升 `protocol_version → 0.2.0` 引入 ontology v2，但 T1 不写 v2 内容 |
-| T9 / T10 (病毒游戏) | T9 启动时按需在 `protocol.md` 加病毒游戏专属附录或独立 game schema 文件 |
+| 后续卡                     | 依赖 T1 的什么                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------ |
+| T2 (Brain 数据层)          | `common.schema.json` 的 viewer / actor_id / event_meta 类型；`protocol.md` 的 endpoint 与失败码        |
+| T3 (Reasoner + Validator)  | `protocol.md` 的命名空间约束 + `action_pull.schema.json` 的 ontology v1 限制                           |
+| T4 / T5 (Brain 协议层余下) | 同 T3                                                                                                  |
+| T6 (UE 协议基础设施)       | 全部 schemas + examples（写 UE USTRUCT 镜像 + round-trip 测试）；`Docs/protocol_pointer.md` 是单一指针 |
+| T7 (UE Dispatcher)         | `action_pull.schema.json` / `speech_pull.schema.json` 的硬边界                                         |
+| T8 (物品 / Delete)         | T8 启动时升 `protocol_version → 0.2.0` 引入 ontology v2，但 T1 不写 v2 内容                            |
+| T9 / T10 (病毒游戏)        | T9 启动时按需在 `protocol.md` 加病毒游戏专属附录或独立 game schema 文件                                |
 
 ---
 
@@ -248,9 +265,68 @@
 
 ---
 
-## 9. 可选前置准备
+## 9. 启动 prompt（粘贴到新 ClaudeCode 窗口的开场）
 
-- BrainService Python 版本：暂不锁定，T2 启动时再决定（推荐 3.12+）。
+```text
+你是 AILive 项目 Memory Principles 路线图的 T1 子任务执行者：协议骨架定稿 + BrainService 仓库初始化。
+
+**必读上下文（按顺序读完再动手）**：
+1. Docs/Roadmap/00_total_plan.md ——总路线图（重点："边界" / "阶段 0" / "关键依赖图" / "风险与开放决策"）
+2. Docs/Roadmap/handbook.md §0 工作流总览 + §4 已收敛项目级决策
+3. Docs/memory_principles.md 关键章节：§〇 硬约束 1–6、§一 两层架构、§2.1 数据层不变量、§4.1.1–§4.1.2、§4.1.5、§5.1、§5.4.1、§7.3
+4. Docs/PRD.md：「项目核心」「AI 心智决策系统」「让博弈对 AI 自己而言"重要"」三节
+5. CLAUDE.md（项目根）
+
+**任务范围（DO）**：
+- 在 D:\Project\Unreal\AILiveProject\BrainService\ 下初始化独立 git repo（与 UE 工程历史完全独立）。
+- 写齐 protocol/protocol.md（人读契约，含 protocol_version=0.1.0、**10 个 endpoint**（`GET /health`、`POST /v1/games`、`POST .../roster`、`POST .../world_state`、`GET .../actions/pull`、`POST .../actions/result`、`GET .../speech/pull`、`POST .../speech/result`、`POST .../ingress_reject`、`GET .../events`）、命名空间、ontology v1 仅 3 个 intent（move_to / sit / wait）、speech/action 通道分离硬边界、失败码表、cursor-based polling 投递语义（`?since_seq=N` + UE seq 幂等去重 + Idempotency-Key 头））。
+- 写齐 protocol/schemas/*.schema.json（**12 份** JSON Schema draft 2020-12：common / error_response / health / session_create / roster_register / world_state_push / action_pull / action_result / speech_pull / speech_result / ingress_reject / event_query；all additionalProperties=false，actor_id 用 enum 列出 NPC01..NPC10，viewer 用 `anyOf: [{enum:[...]}, {pattern:"^Faction[A-Za-z0-9_]+$"}]` 表达封闭集合 + Faction 兼容，`self` 严禁出现；**业务 schema body 不含 `protocol_version` 字段**——仅 health / session_create 响应中带）。
+- 写齐 protocol/examples/*.json（每个 endpoint ≥ 2 个样例，happy + failure；成功样例按对应 endpoint schema 校验，失败样例按 `error_response.schema.json` 或 endpoint `oneOf` error 分支校验）。
+- 在 protocol.md 中明确以下硬边界：
+  - `speech.public` 与 `action.intent` 在 schema/endpoint/UE Dispatcher 三层全程分离。
+  - speech 完成走新事件类型 `speech.playback_resolved`，**不复用** `action.resolved`。
+  - `action.cancelled` 与 `action.resolved` 是**互斥终态**（memory_principles §5.4.2）：被新 intent 覆盖的旧 action 由 brain 在派生新 intent 同事务写 cancelled，UE 不上报旧 intent 的 result；自然完成的 action 由 UE 上报 resolved（`outcome ∈ {succeeded, failed}`，**不存在 interrupted**）。
+  - `world_state_push` 是 transport 形态，brain 落库时必须按 observer 拆条（硬约束 6 视角隔离行粒度）；request body 含 `client_sample_id` 业务级幂等键。
+  - **所有 POST 写入型 endpoint（除 `POST /v1/games` 本身）必须携带 `Idempotency-Key: <uuid v4>` 头**——硬要求。
+  - `system.ingress_rejected` 是 T1 冻结的新事件类型，与 `system.validation_failed` 完全独立。
+  - `speech.playback_resolved` 与 `system.ingress_rejected` 默认 visibility = `["orchestrator", "system"]`，不得默认 public。
+  - `game_id` 唯一入口是 `POST /v1/games`，UE settings 不存 game_id。
+  - **MVP 不支持 game session 跨 PIE 进程恢复**：UE 进程崩溃 = 新一局，重新调 `POST /v1/games`；`Idempotency-Key` 存活范围限本 game session（brain 端按 game_id 隔离）。
+  - **`protocol_version` 仅在三处声明**：URL 前缀（`/v1/`）+ `GET /health` 响应 + `POST /v1/games` 响应；消息 body 不重复带 const 字段。
+  - **`world_state_push` 拆条**：T1 仅约束"必须按 observer 拆条 + visibility 行粒度过滤"的拆分语义，**拆条后落成的具体 event_type 命名（如 `world.perception.sight` 等）由 T2 数据层卡片冻结**，T1 不预先约束。
+- 在 UE 仓 Docs/protocol_pointer.md 写下 BrainService 首个 commit hash + protocol_version。
+- 提交 BrainService 首个 commit。
+
+**范围外（DON'T）**：
+- 不实现 EventStore / Reasoner / Validator / 任何 LLM 调用 / brain HTTP server 路由代码（属 T2 / T3）。
+- 不写 UE C++ USTRUCT / Settings / HTTP 客户端（属 T6）。
+- 不动 UE 资产 / Source/AILiveProject/* 任何代码。
+- 不引入 ontology v2（pickup / use_item / inspect / follow / flee_from）—— 属 T8。
+- 不写 02 病毒游戏专属规则—— 属 T9。
+- 不配置 Python venv / 装依赖。
+
+**约束**：
+- 严格遵守 CLAUDE.md（项目级 + 用户级两份）：暴露假设、surgical changes、goal-driven。
+- BrainService 是嵌套但独立的 git repo——操作前先确认 pwd。
+- 所有 schema 字段按 ASCII 升序（memory_principles canonical JSON）。
+- 完成时按 T01 §6 验收清单逐条勾选。
+
+**第一步**：先读完上述全部必读文件，然后用 1–3 句话给我复述：
+(a) 你理解的本卡范围与边界；
+(b) `speech.public` 与 `action.intent` 为什么必须通道分离（硬边界来自 memory_principles 哪一节）；
+(c) ontology v1 为什么只有 3 个 intent；
+(d) `action.cancelled` 与 `action.resolved` 为什么是互斥终态、UE 为什么不上报 interrupted；
+(e) 为什么 `Idempotency-Key` 是硬要求（不是建议），以及 `world_state_push` 为什么还要额外加 `client_sample_id`；
+(f) `protocol_version` 为什么不放在每条消息 body 里、放在哪三处；
+(g) `world_state_push` 落库 event_type 命名为什么 T1 不冻结、留给谁。
+等我确认后再动手。
+```
+
+---
+
+## 10. 可选前置准备（如果新窗口提前问）
+
+- BrainService Python 版本：暂不锁定，T2 启动时再决定（推荐 3.11+）。
 - JSON Schema validator 工具：T1 仅自检，可用 `python -m jsonschema` 或 `npx ajv-cli`。
 - 文档语言：中文为主，schema 字段名英文。
 - 提交人 git config：用现有 UE 工程的 git config 还是 BrainService 单独配？建议单独配（独立项目独立 author 元数据，便于追溯）。

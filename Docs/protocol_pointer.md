@@ -9,8 +9,8 @@ UE 仓对 BrainService 协议的单一引用指针。
 | 字段                      | 值                                              |
 | ------------------------- | ----------------------------------------------- |
 | **BrainService 仓库路径** | `D:\Project\Unreal\AILiveProject\BrainService\` |
-| **引用 commit hash**      | `76f3dd5984274d4aea6b1b153c536099aa2272c9`      |
-| **protocol_version**      | `0.1.0`                                         |
+| **引用 commit hash**      | `c271383c8c3c2864a3988ba31e270e39be4552db`      |
+| **protocol_version**      | `0.1.1`                                         |
 
 ---
 
