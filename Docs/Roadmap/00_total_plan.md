@@ -1,8 +1,7 @@
 # 总计划：Memory Principles 实施路线图
 
 > 性质：**总路线图**，不展开实现细节、不写代码、不动资产。用于后续切分多个独立子任务执行。
-> 来源：Docs/PRD.md、Docs/memory_principles.md（取最终版 commit 8cc4a8d「确定可以实施版本」）、DevLog 14 篇、Source/AILiveProject/* 现状。
-> **状态**：本文档为永久化版本，原 ClaudeCode plan 文件内容已迁入此处并纳入 git；后续修改以此文件为准。配套执行手册见 `Docs/Roadmap/handbook.md`。
+> 来源：Docs/PRD.md、Docs/memory_principles.md（取最终版 commit 8cc4a8d「确定可以实施版本」）、DevLog 14 篇、Source/AILiveProject/\* 现状。
 
 ---
 
@@ -20,12 +19,12 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 
 ## 边界（重要，影响后续每个子任务的归属）
 
-| 归属 | 内容 |
-|---|---|
+| 归属                                                       | 内容                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Brain Service（仓库 `BrainService/`，gitignored 嵌套）** | LLM provider 路由、Reasoner 四通道 schema、Validator、EventStore、视角隔离、投影、召回工具、Bid + floor control、Listener-as-filter、三级反思（含 phase-level 裁判摘要 worker）、commitments、Delete 协议、`_meta.db` lifecycle events、所有事件流写入 |
-| **UE C++ glue（本仓库 `Source/AILiveProject/`）** | HTTP polling 客户端、Roster 注册、世界状态采集、动作意图落地、动作完成结果回传（含 wrapper / state polling）、轻量白名单校验、TTS/A2F 触发、感知数据导出、SmartObject claim、Delete 视觉/输入挂钩 |
-| **UE 蓝图侧** | 关卡资产配置、AnimBP / Face AnimBP、视觉身体 BP、SandboxCharacter_Mover 既有移动函数、AC_VisualOverrideManager。**测试按键链路按子任务节奏逐步退役** |
-| **明确不做** | UE 侧重新长出 LLM 调用、prompt 拼装、长期 memory、agent decision；vector 召回作主路径；payload 内 `@hidden` 字段；agent 自评 importance |
+| **UE C++ glue（本仓库 `Source/AILiveProject/`）**          | HTTP polling 客户端、Roster 注册、世界状态采集、动作意图落地、动作完成结果回传（含 wrapper / state polling）、轻量白名单校验、TTS/A2F 触发、感知数据导出、SmartObject claim、Delete 视觉/输入挂钩                                                      |
+| **UE 蓝图侧**                                              | 关卡资产配置、AnimBP / Face AnimBP、视觉身体 BP、SandboxCharacter_Mover 既有移动函数、AC_VisualOverrideManager。**测试按键链路按子任务节奏逐步退役**                                                                                                   |
+| **明确不做**                                               | UE 侧重新长出 LLM 调用、prompt 拼装、长期 memory、agent decision；vector 召回作主路径；payload 内 `@hidden` 字段；agent 自评 importance                                                                                                                |
 
 ---
 
@@ -47,21 +46,21 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 
 ## 还没有、必须在本路线图建出来的能力
 
-| 类别 | 缺口 | 落点 |
-|---|---|---|
-| 协议传输 | HTTP polling 客户端、JSON 序列化层 | UE C++ glue + Brain HTTP server |
-| 中心化事件汇聚 | 当前感知按 NPC 各取，无中心总线 | UE `WorldStateCollector` GameInstanceSubsystem |
-| Roster 握手 | actor_id ↔ Pawn map | UE `RosterSubsystem` |
-| 动作落地路由（仅物理动作） | brain → 现有 move / sit / wait 原语 | UE `ActionDispatcher` |
-| Speech 播放路由（与 action 平行） | brain `speech.public` → TTS 播报 | UE `SpeakDispatcher`（独立组件，不复用 ActionDispatcher） |
-| 动作完成监听 wrapper | 既有原语缺统一 OnSucceeded/OnFailed delegate（移动靠轮询、SmartObject 用 LatentTask 暴露不出 delegate、TTS 是 fire-and-log） | UE `ActionCompletionWrapper`（轮询 / delegate 桥接） |
-| 动作执行结果回传 | move / sit **自然结束**（成功 / 失败两种 outcome）→ POST `actions/result` → brain 写入 `action.resolved`。**被新 intent 覆盖时不上报**——按 memory_principles §5.4.2，cancel 由 brain 派生新 intent **同一事务**自动写入 `action.cancelled`，与 `action.resolved` 互斥终态（每个 in-progress action 一生只一条终态），UE 仅负责物理停止旧动作 | UE `ActionResultReporter`（**仅承载 succeeded / failed 两种 resolved 终态；不存在 interrupted**） |
-| Speech 播放结果回传 | speech 播放完成 / 失败 → POST `speech/result` → brain 写入新事件类型 `speech.playback_resolved`（**与 action 通道完全独立，不复用 action.resolved**——speech.public 没有对应 action.intent，没有 action 因果链） | UE `SpeechResultReporter`（与 ActionResultReporter 平行） |
-| 轻量白名单校验 | actor_id ∈ roster、sentence 长度、audience ⊂ visibility、intent ∈ ontology | UE `IngressValidator`（与 brain Validator 正交，UE 这层防伪） |
-| 物品 / 道具 | DevLog 仅有 baseline 形态，无 pickup/give/use | UE 新增 Inventory + 道具基类 |
-| Delete 视觉表现 | `system.delete_executed` 时如何让 NPC "消失" | UE `DeleteHook`（隐藏 ChildActor、disable AIC、墓碑 marker） |
-| 配置位 | Brain URL / API key / 超时 / 重试 | UE `UDeveloperSettings` |
-| 时间 / 拍 | UE wall-clock 与 brain `seq` 的对应 | brain 主导，UE 提供时间戳 |
+| 类别                              | 缺口                                                                                                                                                                                                                                                                                                                                         | 落点                                                                                              |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| 协议传输                          | HTTP polling 客户端、JSON 序列化层                                                                                                                                                                                                                                                                                                           | UE C++ glue + Brain HTTP server                                                                   |
+| 中心化事件汇聚                    | 当前感知按 NPC 各取，无中心总线                                                                                                                                                                                                                                                                                                              | UE `WorldStateCollector` GameInstanceSubsystem                                                    |
+| Roster 握手                       | actor_id ↔ Pawn map                                                                                                                                                                                                                                                                                                                          | UE `RosterSubsystem`                                                                              |
+| 动作落地路由（仅物理动作）        | brain → 现有 move / sit / wait 原语                                                                                                                                                                                                                                                                                                          | UE `ActionDispatcher`                                                                             |
+| Speech 播放路由（与 action 平行） | brain `speech.public` → TTS 播报                                                                                                                                                                                                                                                                                                             | UE `SpeakDispatcher`（独立组件，不复用 ActionDispatcher）                                         |
+| 动作完成监听 wrapper              | 既有原语缺统一 OnSucceeded/OnFailed delegate（移动靠轮询、SmartObject 用 LatentTask 暴露不出 delegate、TTS 是 fire-and-log）                                                                                                                                                                                                                 | UE `ActionCompletionWrapper`（轮询 / delegate 桥接）                                              |
+| 动作执行结果回传                  | move / sit **自然结束**（成功 / 失败两种 outcome）→ POST `actions/result` → brain 写入 `action.resolved`。**被新 intent 覆盖时不上报**——按 memory_principles §5.4.2，cancel 由 brain 派生新 intent **同一事务**自动写入 `action.cancelled`，与 `action.resolved` 互斥终态（每个 in-progress action 一生只一条终态），UE 仅负责物理停止旧动作 | UE `ActionResultReporter`（**仅承载 succeeded / failed 两种 resolved 终态；不存在 interrupted**） |
+| Speech 播放结果回传               | speech 播放完成 / 失败 → POST `speech/result` → brain 写入新事件类型 `speech.playback_resolved`（**与 action 通道完全独立，不复用 action.resolved**——speech.public 没有对应 action.intent，没有 action 因果链）                                                                                                                              | UE `SpeechResultReporter`（与 ActionResultReporter 平行）                                         |
+| 轻量白名单校验                    | actor_id ∈ roster、sentence 长度、audience ⊂ visibility、intent ∈ ontology                                                                                                                                                                                                                                                                   | UE `IngressValidator`（与 brain Validator 正交，UE 这层防伪）                                     |
+| 物品 / 道具                       | DevLog 仅有 baseline 形态，无 pickup/give/use                                                                                                                                                                                                                                                                                                | UE 新增 Inventory + 道具基类                                                                      |
+| Delete 视觉表现                   | `system.delete_executed` 时如何让 NPC "消失"                                                                                                                                                                                                                                                                                                 | UE `DeleteHook`（隐藏 ChildActor、disable AIC、墓碑 marker）                                      |
+| 配置位                            | Brain URL / API key / 超时 / 重试                                                                                                                                                                                                                                                                                                            | UE `UDeveloperSettings`                                                                           |
+| 时间 / 拍                         | UE wall-clock 与 brain `seq` 的对应                                                                                                                                                                                                                                                                                                          | brain 主导，UE 提供时间戳                                                                         |
 
 ---
 
@@ -74,6 +73,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 **目标**：把"我们现在站在哪儿、要说哪种语言"在双方 repo 里钉死。
 
 **已决策**：
+
 - Brain Service = **独立 git 仓库**，物理目录在当前 UE 工程根目录下的 `BrainService/`，已加入 `.gitignore`。两仓 git 历史完全独立，UE 工程不持有 Brain 代码副本；只是物理嵌套以便共享一个 Claude Code 顶层上下文（Brain 子目录有自己独立的 ClaudeCode 上下文）。CI / venv / 部署完全解耦。
 - 传输 = **HTTP polling**：UE 端 `FHttpModule` 周期 GET / POST,UE 不依赖 SSE / WebSocket 模块。可接受 200~500ms polling 延迟。
 - 编码：JSON 文本（与 memory_principles canonical JSON 一致；deterministic 字段升序）。
@@ -95,6 +95,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
   - `wait(reason?)` → 不动
 
   **`speak` 明确不进 ontology**——见 0.4。`pickup / use_item / inspect / follow / flee_from` 推迟到 **ontology v2**（与第 4 阶段 Inventory 一并启动）。`action_ontology_version = "1"`。
+
 - **0.4 speech 通道与 action 通道严格分离**：memory_principles §5.4 硬约束"动作通道独立于发言权"。UE 落地遵守同一硬边界：
   - **Speech 路由**：brain 派生 `speech.public` 事件 → UE 通过独立 endpoint 拉到 → `SpeakDispatcher`（与 ActionDispatcher 平行的独立组件）→ `TriggerMinimaxSpeechFromPawnWithNoise`。
   - **Action 路由**：brain 派生 `action.intent` 事件 → UE 拉到 → `ActionDispatcher` → 路由到 ontology v1 的物理原语。
@@ -159,6 +160,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 - **3.9 测试 hook 退役**：M / I / N / K / L / O 按键链分批从 Level BP 删除；`AStoryScenarioDirector` / `AAct01RuleIntroDirector` 是否保留作为离线导演按 PRD 决定（不进 Mind 决策路径）。
 
 **硬验收**：
+
 - ActionDispatcher：brain 派 `action.intent(move_to NPC02→coords)` → UE 落地 → ActionCompletionWrapper 收到 move 完成 → ActionResultReporter POST → brain 写入 `action.resolved` → `quote(seq)` 复述无误；新 intent 进入时旧动作被取消，brain 写入合法 `action.cancelled`（UE 未越权写）。
 - SpeakDispatcher：brain 派 `speech.public(NPC02, "...")` → UE 拉到 → TTS 播报 + AI Hearing 命中 NPC1 → hearing 上报 brain → SpeechResultReporter POST → brain 写入 `speech.playback_resolved` → 事件流中可见。**Speak 链路全程不出现 `action.resolved`**（与 action 通道完全分离）。
 - IngressValidator 拒非法 actor_id 时，brain 收到 `system.ingress_rejected` 事件而非 `system.validation_failed`。
@@ -206,6 +208,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 ```
 
 硬约束：
+
 - **1 必须先于 2**（数据层是真相源）；
 - **1.6 必须先于 4.3**（Delete 协议要引用合法 `agent_lifecycle_events.event_id`）；
 - **2 必须先于 3**（UE 不能比 brain 提前调 schema 不存在的 action）；
@@ -216,26 +219,26 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 
 ## 需要保留 / 不动的 UE 资产清单（实施时保护红线）
 
-| 文件 / 资产 | 红线原因 |
-|---|---|
-| `Source/AILiveProject/Public/MinimaxACELibrary.h:20-89` | 整套 TTS+A2F 入口（含 hearing hook），所有 SpeakAction 路由到这里 |
-| `Source/AILiveProject/Public/AILiveProjectPerceptionLogger.h:73-122` | `GatherSightPerception / GatherHearingPerception / ClaimFirstSlotInActor / GetChildActorOf` 都是 brain 即将依赖的数据契约 |
-| `Source/AILiveProject/Public/AILiveProjectScatterMover.h:25-30` | 散点路由是动作意图 `move_to(zone)` 的可能落点 |
-| `Source/AILiveProject/Public/SightMemoryComponent.h` | ENTER/EXIT/LastSeen 是 brain 端 perception → 事件转换的源 |
-| `Source/AILiveProject/Public/AILiveAgent.h` | marker interface，brain 用它过滤玩家 Pawn |
-| `Content/Blueprints/SandboxCharacter_Mover` | `MoveAndLookAt` / `MoveAndLookAtLocation` / `Get_OrientationIntent` / `PollAndAlignLook` —— 所有 NPC 共享移动原语 |
-| `Content/Blueprints/AC_VisualOverrideManager` | `SetFixedAndApply` 是 NPC 视觉契约入口 |
-| `Content/Blueprints/AI/AIC_NPC_SmartObject`（含 Hearing/Sight sense + SightMemory） | 所有 NPC 的 AI 控制器 |
-| `Config/DefaultEngine.ini` 的 `+GameModeMapPrefixes` 与 `bTickPhysicsAsync=False` | CLAUDE.md 关键规则 |
-| `Source/*.Target.cs` 的 `DefaultBuildSettings = V6` | CLAUDE.md 关键规则 |
+| 文件 / 资产                                                                         | 红线原因                                                                                                                  |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `Source/AILiveProject/Public/MinimaxACELibrary.h:20-89`                             | 整套 TTS+A2F 入口（含 hearing hook），所有 SpeakAction 路由到这里                                                         |
+| `Source/AILiveProject/Public/AILiveProjectPerceptionLogger.h:73-122`                | `GatherSightPerception / GatherHearingPerception / ClaimFirstSlotInActor / GetChildActorOf` 都是 brain 即将依赖的数据契约 |
+| `Source/AILiveProject/Public/AILiveProjectScatterMover.h:25-30`                     | 散点路由是动作意图 `move_to(zone)` 的可能落点                                                                             |
+| `Source/AILiveProject/Public/SightMemoryComponent.h`                                | ENTER/EXIT/LastSeen 是 brain 端 perception → 事件转换的源                                                                 |
+| `Source/AILiveProject/Public/AILiveAgent.h`                                         | marker interface，brain 用它过滤玩家 Pawn                                                                                 |
+| `Content/Blueprints/SandboxCharacter_Mover`                                         | `MoveAndLookAt` / `MoveAndLookAtLocation` / `Get_OrientationIntent` / `PollAndAlignLook` —— 所有 NPC 共享移动原语         |
+| `Content/Blueprints/AC_VisualOverrideManager`                                       | `SetFixedAndApply` 是 NPC 视觉契约入口                                                                                    |
+| `Content/Blueprints/AI/AIC_NPC_SmartObject`（含 Hearing/Sight sense + SightMemory） | 所有 NPC 的 AI 控制器                                                                                                     |
+| `Config/DefaultEngine.ini` 的 `+GameModeMapPrefixes` 与 `bTickPhysicsAsync=False`   | CLAUDE.md 关键规则                                                                                                        |
+| `Source/*.Target.cs` 的 `DefaultBuildSettings = V6`                                 | CLAUDE.md 关键规则                                                                                                        |
 
 ## 可退役 / 待评估的 UE 资产
 
-| 文件 | 评估 |
-|---|---|
+| 文件                                                 | 评估                                                                                                                      |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `AStoryScenarioDirector` / `AAct01RuleIntroDirector` | 离线编排剧情（O / Act01 触发），与 Mind 正交。MVP 期保留作 brain 不在场时的 fallback 演示，第 5 阶段后按 PRD 决定是否退役 |
-| Level BP 的 M / I / N / K / L / O 按键链 | 第 3 阶段对应 action 接入后逐键退役 |
-| `BP_MH_Character_1` 的 T 键链 + 6 个 A2F 调试变量 | 调试特例，第 5 阶段一并退役 |
+| Level BP 的 M / I / N / K / L / O 按键链             | 第 3 阶段对应 action 接入后逐键退役                                                                                       |
+| `BP_MH_Character_1` 的 T 键链 + 6 个 A2F 调试变量    | 调试特例，第 5 阶段一并退役                                                                                               |
 
 ---
 
@@ -252,6 +255,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 ## 风险与开放决策（在子任务详设里逐一收敛）
 
 已收敛：
+
 - ✓ Brain = 独立 Python 仓库 + HTTP polling
 - ✓ MVP 游戏 = 02 病毒游戏
 - ✓ action ontology v1 = `move_to / sit / wait`（3 个 intent）；`speak` 走 `speech.public` 独立通道，不进 ontology
@@ -264,6 +268,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 - ✓ Session 握手 = `POST /v1/games`（UE 拿 `game_id` 的唯一入口）；UE settings 不存 game_id
 
 未收敛：
+
 1. **测试键退役节奏**：渐进退（每个 brain action 接好就退一个）vs 一次性退（brain 全功能就绪后大改 Level BP）。
 2. **HTTP polling 频率**：UE 拉 `action.intent` / `speech.public` 的间隔（建议 200ms 起，按 brain 拍速 + LLM 出结果速率调）。
 3. **裁判 LLM 厂商选择**：phase-level 摘要 / annotation.speech_act 标注用哪家（不能与参赛 agent 同厂商）。开发期可统一用 DeepSeek 但不同 system prompt 区分。
