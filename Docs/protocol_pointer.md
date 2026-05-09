@@ -9,7 +9,7 @@ UE 仓对 BrainService 协议的单一引用指针。
 | 字段                      | 值                                              |
 | ------------------------- | ----------------------------------------------- |
 | **BrainService 仓库路径** | `D:\Project\Unreal\AILiveProject\BrainService\` |
-| **引用 commit hash**      | `b8b2ae5acad5f7b9ce272dcd4e738d30600eb111`      |
+| **引用 commit hash**      | `76f3dd5984274d4aea6b1b153c536099aa2272c9`      |
 | **protocol_version**      | `0.1.0`                                         |
 
 ---
@@ -37,8 +37,5 @@ UE 仓对 BrainService 协议的单一引用指针。
 从 BrainService 目录运行：
 
 ```
-pip install jsonschema
 python protocol/validate.py
 ```
-
-当前结果：**20/20 passed**（截至 commit `9437f0b`）。
