@@ -61,6 +61,12 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 其余 MCP 踩坑（`set_actor_properties` 6 字段限制、CDO 数组写法、`TSubclassOf<T>` pin 默认值、继承组件优先用类型化 BP 变量等）见 auto-memory `feedback_monolith_patterns.md` / `feedback_mcp_limitations.md`。
 
+## 两个独立 git 仓库
+
+**BrainService repo**：物理目录在当前 UE 工程根目录下的 `BrainService/`，已加入 `.gitignore`。
+**AILiveProject**: UE 工程仓库。
+两仓 git 历史完全独立，UE 工程不持有 Brain 代码副本；只是物理嵌套以便共享一个 Claude Code 顶层上下文。
+
 ## 架构（读代码读不出的部分）
 
 ### C++ glue 层
