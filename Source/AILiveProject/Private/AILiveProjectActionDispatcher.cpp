@@ -34,18 +34,42 @@ namespace
 		return GI ? GI->GetSubsystem<UAILiveProjectRosterSubsystem>() : nullptr;
 	}
 
-	bool CallBPMoveToLocation(APawn* Pawn, const FVector& Location)
+	// SandboxCharacter_Mover BP 函数 MoveAndLookAtLocation 的参数布局：
+	// 输入 MoveLocation (FVector)、LookTarget (AActor*)，输出 bSucceeded (bool)。
+	// 字段顺序/类型必须 1:1 匹配 BP 签名，否则 ProcessEvent 会按 BP 期望的偏移
+	// 解读未初始化字节 → BP VM 解引用垃圾指针 → AV。
+	// 详见 DevLog/2026-04-29_npc_scatter_to_target.md §踩坑 8。
+	struct FMoveAndLookAtLocationParams
+	{
+		FVector MoveLocation = FVector::ZeroVector;
+		AActor* LookTarget = nullptr;
+		bool bSucceeded = false;
+	};
+
+	struct FMoveAndLookAtParams
+	{
+		AActor* MoveTarget = nullptr;
+		AActor* LookTarget = nullptr;
+		bool bSucceeded = false;
+	};
+
+	bool CallBPMoveToLocation(APawn* Pawn, const FVector& Location, AActor* LookTarget)
 	{
 		if (!Pawn) { return false; }
-		// Try the SandboxCharacter_Mover BP function name first; fall back to
-		// the AAIController MoveToLocation if the BP function isn't found.
-		UFunction* Func = Pawn->FindFunction(FName(TEXT("MoveAndLookAtLocation")));
-		if (Func)
+		// BP MoveAndLookAtLocation 主路径需要 valid LookTarget（内部 Cast<Actor>
+		// 失败直接走失败 Return 不移动）。没有 look target 时直接走
+		// AIController::MoveToLocation，朝向交给 GASP 默认 face-velocity。
+		if (LookTarget != nullptr)
 		{
-			struct FParms { FVector Location; };
-			FParms P{ Location };
-			Pawn->ProcessEvent(Func, &P);
-			return true;
+			UFunction* Func = Pawn->FindFunction(FName(TEXT("MoveAndLookAtLocation")));
+			if (Func)
+			{
+				FMoveAndLookAtLocationParams P;
+				P.MoveLocation = Location;
+				P.LookTarget = LookTarget;
+				Pawn->ProcessEvent(Func, &P);
+				return true;
+			}
 		}
 		if (AAIController* AIC = Pawn->GetController<AAIController>())
 		{
@@ -55,16 +79,22 @@ namespace
 		return false;
 	}
 
-	bool CallBPMoveToActor(APawn* Pawn, AActor* Target)
+	bool CallBPMoveToActor(APawn* Pawn, AActor* Target, AActor* LookTarget)
 	{
 		if (!Pawn || !Target) { return false; }
-		UFunction* Func = Pawn->FindFunction(FName(TEXT("MoveAndLookAtActor")));
-		if (Func)
+		if (LookTarget != nullptr)
 		{
-			struct FParms { AActor* Target; };
-			FParms P{ Target };
-			Pawn->ProcessEvent(Func, &P);
-			return true;
+			// BP 实际名是 MoveAndLookAt（不是 MoveAndLookAtActor），签名
+			// (AActor* MoveTarget, AActor* LookTarget) → bool bSucceeded。
+			UFunction* Func = Pawn->FindFunction(FName(TEXT("MoveAndLookAt")));
+			if (Func)
+			{
+				FMoveAndLookAtParams P;
+				P.MoveTarget = Target;
+				P.LookTarget = LookTarget;
+				Pawn->ProcessEvent(Func, &P);
+				return true;
+			}
 		}
 		if (AAIController* AIC = Pawn->GetController<AAIController>())
 		{
@@ -317,12 +347,12 @@ void UAILiveProjectActionDispatcher::RouteMoveTo(APawn* Pawn, const FAIL_ActionI
 	if (Mt.bHasCoords)
 	{
 		const FVector Dest(Mt.Coords.X, Mt.Coords.Y, Mt.Coords.Z);
-		bDispatched = CallBPMoveToLocation(Pawn, Dest);
+		bDispatched = CallBPMoveToLocation(Pawn, Dest, /*LookTarget=*/ nullptr);
 	}
 	else if (Mt.bHasTargetNpc)
 	{
 		AActor* TargetPawn = Roster->FindPawnByActorId(Mt.TargetNpc);
-		bDispatched = CallBPMoveToActor(Pawn, TargetPawn);
+		bDispatched = CallBPMoveToActor(Pawn, TargetPawn, /*LookTarget=*/ nullptr);
 	}
 	if (!bDispatched)
 	{
