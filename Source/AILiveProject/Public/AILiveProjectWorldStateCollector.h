@@ -39,5 +39,6 @@ private:
 	void TickPush();
 
 	int32 NextClientSampleId = 0;
+	bool bPushInFlight = false;
 	FTimerHandle TimerHandle;
 };

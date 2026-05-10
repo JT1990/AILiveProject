@@ -11,6 +11,7 @@
 #include "AILiveProtocolJson.h"
 #include "AILiveProtocolTypes.h"
 #include "AIController.h"
+#include "Async/Async.h"
 #include "EngineUtils.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -94,12 +95,13 @@ namespace
 void UAILiveProjectActionDispatcher::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-	LastActionSeq = 0;
+	LastActionSeq = -1;
 }
 
 void UAILiveProjectActionDispatcher::Deinitialize()
 {
 	StopPolling();
+	bPullInFlight = false;
 	ActiveByActorId.Reset();
 	Super::Deinitialize();
 }
@@ -147,6 +149,8 @@ void UAILiveProjectActionDispatcher::TickPull()
 	UWorld* World = GetWorld();
 	UAILiveProjectBrainSessionSubsystem* Session = GetSession(World);
 	if (!Session || !Session->IsReady() || !Session->GetClient()) { return; }
+	if (bPullInFlight) { return; }
+	bPullInFlight = true;
 
 	const FString GameId = Session->GetGameId();
 	TWeakObjectPtr<UAILiveProjectActionDispatcher> WeakThis(this);
@@ -156,7 +160,9 @@ void UAILiveProjectActionDispatcher::TickPull()
 		AsyncTask(ENamedThreads::GameThread, [WeakThis, Resp]()
 		{
 			UAILiveProjectActionDispatcher* This = WeakThis.Get();
-			if (!This || !Resp.IsSet()) { return; }
+			if (!This) { return; }
+			This->bPullInFlight = false;
+			if (!Resp.IsSet()) { return; }
 			for (const FAIL_ActionIntentEvent& Ev : Resp->Events)
 			{
 				This->DispatchOne(Ev);

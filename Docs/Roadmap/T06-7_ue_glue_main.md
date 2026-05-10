@@ -738,7 +738,7 @@ private:
     void TickPull();
     void DispatchOne(const FAIL_SpeechPublicEvent& Ev);
 
-    int64 LastSpeechSeq = 0;
+    int64 LastSpeechSeq = -1;  // -1 表示首次（与 brain server speech/pull 默认 since_seq 对齐）
     TMap<FString, int64> ActiveSpeechByActorId;   // actor_id → speech_seq（in-progress）
     FTimerHandle TimerHandle;
 };

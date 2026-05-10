@@ -11,6 +11,7 @@
 #include "AILiveProtocolJson.h"
 #include "AILiveProtocolTypes.h"
 #include "AIController.h"
+#include "Async/Async.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
@@ -45,6 +46,7 @@ void UAILiveProjectWorldStateCollector::StopPolling()
 	{
 		World->GetTimerManager().ClearTimer(TimerHandle);
 	}
+	bPushInFlight = false;
 	NextClientSampleId = 0;
 }
 
@@ -56,6 +58,7 @@ void UAILiveProjectWorldStateCollector::TickPush()
 	UAILiveProjectBrainSessionSubsystem* Session = GI->GetSubsystem<UAILiveProjectBrainSessionSubsystem>();
 	UAILiveProjectRosterSubsystem* Roster       = GI->GetSubsystem<UAILiveProjectRosterSubsystem>();
 	if (!Session || !Roster || !Session->IsReady() || !Session->GetClient()) { return; }
+	if (bPushInFlight) { return; }
 
 	UAILiveProjectActionDispatcher* ActionDispatcher = World->GetSubsystem<UAILiveProjectActionDispatcher>();
 	UAILiveProjectSpeakDispatcher*  SpeakDispatcher  = World->GetSubsystem<UAILiveProjectSpeakDispatcher>();
@@ -135,5 +138,16 @@ void UAILiveProjectWorldStateCollector::TickPush()
 
 	FAILiveProjectBrainHttpClient* Client = Session->GetClient();
 	const FString GameId = Session->GetGameId();
-	Client->PushWorldState(GameId, Req).Next([](bool /*bOk*/) {});
+	bPushInFlight = true;
+	TWeakObjectPtr<UAILiveProjectWorldStateCollector> WeakThis(this);
+	Client->PushWorldState(GameId, Req).Next([WeakThis](bool /*bOk*/)
+	{
+		AsyncTask(ENamedThreads::GameThread, [WeakThis]()
+		{
+			if (UAILiveProjectWorldStateCollector* This = WeakThis.Get())
+			{
+				This->bPushInFlight = false;
+			}
+		});
+	});
 }

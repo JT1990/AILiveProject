@@ -41,12 +41,13 @@ namespace
 void UAILiveProjectSpeakDispatcher::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-	LastSpeechSeq = 0;
+	LastSpeechSeq = -1;
 }
 
 void UAILiveProjectSpeakDispatcher::Deinitialize()
 {
 	StopPolling();
+	bPullInFlight = false;
 	ActiveSpeechByActorId.Reset();
 	ActiveSpeechPawns.Reset();
 	Super::Deinitialize();
@@ -86,6 +87,8 @@ void UAILiveProjectSpeakDispatcher::TickPull()
 	UWorld* World = GetWorld();
 	UAILiveProjectBrainSessionSubsystem* Session = GetSession(World);
 	if (!Session || !Session->IsReady() || !Session->GetClient()) { return; }
+	if (bPullInFlight) { return; }
+	bPullInFlight = true;
 
 	const FString GameId = Session->GetGameId();
 	TWeakObjectPtr<UAILiveProjectSpeakDispatcher> WeakThis(this);
@@ -95,7 +98,9 @@ void UAILiveProjectSpeakDispatcher::TickPull()
 		AsyncTask(ENamedThreads::GameThread, [WeakThis, Resp]()
 		{
 			UAILiveProjectSpeakDispatcher* This = WeakThis.Get();
-			if (!This || !Resp.IsSet()) { return; }
+			if (!This) { return; }
+			This->bPullInFlight = false;
+			if (!Resp.IsSet()) { return; }
 			for (const FAIL_SpeechPublicEvent& Ev : Resp->Events)
 			{
 				This->DispatchOne(Ev);

@@ -77,6 +77,7 @@ private:
 	UPROPERTY()
 	TMap<FString, FAIL_ActiveAction> ActiveByActorId;
 
-	int64 LastActionSeq = 0;
+	int64 LastActionSeq = -1;
+	bool bPullInFlight = false;
 	FTimerHandle TimerHandle;
 };

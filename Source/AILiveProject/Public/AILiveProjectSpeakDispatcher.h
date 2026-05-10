@@ -35,7 +35,8 @@ private:
 	void TickPull();
 	void DispatchOne(const FAIL_SpeechPublicEvent& Ev);
 
-	int64 LastSpeechSeq = 0;
+	int64 LastSpeechSeq = -1;
+	bool bPullInFlight = false;
 	TMap<FString, int64> ActiveSpeechByActorId;   // actor_id -> in-progress speech_seq
 	TMap<FString, TWeakObjectPtr<APawn>> ActiveSpeechPawns;
 	FTimerHandle TimerHandle;
