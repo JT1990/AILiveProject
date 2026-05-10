@@ -9,7 +9,7 @@ UE 仓对 BrainService 协议的单一引用指针。
 | 字段                      | 值                                              |
 | ------------------------- | ----------------------------------------------- |
 | **BrainService 仓库路径** | `D:\Project\Unreal\AILiveProject\BrainService\` |
-| **引用 commit hash**      | `c271383c8c3c2864a3988ba31e270e39be4552db`      |
+| **引用 commit hash**      | `2247c36`（HEAD；包含 `/health` bugfix `6d2cdae` + 同步脚本 `2247c36`） |
 | **protocol_version**      | `0.1.1`                                         |
 
 ---
@@ -24,11 +24,15 @@ UE 仓对 BrainService 协议的单一引用指针。
 
 ---
 
-## UE C++ round-trip 测试位置（T6 实现后填写）
+## UE C++ round-trip 测试位置
 
-> 占位：由 T6 卡片实现后在此处填入测试文件路径 + 运行命令。
+| 项 | 值 |
+| --- | --- |
+| 测试文件 | `Source/AILiveProject/Tests/AILiveProtocolRoundTripTest.cpp` |
+| Vendored fixtures | `Source/AILiveProject/Tests/Fixtures/protocol_examples/*.json`（全 20 份，sha256 与 BrainService 对齐；同步用 `BrainService/scripts/sync-protocol-examples.ps1`） |
+| 运行命令 | UE Editor → Tools → Test Automation → 勾选 `AILive.Protocol.RoundTrip.*` → Start Tests |
 
-当前状态：**未实现**（T1 阶段只要求 BrainService examples 通过 JSON Schema 校验；UE 端 USTRUCT 镜像与反序列化测试由 T6 实现）。
+当前状态：T6 Stage A 完成（fixtures 已 vendored + pointer 已升级）；测试文件本体在 T6 Stage B 落地。
 
 ---
 

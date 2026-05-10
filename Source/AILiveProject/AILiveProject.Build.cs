@@ -23,6 +23,7 @@ public class AILiveProject : ModuleRules
 			"GameplayTags",
 			"MediaAssets",
 			"MediaPlate",
+			"DeveloperSettings",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]

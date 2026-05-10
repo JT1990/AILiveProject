@@ -1,0 +1,35 @@
+{
+  "client_sample_id": 42,
+  "observations": [
+    {
+      "actor_id": "NPC01",
+      "current_action": "idle",
+      "facing_degrees": 45.0,
+      "heard_sounds": [],
+      "position": { "x": 120.5, "y": 210.0, "z": 0.0 },
+      "sighted_actors": [
+        {
+          "distance_cm": 320.0,
+          "rel_yaw_degrees": 15.5,
+          "target_actor_id": "NPC02"
+        }
+      ]
+    },
+    {
+      "actor_id": "NPC02",
+      "current_action": "moving",
+      "facing_degrees": 180.0,
+      "heard_sounds": [
+        {
+          "age_seconds": 0.5,
+          "loudness": 0.6,
+          "rel_yaw_degrees": -30.0,
+          "source_actor_id": "NPC01"
+        }
+      ],
+      "position": { "x": 155.0, "y": 260.0, "z": 0.0 },
+      "sighted_actors": []
+    }
+  ],
+  "sample_wall_clock_ts": "2026-05-09T08:01:30Z"
+}

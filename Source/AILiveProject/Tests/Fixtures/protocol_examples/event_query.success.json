@@ -1,0 +1,42 @@
+{
+  "events": [
+    {
+      "actor": "NPC03",
+      "addressed_to": [],
+      "event_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "event_type": "action.intent",
+      "game_id": "a1b2c3d4-e5f6-47ab-89cd-000000000001",
+      "parent_event_id": 38,
+      "payload": {
+        "action_ontology_version": "1",
+        "name": "move_to",
+        "params": { "target_npc": "NPC07" }
+      },
+      "phase": "day_discuss",
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "round_no": 2,
+      "seq": 42,
+      "visibility": ["NPC03"],
+      "wall_clock_ts": "2026-05-09T08:01:45Z"
+    },
+    {
+      "actor": "NPC03",
+      "addressed_to": [],
+      "event_hash": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+      "event_type": "speech.public",
+      "game_id": "a1b2c3d4-e5f6-47ab-89cd-000000000001",
+      "parent_event_id": 39,
+      "payload": {
+        "addressed_to": [],
+        "text": "I wonder why NPC07 keeps moving toward the dining area."
+      },
+      "phase": "day_discuss",
+      "prev_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "round_no": 2,
+      "seq": 44,
+      "visibility": ["public"],
+      "wall_clock_ts": "2026-05-09T08:01:52Z"
+    }
+  ],
+  "next_cursor": 44
+}

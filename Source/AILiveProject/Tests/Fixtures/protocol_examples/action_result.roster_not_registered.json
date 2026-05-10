@@ -1,0 +1,8 @@
+{
+  "details": {
+    "hint": "Call POST /v1/games/{game_id}/roster before posting action results."
+  },
+  "error_code": "ROSTER_NOT_REGISTERED",
+  "message": "No roster has been registered for this game_id. UE must register the roster before posting action results.",
+  "retryable": false
+}

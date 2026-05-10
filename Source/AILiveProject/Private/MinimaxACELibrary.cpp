@@ -338,3 +338,143 @@ bool UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoise(
 		A2FProviderName);
 	return true;
 }
+
+namespace
+{
+	void FireOnComplete(const FOnSpeechCompleted& Delegate, bool bSucceeded, float DurationSeconds, const FString& ErrorReason)
+	{
+		if (Delegate.IsBound())
+		{
+			Delegate.Execute(bSucceeded, DurationSeconds, ErrorReason);
+		}
+	}
+}
+
+#include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "TimerManager.h"
+
+void UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoiseEx(
+	UObject* WorldContextObject,
+	AActor* SpeakerPawn,
+	const FString& Text,
+	const FString& ApiKey,
+	FOnSpeechCompleted OnComplete,
+	const FString& VoiceId,
+	const FString& Endpoint,
+	FName A2FProviderName)
+{
+	if (!IsValid(SpeakerPawn))
+	{
+		FireOnComplete(OnComplete, false, 0.f, TEXT("invalid SpeakerPawn"));
+		return;
+	}
+	if (Text.IsEmpty() || ApiKey.IsEmpty())
+	{
+		FireOnComplete(OnComplete, false, 0.f, TEXT("empty Text or ApiKey"));
+		return;
+	}
+	AActor* AudioTarget = GetVisualOverrideAudioTarget(SpeakerPawn);
+	if (!IsValid(AudioTarget))
+	{
+		FireOnComplete(OnComplete, false, 0.f, TEXT("no VisualOverride child actor"));
+		return;
+	}
+
+	UACEAudioCurveSourceComponent* Consumer = GetOrAddCurveSource(AudioTarget);
+	if (!Consumer)
+	{
+		FireOnComplete(OnComplete, false, 0.f, TEXT("ACE curve source unavailable"));
+		return;
+	}
+
+	TWeakObjectPtr<UACEAudioCurveSourceComponent> WeakConsumer(Consumer);
+	TWeakObjectPtr<AActor> WeakNoiseInstigator(SpeakerPawn);
+	TWeakObjectPtr<UObject> WeakWorldCtx(WorldContextObject ? WorldContextObject : SpeakerPawn);
+
+	MinimaxSpeech::FRequest Req;
+	Req.ApiKey = ApiKey;
+	Req.Text = Text;
+	Req.VoiceId = VoiceId;
+	Req.Endpoint = Endpoint;
+	Req.SampleRate = 16000;
+
+	Async(EAsyncExecution::ThreadPool,
+		[Req = MoveTemp(Req), WeakConsumer, WeakNoiseInstigator, WeakWorldCtx, A2FProviderName, OnComplete]() mutable
+	{
+		const MinimaxSpeech::FResult Result = MinimaxSpeech::RequestBlocking(Req);
+
+		AsyncTask(ENamedThreads::GameThread,
+			[Result, WeakConsumer, WeakNoiseInstigator, WeakWorldCtx, A2FProviderName, OnComplete]() mutable
+		{
+			if (!Result.bSuccess)
+			{
+				UE_LOG(LogMinimaxACE, Error, TEXT("Ex: MiniMax TTS failed: %s"), *Result.ErrorMessage);
+				FireOnComplete(OnComplete, false, 0.f, Result.ErrorMessage);
+				return;
+			}
+			UACEAudioCurveSourceComponent* Live = WeakConsumer.Get();
+			if (!Live)
+			{
+				FireOnComplete(OnComplete, false, 0.f, TEXT("ACE curve source destroyed before audio delivered"));
+				return;
+			}
+
+			// AI Hearing report (must precede dispatch — see TriggerMinimaxSpeechWithNoise comment).
+			if (APawn* InstigatorPawn = Cast<APawn>(WeakNoiseInstigator.Get()))
+			{
+				UAISense_Hearing::ReportNoiseEvent(
+					InstigatorPawn,
+					InstigatorPawn->GetActorLocation(),
+					/*Loudness=*/ 1.f,
+					/*Instigator=*/ InstigatorPawn,
+					/*MaxRange=*/ 0.f,
+					/*Tag=*/ NAME_None);
+			}
+
+			const float EstimatedDurationSec = (Result.SampleRate > 0)
+				? static_cast<float>(Result.Samples.Num()) / static_cast<float>(Result.SampleRate)
+				: 0.f;
+
+			// Schedule completion timer BEFORE AnimateFromAudioSamples so the
+			// timer starts ticking from "audio dispatched first chunk", not
+			// from "dispatch loop returned" (avoids double latency).
+			UWorld* World = nullptr;
+			if (UObject* Ctx = WeakWorldCtx.Get())
+			{
+				World = GEngine ? GEngine->GetWorldFromContextObject(Ctx, EGetWorldErrorMode::ReturnNull) : nullptr;
+			}
+			if (World && EstimatedDurationSec > 0.f)
+			{
+				FTimerHandle Handle;
+				const FString EmptyReason;
+				const float Duration = EstimatedDurationSec;
+				World->GetTimerManager().SetTimer(Handle,
+					FTimerDelegate::CreateLambda([OnComplete, Duration]()
+					{
+						FireOnComplete(OnComplete, true, Duration, FString());
+					}),
+					EstimatedDurationSec, false);
+			}
+			else
+			{
+				// No world context available -> fire immediately so brain isn't
+				// left waiting forever.
+				FireOnComplete(OnComplete, true, EstimatedDurationSec, FString());
+			}
+
+			const bool bOk = FACERuntimeModule::Get().AnimateFromAudioSamples(
+				Live,
+				TArrayView<const int16>(Result.Samples.GetData(), Result.Samples.Num()),
+				/*NumChannels*/ 1,
+				Result.SampleRate,
+				/*bEndOfSamples*/ true,
+				TOptional<FAudio2FaceEmotion>{},
+				/*Params*/ nullptr,
+				A2FProviderName);
+
+			UE_LOG(LogMinimaxACE, Log, TEXT("Ex: AnimateFromAudioSamples returned %s"),
+				bOk ? TEXT("true") : TEXT("false"));
+		});
+	});
+}

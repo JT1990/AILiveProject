@@ -1,0 +1,54 @@
+{
+  "roster": [
+    {
+      "actor_id": "NPC01",
+      "display_name": "Alpha",
+      "initial_position": { "x": 100.0, "y": 200.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC02",
+      "display_name": "Beta",
+      "initial_position": { "x": 150.0, "y": 250.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC03",
+      "display_name": "Gamma",
+      "initial_position": { "x": 200.0, "y": 300.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC04",
+      "display_name": "Delta",
+      "initial_position": { "x": 250.0, "y": 350.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC05",
+      "display_name": "Epsilon",
+      "initial_position": { "x": 300.0, "y": 400.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC06",
+      "display_name": "Zeta",
+      "initial_position": { "x": 350.0, "y": 450.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC07",
+      "display_name": "Eta",
+      "initial_position": { "x": 400.0, "y": 500.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC08",
+      "display_name": "Theta",
+      "initial_position": { "x": 450.0, "y": 550.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC09",
+      "display_name": "Iota",
+      "initial_position": { "x": 500.0, "y": 600.0, "z": 0.0 }
+    },
+    {
+      "actor_id": "NPC10",
+      "display_name": "Kappa",
+      "initial_position": { "x": 550.0, "y": 650.0, "z": 0.0 }
+    }
+  ]
+}

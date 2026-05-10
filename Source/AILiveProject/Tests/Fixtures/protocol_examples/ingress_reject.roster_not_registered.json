@@ -1,0 +1,8 @@
+{
+  "details": {
+    "hint": "Ensure POST /v1/games/{game_id}/roster was called and returned 2xx before sending action intents."
+  },
+  "error_code": "ROSTER_NOT_REGISTERED",
+  "message": "Cannot accept ingress_reject for game_id 'a1b2c3d4-e5f6-47ab-89cd-000000000001': roster has not been registered.",
+  "retryable": false
+}

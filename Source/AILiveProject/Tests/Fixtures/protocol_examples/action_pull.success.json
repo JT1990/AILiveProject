@@ -1,0 +1,27 @@
+{
+  "events": [
+    {
+      "actor_id": "NPC03",
+      "intent": {
+        "action_ontology_version": "1",
+        "name": "move_to",
+        "params": {
+          "target_npc": "NPC07"
+        }
+      },
+      "seq": 42
+    },
+    {
+      "actor_id": "NPC05",
+      "intent": {
+        "action_ontology_version": "1",
+        "name": "wait",
+        "params": {
+          "reason": "Observing the situation before acting."
+        }
+      },
+      "seq": 43
+    }
+  ],
+  "next_cursor": 43
+}

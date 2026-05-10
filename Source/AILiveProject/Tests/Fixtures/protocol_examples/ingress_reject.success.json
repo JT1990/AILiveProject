@@ -1,0 +1,6 @@
+{
+  "actor_id": "NPC05",
+  "original_seq": 50,
+  "raw_message_snippet": "{\"name\":\"dance\",\"params\":{}}",
+  "reject_reason": "INTENT_NOT_IN_ONTOLOGY"
+}

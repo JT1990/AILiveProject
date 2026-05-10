@@ -1,0 +1,9 @@
+{
+  "details": {
+    "field": "roster[0].actor_id",
+    "received": "NPC99"
+  },
+  "error_code": "INVALID_ACTOR_ID",
+  "message": "actor_id 'NPC99' is not in the closed enum (NPC01..NPC10). Check that UE level BP_NPC_MH_Character IDs are correctly mapped.",
+  "retryable": false
+}

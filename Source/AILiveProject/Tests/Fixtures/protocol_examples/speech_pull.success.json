@@ -1,0 +1,11 @@
+{
+  "events": [
+    {
+      "actor_id": "NPC03",
+      "addressed_to": [],
+      "seq": 44,
+      "text": "I wonder why NPC07 keeps moving toward the dining area."
+    }
+  ],
+  "next_cursor": 44
+}

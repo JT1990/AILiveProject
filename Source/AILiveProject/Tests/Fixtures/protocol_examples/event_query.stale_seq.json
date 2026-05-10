@@ -1,0 +1,8 @@
+{
+  "details": {
+    "provided_since_seq": -1
+  },
+  "error_code": "STALE_SEQ",
+  "message": "since_seq must be >= 0. Use 0 to retrieve all events from the beginning of this game session.",
+  "retryable": false
+}

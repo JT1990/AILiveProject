@@ -1,0 +1,7 @@
+{
+  "actor_id": "NPC03",
+  "duration_ms": 3200,
+  "final_position": { "x": 398.5, "y": 497.0, "z": 0.0 },
+  "intent_seq": 42,
+  "outcome": "succeeded"
+}

@@ -1,0 +1,9 @@
+{
+  "details": {
+    "current_min_seq": 30,
+    "provided_seq": 10
+  },
+  "error_code": "STALE_SEQ",
+  "message": "speech_seq 10 refers to an event that has already been resolved. UE should advance its high-watermark and not re-report already-processed speech events.",
+  "retryable": false
+}

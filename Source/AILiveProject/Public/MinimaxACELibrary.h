@@ -4,6 +4,21 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "MinimaxACELibrary.generated.h"
 
+/**
+ * Fired when a TriggerMinimaxSpeechFromPawnWithNoiseEx call resolves.
+ *   - bSucceeded: true when audio dispatch began and completed normally;
+ *                 false on TTS HTTP failure, ACE provider unavailable, PCM
+ *                 issue, or audio target destroyed mid-call.
+ *   - DurationSeconds: estimated audio duration (Samples / SampleRate); 0 on failure.
+ *   - ErrorReason: human-readable failure description; empty on success.
+ *
+ * Non-dynamic delegate so C++ callers can BindWeakLambda without exposing
+ * a separate UFUNCTION method. SpeakDispatcher is the sole consumer; if a BP
+ * caller ever needs the completion event, wrap with a UFUNCTION shim.
+ */
+DECLARE_DELEGATE_ThreeParams(FOnSpeechCompleted,
+	bool /*bSucceeded*/, float /*DurationSeconds*/, FString /*ErrorReason*/);
+
 UCLASS()
 class AILIVEPROJECT_API UMinimaxACELibrary : public UBlueprintFunctionLibrary
 {
@@ -66,6 +81,28 @@ public:
 		AActor* SpeakerPawn,
 		const FString& Text,
 		const FString& ApiKey,
+		const FString& VoiceId = TEXT("male-qn-qingse"),
+		const FString& Endpoint = TEXT("https://api.minimaxi.com/v1/t2a_v2"),
+		FName A2FProviderName = FName(TEXT("LocalA2F-James")));
+
+	/*
+	 * Same TTS+A2F+Hearing behavior as TriggerMinimaxSpeechFromPawnWithNoise
+	 * with an additional completion callback.
+	 *
+	 * The completion timer is scheduled on the GameThread BEFORE the call to
+	 * AnimateFromAudioSamples (which is a blocking streaming dispatch lasting
+	 * several seconds). Scheduling it after the dispatch would double the
+	 * effective latency (dispatch time + audio playback time). Scheduling it
+	 * before approximates "audio actually started" because the first chunk
+	 * has been queued for the ACE thread by the time the timer ticks.
+	 */
+	/** C++-only completion variant; see TriggerMinimaxSpeechFromPawnWithNoise for the BP path. */
+	static void TriggerMinimaxSpeechFromPawnWithNoiseEx(
+		UObject* WorldContextObject,
+		AActor* SpeakerPawn,
+		const FString& Text,
+		const FString& ApiKey,
+		FOnSpeechCompleted OnComplete,
 		const FString& VoiceId = TEXT("male-qn-qingse"),
 		const FString& Endpoint = TEXT("https://api.minimaxi.com/v1/t2a_v2"),
 		FName A2FProviderName = FName(TEXT("LocalA2F-James")));

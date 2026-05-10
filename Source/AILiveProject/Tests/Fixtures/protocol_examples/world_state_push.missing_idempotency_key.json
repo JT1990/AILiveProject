@@ -1,0 +1,5 @@
+{
+  "error_code": "MISSING_IDEMPOTENCY_KEY",
+  "message": "All POST write endpoints (except POST /v1/games) require an 'Idempotency-Key: <uuid v4>' header. Retry with a fresh UUID v4 value.",
+  "retryable": false
+}
