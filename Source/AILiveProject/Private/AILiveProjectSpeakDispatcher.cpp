@@ -55,14 +55,7 @@ void UAILiveProjectSpeakDispatcher::Deinitialize()
 
 void UAILiveProjectSpeakDispatcher::StartPolling()
 {
-	UWorld* World = GetWorld();
-	if (!World) { return; }
-	const UAILiveProjectSettings* Settings = GetDefault<UAILiveProjectSettings>();
-	const float Interval = FMath::Max(Settings->PollingIntervalSpeechMs, 50) / 1000.f;
-	World->GetTimerManager().SetTimer(TimerHandle,
-		FTimerDelegate::CreateUObject(this, &UAILiveProjectSpeakDispatcher::TickPull),
-		Interval, true, 0.f);
-	UE_LOG(LogAILiveBrain, Log, TEXT("SpeakDispatcher polling every %.3fs"), Interval);
+	UE_LOG(LogAILiveBrain, Log, TEXT("SpeakDispatcher uses WebSocket push; polling timer not started"));
 }
 
 void UAILiveProjectSpeakDispatcher::StopPolling()
@@ -70,6 +63,15 @@ void UAILiveProjectSpeakDispatcher::StopPolling()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(TimerHandle);
+	}
+}
+
+void UAILiveProjectSpeakDispatcher::HandleBrainSpeechPublic(const FAIL_SpeechPublicEvent& Ev)
+{
+	DispatchOne(Ev);
+	if (UAILiveProjectBrainSessionSubsystem* Session = GetSession(GetWorld()))
+	{
+		Session->AckBrainEvent(Ev.Seq);
 	}
 }
 
@@ -125,7 +127,7 @@ void UAILiveProjectSpeakDispatcher::DispatchOne(const FAIL_SpeechPublicEvent& Ev
 			TEXT("Speech rejected actor=%s seq=%lld reason=%s"),
 			*Ev.ActorId, Ev.Seq,
 			*AILiveProtocol::RejectReasonToWire(Reject.RejectReason));
-		Session->GetClient()->PostIngressReject(Session->GetGameId(), Reject).Next([](bool) {});
+		Session->SendIngressReject(Reject);
 		return;
 	}
 

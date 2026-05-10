@@ -13,6 +13,7 @@ public class AILiveProject : ModuleRules
 			"Engine",
 			"InputCore",
 			"HTTP",
+			"WebSockets",
 			"Json",
 			"JsonUtilities",
 			"ACERuntime",

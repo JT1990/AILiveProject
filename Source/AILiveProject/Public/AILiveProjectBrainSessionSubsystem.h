@@ -1,11 +1,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AILiveProtocolTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "TimerManager.h"
 #include "Templates/PimplPtr.h"
 #include "AILiveProjectBrainSessionSubsystem.generated.h"
 
 class FAILiveProjectBrainHttpClient;
+class FAILiveProjectBrainWsClient;
 
 /**
  * Owns the BrainService HTTP client, the in-memory game_id, and orchestrates
@@ -17,12 +20,11 @@ class FAILiveProjectBrainHttpClient;
  * roster_register call (schema requires minItems: 1).
  *
  * Sequence (each step waits for the previous future to resolve on GameThread):
- *   1. Health  — verify protocol_version == "0.1.1" or fatal log + abort.
- *   2. Create  — POST /v1/games, store game_id in memory only.
- *   3. Roster  — enumerate IAILiveAgent Pawns + POST /roster.
- *   4. Polling — start WorldStateCollector / ActionDispatcher /
- *                SpeakDispatcher timers (those subsystems are created on
- *                demand by the World; this subsystem just signals readiness).
+ *   1. Health  — verify protocol_version == "0.2.0" or fatal log + abort.
+ *   2. WebSocket connect to BrainService.
+ *   3. Create  — session.create over WebSocket, store game_id in memory only.
+ *   4. Roster  — enumerate IAILiveAgent Pawns + roster.register.
+ *   5. Runtime — start world-state sampling; action/speech arrive by push.
  */
 UCLASS()
 class AILIVEPROJECT_API UAILiveProjectBrainSessionSubsystem : public UGameInstanceSubsystem
@@ -36,6 +38,13 @@ public:
 	bool IsReady() const { return bReady; }
 	const FString& GetGameId() const { return GameId; }
 	FAILiveProjectBrainHttpClient* GetClient() const { return Client.Get(); }
+	FAILiveProjectBrainWsClient* GetWsClient() const { return WsClient.Get(); }
+
+	bool SendWorldState(const FAIL_WorldStatePushRequest& Req);
+	bool SendActionResult(const FAIL_ActionResultRequest& Req);
+	bool SendSpeechResult(const FAIL_SpeechResultRequest& Req);
+	bool SendIngressReject(const FAIL_IngressRejectRequest& Req);
+	bool AckBrainEvent(int64 Seq);
 
 	/**
 	 * Trigger from GM_Sandbox BP BeginPlay (preferred) or rely on the
@@ -47,16 +56,21 @@ public:
 
 private:
 	void Phase1_HealthCheck();
-	void Phase2_CreateSession();
-	void Phase3_RegisterRoster();
-	void Phase4_StartPolling();
+	void Phase2_ConnectWebSocket();
+	void Phase3_CreateSession();
+	void Phase4_RegisterRoster();
+	void Phase5_StartRuntime();
+	void ScheduleReconnect();
+	void InstallWebSocketHandlers();
 
 	void OnWorldBeginPlayHook(UWorld* World);
 
 	TPimplPtr<FAILiveProjectBrainHttpClient> Client;
+	TPimplPtr<FAILiveProjectBrainWsClient> WsClient;
 	FString GameId;
 	FString ProtocolVersion;
 	bool bReady = false;
 	bool bHandshakeInFlight = false;
 	FDelegateHandle WorldInitDelegateHandle;
+	FTimerHandle ReconnectTimerHandle;
 };

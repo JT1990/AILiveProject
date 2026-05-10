@@ -3,7 +3,7 @@
 #include "CoreMinimal.h"
 #include "AILiveProtocolTypes.generated.h"
 
-// USTRUCT mirrors of BrainService protocol v0.1.1 schemas (12 schemas, 30+ structs).
+// USTRUCT mirrors of BrainService protocol v0.2.0 schemas (12 schemas, 30+ structs).
 // All names are FAIL_* prefixed to avoid collision with engine / project types.
 //
 // Nullable / optional schema fields use the "bool flag + value" pattern because

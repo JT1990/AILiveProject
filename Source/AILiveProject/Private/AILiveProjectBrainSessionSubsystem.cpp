@@ -2,6 +2,7 @@
 
 #include "AILiveProjectActionDispatcher.h"
 #include "AILiveProjectBrainHttpClient.h"
+#include "AILiveProjectBrainWsClient.h"
 #include "AILiveProjectLog.h"
 #include "AILiveProjectRosterSubsystem.h"
 #include "AILiveProjectSettings.h"
@@ -11,6 +12,7 @@
 #include "Async/Async.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "TimerManager.h"
 
 void UAILiveProjectBrainSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -23,6 +25,10 @@ void UAILiveProjectBrainSessionSubsystem::Initialize(FSubsystemCollectionBase& C
 		Settings->HttpTimeoutMs,
 		Settings->MaxRetries,
 		Settings->RetryBackoffBaseSeconds);
+	WsClient = MakePimpl<FAILiveProjectBrainWsClient>(
+		Settings->BrainWebSocketUrl,
+		Settings->BrainApiToken);
+	InstallWebSocketHandlers();
 
 	// Auto-hook PIE / standalone game world creation so the handshake fires
 	// even when GM_Sandbox BP doesn't call StartHandshake explicitly. We
@@ -64,6 +70,14 @@ void UAILiveProjectBrainSessionSubsystem::Deinitialize()
 		FWorldDelegates::OnPostWorldInitialization.Remove(WorldInitDelegateHandle);
 		WorldInitDelegateHandle.Reset();
 	}
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ReconnectTimerHandle);
+	}
+	if (WsClient)
+	{
+		WsClient->Close();
+	}
 	if (Client)
 	{
 		Client->CancelAllInFlight();
@@ -71,6 +85,7 @@ void UAILiveProjectBrainSessionSubsystem::Deinitialize()
 	bReady = false;
 	bHandshakeInFlight = false;
 	GameId.Reset();
+	WsClient.Reset();
 	Client.Reset();
 
 	if (UGameInstance* GI = GetGameInstance())
@@ -115,48 +130,43 @@ void UAILiveProjectBrainSessionSubsystem::Phase1_HealthCheck()
 				This->bHandshakeInFlight = false;
 				return;
 			}
-			if (Resp->ProtocolVersion != TEXT("0.1.1"))
+			if (Resp->ProtocolVersion != TEXT("0.2.0"))
 			{
 				UE_LOG(LogAILiveBrain, Fatal,
-					TEXT("Brain protocol_version mismatch: got '%s' expected '0.1.1'"),
+					TEXT("Brain protocol_version mismatch: got '%s' expected '0.2.0'"),
 					*Resp->ProtocolVersion);
 				This->bHandshakeInFlight = false;
 				return;
 			}
 			This->ProtocolVersion = Resp->ProtocolVersion;
 			UE_LOG(LogAILiveBrain, Log, TEXT("Health OK protocol_version=%s"), *Resp->ProtocolVersion);
-			This->Phase2_CreateSession();
+			This->Phase2_ConnectWebSocket();
 		});
 	});
 }
 
-void UAILiveProjectBrainSessionSubsystem::Phase2_CreateSession()
+void UAILiveProjectBrainSessionSubsystem::Phase2_ConnectWebSocket()
 {
-	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 2: CreateSession"));
-	TWeakObjectPtr<UAILiveProjectBrainSessionSubsystem> WeakThis(this);
-	FAIL_SessionCreateRequest Req;
-	Client->CreateSession(Req).Next([WeakThis](TOptional<FAIL_SessionCreateResponse> Resp)
+	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 2: ConnectWebSocket"));
+	if (!WsClient)
 	{
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, Resp]()
-		{
-			UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
-			if (!This) { return; }
-			if (!Resp.IsSet())
-			{
-				UE_LOG(LogAILiveBrain, Error, TEXT("CreateSession failed; aborting handshake"));
-				This->bHandshakeInFlight = false;
-				return;
-			}
-			This->GameId = Resp->GameId;
-			UE_LOG(LogAILiveBrain, Log, TEXT("Session created game_id=%s"), *This->GameId);
-			This->Phase3_RegisterRoster();
-		});
-	});
+		UE_LOG(LogAILiveBrain, Error, TEXT("WebSocket client missing; aborting handshake"));
+		bHandshakeInFlight = false;
+		return;
+	}
+	WsClient->Connect();
 }
 
-void UAILiveProjectBrainSessionSubsystem::Phase3_RegisterRoster()
+void UAILiveProjectBrainSessionSubsystem::Phase3_CreateSession()
 {
-	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 3: RegisterRoster"));
+	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 3: CreateSession over WebSocket"));
+	FAIL_SessionCreateRequest Req;
+	WsClient->SendSessionCreate(Req);
+}
+
+void UAILiveProjectBrainSessionSubsystem::Phase4_RegisterRoster()
+{
+	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 4: RegisterRoster over WebSocket"));
 
 	UGameInstance* GI = GetGameInstance();
 	UAILiveProjectRosterSubsystem* Roster = GI ? GI->GetSubsystem<UAILiveProjectRosterSubsystem>() : nullptr;
@@ -197,33 +207,153 @@ void UAILiveProjectBrainSessionSubsystem::Phase3_RegisterRoster()
 		Req.Roster.Add(MoveTemp(Entry));
 	}
 
-	TWeakObjectPtr<UAILiveProjectBrainSessionSubsystem> WeakThis(this);
-	Client->RegisterRoster(GameId, Req).Next([WeakThis, Registered](TOptional<FAIL_RosterRegisterResponse> Resp)
-	{
-		AsyncTask(ENamedThreads::GameThread, [WeakThis, Resp, Registered]()
-		{
-			UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
-			if (!This) { return; }
-			if (!Resp.IsSet())
-			{
-				UE_LOG(LogAILiveBrain, Error, TEXT("RegisterRoster failed; aborting handshake"));
-				This->bHandshakeInFlight = false;
-				return;
-			}
-			UE_LOG(LogAILiveBrain, Log, TEXT("Roster registered count=%d"), Resp->AcceptedCount);
-			This->bReady = true;
-			This->bHandshakeInFlight = false;
-			This->Phase4_StartPolling();
-		});
-	});
+	WsClient->SendRosterRegister(GameId, Req);
 }
 
-void UAILiveProjectBrainSessionSubsystem::Phase4_StartPolling()
+void UAILiveProjectBrainSessionSubsystem::Phase5_StartRuntime()
 {
-	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 4: StartPolling"));
+	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 5: StartRuntime"));
 	UWorld* World = GetWorld();
 	if (!World) { return; }
 	if (auto* C = World->GetSubsystem<class UAILiveProjectWorldStateCollector>()) { C->StartPolling(); }
-	if (auto* A = World->GetSubsystem<class UAILiveProjectActionDispatcher>())     { A->StartPolling(); }
-	if (auto* S = World->GetSubsystem<class UAILiveProjectSpeakDispatcher>())      { S->StartPolling(); }
+}
+
+void UAILiveProjectBrainSessionSubsystem::InstallWebSocketHandlers()
+{
+	if (!WsClient) { return; }
+	TWeakObjectPtr<UAILiveProjectBrainSessionSubsystem> WeakThis(this);
+
+	WsClient->SetOnConnected([WeakThis]()
+	{
+		UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
+		if (!This || !This->WsClient) { return; }
+		if (UWorld* World = This->GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(This->ReconnectTimerHandle);
+		}
+		if (This->GameId.IsEmpty())
+		{
+			This->Phase3_CreateSession();
+		}
+		else
+		{
+			This->WsClient->SendSessionResume(This->GameId, This->WsClient->GetLastBrainSeq());
+		}
+	});
+
+	WsClient->SetOnClosed([WeakThis]()
+	{
+		UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
+		if (!This) { return; }
+		This->bReady = false;
+		This->bHandshakeInFlight = false;
+		This->ScheduleReconnect();
+	});
+
+	WsClient->SetOnSessionCreated([WeakThis](const FAIL_SessionCreateResponse& Resp)
+	{
+		UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
+		if (!This) { return; }
+		const bool bResume = !This->GameId.IsEmpty() && This->GameId == Resp.GameId;
+		This->GameId = Resp.GameId;
+		UE_LOG(LogAILiveBrain, Log, TEXT("WebSocket session ready game_id=%s"), *This->GameId);
+		if (bResume)
+		{
+			This->bReady = true;
+			This->bHandshakeInFlight = false;
+			This->Phase5_StartRuntime();
+		}
+		else
+		{
+			This->Phase4_RegisterRoster();
+		}
+	});
+
+	WsClient->SetOnRosterAccepted([WeakThis](const FAIL_RosterRegisterResponse& Resp)
+	{
+		UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
+		if (!This) { return; }
+		UE_LOG(LogAILiveBrain, Log, TEXT("Roster registered count=%d"), Resp.AcceptedCount);
+		This->bReady = true;
+		This->bHandshakeInFlight = false;
+		This->Phase5_StartRuntime();
+	});
+
+	WsClient->SetOnActionIntent([WeakThis](const FAIL_ActionIntentEvent& Ev)
+	{
+		UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
+		UWorld* World = This ? This->GetWorld() : nullptr;
+		if (!World) { return; }
+		if (UAILiveProjectActionDispatcher* D = World->GetSubsystem<UAILiveProjectActionDispatcher>())
+		{
+			D->HandleBrainActionIntent(Ev);
+		}
+	});
+
+	WsClient->SetOnActionCancelled([WeakThis](int64 CancelSeq, int64 SourceIntentSeq, const FString& ActorId)
+	{
+		UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
+		UWorld* World = This ? This->GetWorld() : nullptr;
+		if (!World) { return; }
+		if (UAILiveProjectActionDispatcher* D = World->GetSubsystem<UAILiveProjectActionDispatcher>())
+		{
+			D->HandleBrainActionCancelled(CancelSeq, SourceIntentSeq, ActorId);
+		}
+	});
+
+	WsClient->SetOnSpeechPublic([WeakThis](const FAIL_SpeechPublicEvent& Ev)
+	{
+		UAILiveProjectBrainSessionSubsystem* This = WeakThis.Get();
+		UWorld* World = This ? This->GetWorld() : nullptr;
+		if (!World) { return; }
+		if (UAILiveProjectSpeakDispatcher* D = World->GetSubsystem<UAILiveProjectSpeakDispatcher>())
+		{
+			D->HandleBrainSpeechPublic(Ev);
+		}
+	});
+}
+
+void UAILiveProjectBrainSessionSubsystem::ScheduleReconnect()
+{
+	UWorld* World = GetWorld();
+	if (!World || !WsClient) { return; }
+	if (World->GetTimerManager().IsTimerActive(ReconnectTimerHandle)) { return; }
+
+	const UAILiveProjectSettings* Settings = GetDefault<UAILiveProjectSettings>();
+	const float Delay = FMath::Max(Settings->WebSocketReconnectBaseMs, 500) / 1000.f;
+	UE_LOG(LogAILiveBrain, Warning, TEXT("Scheduling Brain WebSocket reconnect in %.2fs"), Delay);
+	World->GetTimerManager().SetTimer(ReconnectTimerHandle,
+		FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			if (WsClient)
+			{
+				WsClient->Connect();
+			}
+		}),
+		Delay, false);
+}
+
+bool UAILiveProjectBrainSessionSubsystem::SendWorldState(const FAIL_WorldStatePushRequest& Req)
+{
+	return WsClient && bReady && WsClient->SendWorldState(GameId, Req);
+}
+
+bool UAILiveProjectBrainSessionSubsystem::SendActionResult(const FAIL_ActionResultRequest& Req)
+{
+	return WsClient && bReady && WsClient->SendActionResult(GameId, Req);
+}
+
+bool UAILiveProjectBrainSessionSubsystem::SendSpeechResult(const FAIL_SpeechResultRequest& Req)
+{
+	return WsClient && bReady && WsClient->SendSpeechResult(GameId, Req);
+}
+
+bool UAILiveProjectBrainSessionSubsystem::SendIngressReject(const FAIL_IngressRejectRequest& Req)
+{
+	return WsClient && bReady && WsClient->SendIngressReject(GameId, Req);
+}
+
+bool UAILiveProjectBrainSessionSubsystem::AckBrainEvent(int64 Seq)
+{
+	return WsClient && !GameId.IsEmpty() && WsClient->AckEvent(GameId, Seq);
 }

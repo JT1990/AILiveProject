@@ -20,7 +20,7 @@
  * The collector emits a single transport request per tick; brain fans the
  * payload out into per-event rows (sight / hearing / actor_state / sample).
  *
- * ENTER/EXIT diff is intentionally NOT collected — schema 0.1.1 does not
+ * ENTER/EXIT diff is intentionally NOT collected — the current schema does not
  * carry that field; brain derives ENTER/EXIT from successive sample diffs.
  */
 UCLASS()

@@ -78,7 +78,7 @@ bool FAILiveProtocolRoundTrip_Health::RunTest(const FString&)
 		FAIL_HealthResponse Parsed;
 		AILiveProtocol::FromJsonString(Json, Parsed);
 		TestEqual(TEXT("status"),           Parsed.Status,          FString(TEXT("ok")));
-		TestEqual(TEXT("protocol_version"), Parsed.ProtocolVersion, FString(TEXT("0.1.1")));
+		TestEqual(TEXT("protocol_version"), Parsed.ProtocolVersion, FString(TEXT("0.2.0")));
 	}
 	return Ok;
 }

@@ -8,12 +8,11 @@
 class APawn;
 
 /**
- * Pulls speech.public events from BrainService and routes them through
+ * Receives speech.public events from BrainService WebSocket and routes them through
  * UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoiseEx (Stage F
  * extended API with completion delegate).
  *
- * Independent of ActionDispatcher: separate polling timer, separate
- * LastSpeechSeq high-watermark, separate ActiveSpeechByActorId map. Schema
+ * Independent of ActionDispatcher: separate active speech map. Schema
  * isolation is enforced at the brain side; UE just keeps the channels
  * disjoint.
  */
@@ -25,6 +24,7 @@ class AILIVEPROJECT_API UAILiveProjectSpeakDispatcher : public UWorldSubsystem
 public:
 	void StartPolling();
 	void StopPolling();
+	void HandleBrainSpeechPublic(const FAIL_SpeechPublicEvent& Ev);
 
 	bool HasSpeechForPawn(APawn* Pawn) const;
 

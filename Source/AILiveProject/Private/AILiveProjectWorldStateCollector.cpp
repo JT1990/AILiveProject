@@ -33,11 +33,11 @@ void UAILiveProjectWorldStateCollector::StartPolling()
 	UWorld* World = GetWorld();
 	if (!World) { return; }
 	const UAILiveProjectSettings* Settings = GetDefault<UAILiveProjectSettings>();
-	const float Interval = FMath::Max(Settings->PollingIntervalWorldStateMs, 100) / 1000.f;
+	const float Interval = FMath::Max(Settings->WorldStateSampleIntervalMs, 100) / 1000.f;
 	World->GetTimerManager().SetTimer(TimerHandle,
 		FTimerDelegate::CreateUObject(this, &UAILiveProjectWorldStateCollector::TickPush),
 		Interval, true, 0.f);
-	UE_LOG(LogAILiveBrain, Log, TEXT("WorldStateCollector polling every %.3fs"), Interval);
+	UE_LOG(LogAILiveBrain, Log, TEXT("WorldStateCollector sampling every %.3fs"), Interval);
 }
 
 void UAILiveProjectWorldStateCollector::StopPolling()
@@ -57,7 +57,7 @@ void UAILiveProjectWorldStateCollector::TickPush()
 	if (!GI) { return; }
 	UAILiveProjectBrainSessionSubsystem* Session = GI->GetSubsystem<UAILiveProjectBrainSessionSubsystem>();
 	UAILiveProjectRosterSubsystem* Roster       = GI->GetSubsystem<UAILiveProjectRosterSubsystem>();
-	if (!Session || !Roster || !Session->IsReady() || !Session->GetClient()) { return; }
+	if (!Session || !Roster || !Session->IsReady()) { return; }
 	if (bPushInFlight) { return; }
 
 	UAILiveProjectActionDispatcher* ActionDispatcher = World->GetSubsystem<UAILiveProjectActionDispatcher>();
@@ -136,18 +136,7 @@ void UAILiveProjectWorldStateCollector::TickPush()
 
 	if (Req.Observations.Num() == 0) { return; }
 
-	FAILiveProjectBrainHttpClient* Client = Session->GetClient();
-	const FString GameId = Session->GetGameId();
 	bPushInFlight = true;
-	TWeakObjectPtr<UAILiveProjectWorldStateCollector> WeakThis(this);
-	Client->PushWorldState(GameId, Req).Next([WeakThis](bool /*bOk*/)
-	{
-		AsyncTask(ENamedThreads::GameThread, [WeakThis]()
-		{
-			if (UAILiveProjectWorldStateCollector* This = WeakThis.Get())
-			{
-				This->bPushInFlight = false;
-			}
-		});
-	});
+	Session->SendWorldState(Req);
+	bPushInFlight = false;
 }

@@ -25,8 +25,8 @@ struct FAIL_ActiveAction
 };
 
 /**
- * Pulls action.intent events from BrainService, validates via IngressValidator,
- * and routes to physical primitives:
+ * Receives action.intent events from BrainService WebSocket, validates via
+ * IngressValidator, and routes to physical primitives:
  *   - move_to: SandboxCharacter_Mover.MoveAndLookAtLocation BP function (reflection)
  *   - sit:     AIC_NPC_SmartObject.UseSmartObjectAndNotify BP function (reflection)
  *   - wait:    no-op + immediate completion
@@ -49,6 +49,8 @@ class AILIVEPROJECT_API UAILiveProjectActionDispatcher : public UWorldSubsystem
 public:
 	void StartPolling();
 	void StopPolling();
+	void HandleBrainActionIntent(const FAIL_ActionIntentEvent& Ev);
+	void HandleBrainActionCancelled(int64 CancelSeq, int64 SourceIntentSeq, const FString& ActorId);
 
 	// WorldStateCollector queries to derive current_action.
 	bool HasActionForPawn(APawn* Pawn) const;

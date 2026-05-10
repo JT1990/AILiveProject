@@ -9,7 +9,7 @@ class IHttpRequest;
 using FHttpRequestPtr = TSharedPtr<IHttpRequest, ESPMode::ThreadSafe>;
 
 /**
- * Async HTTP client wrapping the BrainService 0.1.1 routes.
+ * Async HTTP client wrapping BrainService health and legacy debug routes.
  *
  * Owned by UAILiveProjectBrainSessionSubsystem (one per GameInstance). Not a
  * UObject — TPimplPtr held by the subsystem.

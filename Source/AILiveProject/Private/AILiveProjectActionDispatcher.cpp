@@ -108,14 +108,7 @@ void UAILiveProjectActionDispatcher::Deinitialize()
 
 void UAILiveProjectActionDispatcher::StartPolling()
 {
-	UWorld* World = GetWorld();
-	if (!World) { return; }
-	const UAILiveProjectSettings* Settings = GetDefault<UAILiveProjectSettings>();
-	const float Interval = FMath::Max(Settings->PollingIntervalActionMs, 50) / 1000.f;
-	World->GetTimerManager().SetTimer(TimerHandle,
-		FTimerDelegate::CreateUObject(this, &UAILiveProjectActionDispatcher::TickPull),
-		Interval, true, 0.f);
-	UE_LOG(LogAILiveBrain, Log, TEXT("ActionDispatcher polling every %.3fs"), Interval);
+	UE_LOG(LogAILiveBrain, Log, TEXT("ActionDispatcher uses WebSocket push; polling timer not started"));
 }
 
 void UAILiveProjectActionDispatcher::StopPolling()
@@ -123,6 +116,45 @@ void UAILiveProjectActionDispatcher::StopPolling()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(TimerHandle);
+	}
+}
+
+void UAILiveProjectActionDispatcher::HandleBrainActionIntent(const FAIL_ActionIntentEvent& Ev)
+{
+	DispatchOne(Ev);
+	if (UAILiveProjectBrainSessionSubsystem* Session = GetSession(GetWorld()))
+	{
+		Session->AckBrainEvent(Ev.Seq);
+	}
+}
+
+void UAILiveProjectActionDispatcher::HandleBrainActionCancelled(
+	int64 CancelSeq, int64 SourceIntentSeq, const FString& ActorId)
+{
+	if (SourceIntentSeq >= 0)
+	{
+		FString ActorToStop;
+		for (const TPair<FString, FAIL_ActiveAction>& Pair : ActiveByActorId)
+		{
+			if (Pair.Value.IntentSeq == SourceIntentSeq)
+			{
+				ActorToStop = Pair.Key;
+				break;
+			}
+		}
+		if (!ActorToStop.IsEmpty())
+		{
+			StopActiveAction(ActorToStop);
+		}
+	}
+	else if (!ActorId.IsEmpty())
+	{
+		StopActiveAction(ActorId);
+	}
+
+	if (UAILiveProjectBrainSessionSubsystem* Session = GetSession(GetWorld()))
+	{
+		Session->AckBrainEvent(CancelSeq);
 	}
 }
 
@@ -187,7 +219,7 @@ void UAILiveProjectActionDispatcher::DispatchOne(const FAIL_ActionIntentEvent& E
 			*Ev.ActorId, Ev.Seq,
 			*AILiveProtocol::RejectReasonToWire(Reject.RejectReason),
 			*Reject.RawMessageSnippet);
-		Session->GetClient()->PostIngressReject(Session->GetGameId(), Reject).Next([](bool) {});
+		Session->SendIngressReject(Reject);
 		return;
 	}
 

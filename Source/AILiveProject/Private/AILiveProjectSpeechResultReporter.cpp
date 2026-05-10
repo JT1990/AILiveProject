@@ -1,6 +1,5 @@
 #include "AILiveProjectSpeechResultReporter.h"
 
-#include "AILiveProjectBrainHttpClient.h"
 #include "AILiveProjectBrainSessionSubsystem.h"
 #include "AILiveProjectLog.h"
 #include "AILiveProtocolTypes.h"
@@ -14,14 +13,14 @@ namespace
 		UGameInstance* GI = World ? World->GetGameInstance() : nullptr;
 		UAILiveProjectBrainSessionSubsystem* Session =
 			GI ? GI->GetSubsystem<UAILiveProjectBrainSessionSubsystem>() : nullptr;
-		if (!Session || !Session->IsReady() || !Session->GetClient())
+		if (!Session || !Session->IsReady())
 		{
 			UE_LOG(LogAILiveBrain, Warning,
 				TEXT("SpeechResult dropped (session not ready) actor=%s seq=%lld"),
 				*Req.ActorId, Req.SpeechSeq);
 			return;
 		}
-		Session->GetClient()->PostSpeechResult(Session->GetGameId(), Req).Next([](bool) {});
+		Session->SendSpeechResult(Req);
 	}
 }
 

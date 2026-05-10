@@ -21,22 +21,23 @@ class AILIVEPROJECT_API UAILiveProjectSettings : public UDeveloperSettings
 	GENERATED_BODY()
 
 public:
-	/** Brain HTTP server base URL (with port), no trailing slash. */
+	/** Brain HTTP base URL used only for /health. */
 	UPROPERTY(Config, EditAnywhere, Category = "Brain Service")
 	FString BrainBaseUrl = TEXT("http://127.0.0.1:8000");
+
+	/** Brain runtime WebSocket URL. UE connects out; Brain pushes events back over this socket. */
+	UPROPERTY(Config, EditAnywhere, Category = "Brain Service")
+	FString BrainWebSocketUrl = TEXT("ws://127.0.0.1:8000/v1/ws");
 
 	/** Brain Authorization Bearer token; must match brain BRAIN_API_TOKEN env. */
 	UPROPERTY(Config, EditAnywhere, Category = "Brain Service", meta = (PasswordField = true))
 	FString BrainApiToken = TEXT("dev_token");
 
-	UPROPERTY(Config, EditAnywhere, Category = "Brain Service|Polling", meta = (ClampMin = "50"))
-	int32 PollingIntervalActionMs = 200;
+	UPROPERTY(Config, EditAnywhere, Category = "Brain Service|WebSocket", meta = (ClampMin = "500"))
+	int32 WebSocketReconnectBaseMs = 1000;
 
-	UPROPERTY(Config, EditAnywhere, Category = "Brain Service|Polling", meta = (ClampMin = "50"))
-	int32 PollingIntervalSpeechMs = 200;
-
-	UPROPERTY(Config, EditAnywhere, Category = "Brain Service|Polling", meta = (ClampMin = "100"))
-	int32 PollingIntervalWorldStateMs = 500;
+	UPROPERTY(Config, EditAnywhere, Category = "Brain Service|World State", meta = (ClampMin = "100"))
+	int32 WorldStateSampleIntervalMs = 500;
 
 	UPROPERTY(Config, EditAnywhere, Category = "Brain Service|HTTP", meta = (ClampMin = "500"))
 	int32 HttpTimeoutMs = 5000;
