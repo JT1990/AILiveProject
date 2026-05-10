@@ -2,7 +2,7 @@
 
 > 主仓库：BrainService（已在 T1 初始化）
 > 前置卡：T1 ✅（协议骨架 + schema/examples + commit `76f3dd5`）
-> 下游消费者：T3（Reasoner 派生事件需走 EventStore）、T4 / T5（投影 + 召回输入）、T6（UE 端事件查询路径需要的 query_events / quote 接口）、T8（Delete 协议挂钩）
+> 下游消费者：T3（Reasoner 派生事件需走 EventStore）、T4 / T5（投影 + 召回输入）、T6（UE 端事件查询路径需要的 query_events / quote 接口）、T9 / T10（02 病毒游戏与联调）
 
 ---
 
@@ -105,13 +105,13 @@
   | -------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
   | `world.perception.sight`   | `[<observer_actor_id>]`     | `client_sample_id` / `distance_cm` / `observer_actor_id` / `rel_yaw_degrees` / `target_actor_id`（对齐 T1 `sight_entry`）                                  |
   | `world.perception.hearing` | `[<observer_actor_id>]`     | `age_seconds` / `client_sample_id` / `loudness` / `observer_actor_id` / `rel_yaw_degrees` / `source_actor_id`（对齐 T1 `heard_sound`）                     |
-  | `world.actor_state`        | `[<actor_id>]`              | `actor_id` / `client_sample_id` / `current_action` / `facing_degrees` / `inventory_summary` / `pos_x_cm` / `pos_y_cm` / `pos_z_cm`                         |
+  | `world.actor_state`        | `[<actor_id>]`              | `actor_id` / `client_sample_id` / `current_action` / `facing_degrees` / `pos_x_cm` / `pos_y_cm` / `pos_z_cm`                                               |
   | `world.client_sample`      | `["orchestrator","system"]` | `client_sample_id` / `fanout_event_count` / `sample_wall_clock_ts`（仅作 `world_state_push` 业务级幂等的审计条目；同 client_sample_id 重复 ingest 不重写） |
 
   **拆条粒度声明**：T1 已硬约束"按 observer 拆条 + visibility 行粒度过滤"。T2 的具体落实是：1 次 `world_state_push` 请求 → N 条 `world.perception.sight` + M 条 `world.perception.hearing` + K 条 `world.actor_state` + 1 条 `world.client_sample`，全部在同一原子事务内 append。`world_state_push.schema.json` 的 transport 字段名是本卡 ingestion 的唯一输入来源；不得为了匹配上表私自添加 transport 字段。
 
 - **不在 T2 freeze 范围**（留给后续卡）：
-  - 物品 / 道具相关 (`world.item.*`)：留给 T8 ontology v2 阶段
+  - 物品 / 道具相关 (`world.item.*`)：不进 MVP；后续按真实需求新增
   - 病毒游戏 `touch` 事件命名：留给 T9（00_total_plan §风险开放决策 #4 未定）
 
 - **必须把 freeze 后的 world.\* 命名 + visibility 默认值反向同步到 `BrainService/protocol/protocol.md` 附录**（"T2 冻结的 world.\* 事件类型"小节），并在 BrainService 仓 commit；UE 仓 `Docs/protocol_pointer.md` 升级 commit hash + bump `protocol_version` patch（建议 `0.1.0 → 0.1.1`，patch = 文档/澄清，不破 schema）。
@@ -156,7 +156,7 @@
   ) -> dict  # { "appended_seqs": [...], "deduplicated": bool }
   ```
 - **业务级幂等**：`client_sample_id = push_payload["client_sample_id"]`；先查 events 表中是否已存在 `event_type="world.client_sample"` 且同一 `(game_id, client_sample_id)` 的审计事件。命中则用该审计事件自身 `seq` 与 `payload.fanout_event_count` 反推连续区间，返回既有 `appended_seqs`，并返回 `deduplicated=True`，不得重写任何事件行。
-- **拆条逻辑**：见 §3.2 表。对每个 `observations[]` 元素，以 `actor_id` 作为 `observer_actor_id`：每条 `sighted_actors[]` 落一条 `world.perception.sight`，每条 `heard_sounds[]` 落一条 `world.perception.hearing`，该 observer 自身位置 / 朝向 / 当前动作 / inventory 摘要落一条 `world.actor_state`，最后追加 1 条 `world.client_sample` 审计行。
+- **拆条逻辑**：见 §3.2 表。对每个 `observations[]` 元素，以 `actor_id` 作为 `observer_actor_id`：每条 `sighted_actors[]` 落一条 `world.perception.sight`，每条 `heard_sounds[]` 落一条 `world.perception.hearing`，该 observer 自身位置 / 朝向 / 当前动作落一条 `world.actor_state`，最后追加 1 条 `world.client_sample` 审计行。
 - **单事务 atomic write**：调用 `AppendEventsAtomically` 一次提交全部派生事件 + 1 条 `world.client_sample`，整体回滚或整体落地。
 - **`wall_clock_ts`** 取自 push_payload 顶层 `sample_wall_clock_ts`（UE 端 wall-clock）；事件 `seq` 由 store 单调发号，与 wall_clock_ts 解耦。
 
@@ -223,9 +223,11 @@
 - **DB trigger 同样禁 UPDATE/DELETE** `agent_lifecycle_events`（与 events 表一致约束）。
 - **本卡不做** `delete_proposed` / `delete_vetoed` / `revived` / `archived` 的写入接口；schema 留位，调用 → `NotImplementedError`。
 
-### 3.8 局内 `system.delete_executed` 写入约束（数据层闸口）
+### 3.8 局内 `system.delete_executed` 写入约束（数据层闸口；dormant，MVP 不触发）
 
-为支撑硬验收"`_meta.db` 写入 `created`/`delete_executed` 后可被局内 `system.delete_executed` 正确引用"，在 EventStore 写入入口加额外校验：
+> 本节是 dormant capability：MVP 主线不会写入 `system.delete_executed`；闸口仅为后续具体游戏规则触发 Delete 时的数据层一致性兜底。本卡仍要把闸口落到代码并自测通过。
+
+为支撑 Delete lifecycle 的数据层一致性自测，在 EventStore 写入入口加额外校验：
 
 - 当 `event_type == "system.delete_executed"` 时，`payload.lifecycle_event_id` 必填，且必须命中 `_meta.db.agent_lifecycle_events.event_id` 中一条 `event_type="delete_executed"` 的记录；若 payload 同时携带 `actor_id`，还必须与 lifecycle 记录的 `actor_id` 一致。否则写入拒绝。
 - 此校验只在写入端做；查询端不再二次查 `_meta.db`，避免读路径耦合两库。
@@ -344,8 +346,8 @@
 - ❌ 不实现 HTTP server / FastAPI / aiohttp 路由（推迟到下一卡按需引入；T2 提供 Python API 即可）。
 - ❌ 不实现 Reasoner LLM 调用 / Validator / 任何 prompt 拼装（属 T3 / T5）。
 - ❌ 不实现 bid 裁决 / Listener-as-filter / 反思 9 问执行 / phase-level 摘要 worker（属 T4 / T5）。
-- ❌ 不冻结 `world.item.*` / `world.touch` 等后续游戏专属事件类型（属 T8 / T9）。
-- ❌ 不实现 ontology v2（pickup / use_item / inspect / follow / flee_from）—— 属 T8。
+- ❌ 不冻结 `world.item.*` / `world.touch` 等后续游戏专属事件类型。
+- ❌ 不预留物品、跟随、逃离等非 MVP intent；后续确有需求时再按协议升版新增。
 - ❌ 不写 02 病毒游戏专属规则（属 T9）。
 - ❌ 不动 UE C++ / Source/AILiveProject/\* / UE 资产 / 蓝图。
 - ❌ 不实现向量召回 / fact triple 抽取 / 自动 summary 覆盖原文（§三反模式表）。
@@ -426,7 +428,6 @@
 | T5       | `pending_intended` / `commitments` 投影 + `quote` / `search_history` / `my_recent_notes` / `my_recent_reflections` 召回工具                                                           |
 | T6       | 后续 brain HTTP server 接入时调用本卡 `query_events` 与 `quote` 服务 UE 端事件查询路径                                                                                                |
 | T7       | UE Dispatcher 拉 `action.intent` / `speech.public` 时可复用 `query_events` 的 `event_type` 过滤，但执行系统要消费的事件必须在写入时显式包含 `system` visibility，不能绕过 viewer 过滤 |
-| T8       | `register_actor_deletion` + `system.delete_executed` 写入闸口；ontology v2 升级时新增 intent 写入到 `action.intent`                                                                   |
 | T9 / T10 | 病毒游戏专属事件类型（如 `world.touch`）由 T9 在 `events/types.py` 追加；`commitments` 投影规则可能扩展                                                                               |
 
 ---
@@ -442,11 +443,11 @@
 - **`prev_hash` 起始值约定**：每个 `game_id` 第一条事件 `prev_hash = "0" * 64`；`verify_chain` 起点也用此值。这个常量必须在 `hashchain.py` 顶部 const 声明，避免散落多处。
 - **`wall_clock_ts` 不参与排序**（§4.1.1）：`seq` 是唯一排序键。索引、查询、投影一律用 `seq` 排序；`wall_clock_ts` 仅信息性返回。
 - **同库分行 vs per-game 分库**：T2 用同库分行（schema 简单 + 跨局查询统一），通过 `(game_id, seq)` 复合索引访问。优势是 `_meta.db` 跨局查询无需 attach；劣势是单 db 体积随时间累积——MVP 不是问题，后续按需分文件。
-- **`_meta.db` 与 events 同一进程同事务？**：MVP 用两个独立 sqlite 文件 + 各自连接；写 `system.delete_executed` 时**先**写 `_meta.db.agent_lifecycle_events` 拿到 event_id，**再**写本局 events 表（payload 引用此 id）；两阶段写不在同一事务，但 `_meta.db` 写入幂等（uuid v4 主键 + INSERT OR IGNORE 不适用于 uuid 唯一），需要 \_meta 写入失败 → 不进入第二阶段。这是数据层闸口的硬要求。
+- **`_meta.db` 与 events 同一进程同事务？**：当前用两个独立 sqlite 文件 + 各自连接；写 `system.delete_executed` 时**先**写 `_meta.db.agent_lifecycle_events` 拿到 event_id，**再**写本局 events 表（payload 引用此 id）；两阶段写不在同一事务，但 `_meta.db` 写入幂等（uuid v4 主键 + INSERT OR IGNORE 不适用于 uuid 唯一），需要 \_meta 写入失败 → 不进入第二阶段。这是数据层闸口的硬要求。
 - **commitments 三源不能漏**：§6.4 明确要求扫 (a) `speech.public` (b) 自己未抢中 `speech.intended` (c) Reflection 9 问第 5/6/7/8 项产物。漏一源就构成防赖账漏洞——测试必须三源各至少一条 fixture 命中。
 - **`speech_act_type` 不属 base event**（§4.1.4）：commitments / accusations 投影读 `speech_act_type` 时**只能** join `annotation.speech_act.parent_event_id`，**不得** UPDATE 原发言事件填字段。投影代码必须走 join 路径。
 - **投影是纯函数**（§4.2）：投影代码只读、不写、不调 LLM。投影可重建，事件流不可丢。投影代码不允许有任何 `db.execute("INSERT/UPDATE/DELETE")` 调用——CI 应有静态检查或 review 手抓。
-- **跨局 actor_id 不可复用的边界**：`affects_persona_continuity=False` 的 `delete_executed` 不阻止复用（MVP 全部默认 True，但接口留位）。
+- **跨局 actor_id 不可复用的边界**：`affects_persona_continuity=False` 的 `delete_executed` 不阻止复用；当前默认 True。
 - **`world.client_sample` 不是 `world.perception.*` 的一部分**：它只是审计标记，visibility 限 `["orchestrator", "system"]`；不进入任何 NPC 视角的 prompt。
 - **不在本卡引入 protocol_version 的 minor bump**：T2 只追加 `world.*` 事件类型枚举（数据层落库 event_type 命名）+ visibility 模板附录；不改 T1 已冻结的 schema 字段，因此 patch（`0.1.1`）足够。如果发现 T1 schema 需要调整 world_state_push 字段以贴合拆条 —— 那是 T1 schema 漏洞，按 minor 升 + 评审记录。
 - **测试 fixture 必须含 unicode**：fixture JSON 包含中文 / emoji / 控制字符，验证 canonical + 哈希链 + viewer 隔离不被字符集影响。

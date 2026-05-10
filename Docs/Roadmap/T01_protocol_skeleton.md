@@ -90,7 +90,7 @@
   - `GET  /health` —— 健康检查（brain 端进程是否在线，响应含当前 `protocol_version`）。
   - `POST /v1/games` —— **session 握手**：UE 启动 PIE 时调一次，brain 创建新 game session、生成 `game_id`、返回 `{ game_id, protocol_version, server_time }`。**这是 UE 拿到合法 game_id 的唯一入口**，没有它后续 endpoint 都打不开。
   - `POST /v1/games/{game_id}/roster` —— UE 注册当局 roster（actor_id → metadata，含 Pawn 显示名、初始位置、阵营占位）。`game_id` 必须由 `POST /v1/games` 返回。
-  - `POST /v1/games/{game_id}/world_state` —— UE 周期推送世界状态。**这是 transport 层，不是 EventStore 行**：单次请求 body 含全部在场 NPC 的 per-actor 观测（sight/hearing/位置/朝向/当前动作/inventory 摘要）；brain 落库时必须按 observer 拆成独立事件行（每个 actor 的每条 sight / hearing 一行），**不得整包持久化**（memory_principles §硬约束 6 视角隔离行粒度）。**拆条后落成的具体 event_type（如 `world.perception.sight` / `world.perception.hearing` 等）由 T2 数据层卡片冻结**——T1 不预先约束 event_type 命名，仅约束"必须按 observer 拆条 + visibility 行粒度过滤"的拆分语义。
+  - `POST /v1/games/{game_id}/world_state` —— UE 周期推送世界状态。**这是 transport 层，不是 EventStore 行**：单次请求 body 含全部在场 NPC 的 per-actor 观测（sight/hearing/位置/朝向/当前动作）；brain 落库时必须按 observer 拆成独立事件行（每个 actor 的每条 sight / hearing 一行），**不得整包持久化**（memory_principles §硬约束 6 视角隔离行粒度）。**拆条后落成的具体 event_type（如 `world.perception.sight` / `world.perception.hearing` 等）由 T2 数据层卡片冻结**——T1 不预先约束 event_type 命名，仅约束"必须按 observer 拆条 + visibility 行粒度过滤"的拆分语义。
   - `GET  /v1/games/{game_id}/actions/pull?since_seq=N` —— UE 拉取 `seq > N` 的待执行 `action.intent` 列表（仅 ontology v1：move_to / sit / wait）。响应含 `next_cursor`。
   - `POST /v1/games/{game_id}/actions/result` —— UE 上报 action **自然完成结果**（仅 `outcome ∈ {succeeded, failed}`），brain 写入 `action.resolved`。**`action.cancelled` 与 `action.resolved` 是互斥终态**（memory_principles §5.4.2）：当旧 action 被新 intent 覆盖时，brain 在派生新 intent 的同一事务内已写好 `action.cancelled`，UE 仅负责物理停止旧动作，**绝不上报旧 intent 的 result**（不存在 `outcome=interrupted` 这种状态）。每个 in-progress action 一生只有一条终态事件——cancelled 或 resolved 二选一。**仅承载 ontology v1 物理动作，不含 speak**。
   - `GET  /v1/games/{game_id}/speech/pull?since_seq=N` —— UE 拉取 `seq > N` 的待播报 `speech.public` 列表。**与 action 通道完全平行的独立路由**。
@@ -184,7 +184,7 @@
 - ❌ 不写 UE C++ USTRUCT / `UAILiveProjectSettings` / HTTP polling 客户端（属 T6）。
 - ❌ 不实现 brain HTTP server 路由代码（属 T2 后期或独立子任务）。
 - ❌ 不动任何 UE 资产 / Source/AILiveProject/\* 代码（除了创建 `Docs/protocol_pointer.md`）。
-- ❌ 不写 ontology v2（pickup / use_item / inspect / follow / flee_from）—— 属 T8。
+- ❌ 不预留物品、跟随、逃离等非 MVP intent；后续确有需求时再按协议升版新增。
 - ❌ 不在 `protocol.md` 写病毒游戏专属规则（属 T9）。
 - ❌ 不配置 Python venv / `requirements.txt` / `pyproject.toml`（留给 T2 起步时按需选）。
 
@@ -245,7 +245,6 @@
 | T4 / T5 (Brain 协议层余下) | 同 T3                                                                                                  |
 | T6 (UE 协议基础设施)       | 全部 schemas + examples（写 UE USTRUCT 镜像 + round-trip 测试）；`Docs/protocol_pointer.md` 是单一指针 |
 | T7 (UE Dispatcher)         | `action_pull.schema.json` / `speech_pull.schema.json` 的硬边界                                         |
-| T8 (物品 / Delete)         | T8 启动时升 `protocol_version → 0.2.0` 引入 ontology v2，但 T1 不写 v2 内容                            |
 | T9 / T10 (病毒游戏)        | T9 启动时按需在 `protocol.md` 加病毒游戏专属附录或独立 game schema 文件                                |
 
 ---
@@ -253,7 +252,7 @@
 ## 8. 风险与已知坑
 
 - **协议改动只能在 BrainService 提**：UE 仓的 `Docs/protocol_pointer.md` 只能跟随 BrainService 的版本。任何在 UE 端"先改 USTRUCT 再去同步 schema"的做法都会破坏单一真相源。
-- **`protocol_version` 必须 semver**：T8 / T9 阶段升 ontology / 加 game 专属字段时，按 minor 升；breaking 改才升 major。`protocol.md` 顶部要写"如何升版本"。
+- **`protocol_version` 必须 semver**：T9 或后续阶段加 game 专属字段时，按 minor 升；breaking 改才升 major。`protocol.md` 顶部要写"如何升版本"。
 - **`actor_id` 永久不可复用**：根据 memory_principles §7.3，被 Delete 的 actor_id 在跨局也不能复用。`protocol.md` 应在 actor_id 章节明确这点（即使 T1 不实现 lifecycle store，也要写下契约）。
 - **`viewer` 不允许 `self`**：硬约束 5。所有 schema 不得让 `self` 字符串通过。
 - **HTTP polling 间隔不写死**：`protocol.md` 给建议值 200ms，但说明"实际值由 UE 端 `UAILiveProjectSettings` 配置"。
@@ -301,7 +300,7 @@
 - 不实现 EventStore / Reasoner / Validator / 任何 LLM 调用 / brain HTTP server 路由代码（属 T2 / T3）。
 - 不写 UE C++ USTRUCT / Settings / HTTP 客户端（属 T6）。
 - 不动 UE 资产 / Source/AILiveProject/* 任何代码。
-- 不引入 ontology v2（pickup / use_item / inspect / follow / flee_from）—— 属 T8。
+- 不预留物品、跟随、逃离等非 MVP intent；后续确有需求时再按协议升版新增。
 - 不写 02 病毒游戏专属规则—— 属 T9。
 - 不配置 Python venv / 装依赖。
 

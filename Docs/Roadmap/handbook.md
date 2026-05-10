@@ -43,20 +43,17 @@
 
 ---
 
-## 1. 子任务卡片清单（10 张）
+## 1. 子任务卡片清单（7 张）
 
-| 卡号    | 名称                                                                          | 合并自原子号                  | 主仓库                    | 状态 |
-| ------- | ----------------------------------------------------------------------------- | ----------------------------- | ------------------------- | ---- |
-| **T1**  | 协议骨架定稿 + BrainService 仓库初始化                                        | 0.1 + 0.1.5 + 0.2 + 0.3 + 0.4 | BrainService + UE Docs    | ✅   |
-| **T2**  | Brain 数据层骨架（EventStore + Schema + 视角隔离 + 投影 + 召回 + `_meta.db`） | 1.1–1.6 + 2.7 commitments     | BrainService              | ⬜   |
-| **T3**  | Brain Reasoner + Validator 主链                                               | 2.1 + 2.2 + 2.3               | BrainService              | ⬜   |
-| **T4**  | Brain Floor Control + Listener-as-filter                                      | 2.4 + 2.5                     | BrainService              | ⬜   |
-| **T5**  | Brain 三级反思 + prompt 拼装                                                  | 2.6 + 2.8                     | BrainService              | ⬜   |
-| **T6**  | UE 协议基础设施 + 世界状态采集                                                | 3.1 + 3.2 + 3.3 + 3.4         | UE C++                    | ⬜   |
-| **T7**  | UE 动作 / 语音 dispatcher + 完成回调 wrapper + IngressValidator + 测试键退役  | 3.5 + 3.6 + 3.7 + 3.8 + 3.9   | UE C++ + BP               | ⬜   |
-| **T8**  | 物品 / Delete / Faction 占位 / 配置整理                                       | 4.1 + 4.2 + 4.3 + 4.4 + 4.5   | UE C++ + BP + Brain       | ⬜   |
-| **T9**  | 02 病毒游戏规则 spec + Brain 机制                                             | 5.1 + 5.2                     | Brain Docs + BrainService | ⬜   |
-| **T10** | UE touch 检测 + 一局完整 PIE 联合验证                                         | 5.3 + 5.4                     | UE C++ + BP + 联调        | ⬜   |
+| 卡号       | 名称                                                                          | 合并自原子号                          | 主仓库                    | 状态 |
+| ---------- | ----------------------------------------------------------------------------- | ------------------------------------- | ------------------------- | ---- |
+| **T1**     | 协议骨架定稿 + BrainService 仓库初始化                                        | 0.1 + 0.1.5 + 0.2 + 0.3 + 0.4         | BrainService + UE Docs    | ✅   |
+| **T2**     | Brain 数据层骨架（EventStore + Schema + 视角隔离 + 投影 + 召回 + `_meta.db`） | 1.1–1.6 + 2.7 commitments             | BrainService              | ✅   |
+| **T03-5**  | Brain 协议层主链 + LLM Provider + HTTP Server                                 | 2.1 + 2.2 + 2.3 + 2.4 + 2.5 + 2.6 + 2.8 | BrainService              | ✅   |
+| **T6**     | UE 协议基础设施 + 世界状态采集                                                | 3.1 + 3.2 + 3.3 + 3.4                 | UE C++                    | ⬜   |
+| **T7**     | UE 动作 / 语音 dispatcher + 完成回调 wrapper + IngressValidator + 测试键退役  | 3.5 + 3.6 + 3.7 + 3.8 + 3.9           | UE C++ + BP               | ⬜   |
+| **T9**     | 02 病毒游戏规则 spec + Brain 机制                                             | 4.1 + 4.2                             | Brain Docs + BrainService | ⬜   |
+| **T10**    | UE touch 检测 + 一局完整 PIE 联合验证                                         | 4.3 + 4.4                             | UE C++ + BP + 联调        | ⬜   |
 
 ---
 
@@ -65,11 +62,8 @@
 ```
 T1 (协议骨架)
   ├─→ T2 (数据层骨架)
-  │     ├─→ T3 (Reasoner+Validator) ─┐
-  │     │                               ├─→ T4 (Floor+Filter)
-  │     │                               ├─→ T5 (反思+prompt)
-  │     │                               └─→ T9 (病毒规则+Brain 机制)
-  │     └─→ T8 (物品/Delete) ──→ T10
+  │     └─→ T03-5 (协议层主链 + LLM Provider + HTTP Server)
+  │             └─→ T9 (病毒规则+Brain 机制)
   ├─→ T6 (UE 基础设施 + 状态采集) ──→ T7 (UE 主体 dispatcher) ──→ T10
   └─→ T9 ──→ T10 (联合验证)
 ```
@@ -77,20 +71,19 @@ T1 (协议骨架)
 **硬约束**：
 
 - T1 必须最先（所有人共用同一份 protocol）。
-- T2 必须先于 T3（schema 决定 Validator 校验内容）。
-- T3 必须先于 T4 / T5 / T9（机制都依赖 Validator 通过的事件）。
+- T2 必须先于 T03-5（schema 决定 Validator 校验内容；EventStore 决定派生层落库路径）。
+- T03-5 必须先于 T9（病毒规则机制需要 Validator + 派生层 + HTTP server）。
 - T6 必须先于 T7（Settings + HTTP + Roster 是基础设施）。
-- T2 + T3 + T4 + T5 + T6 全部就绪后才启 T7（UE 端 dispatcher 需要 brain 派出真实事件）。
-- T8 依赖 T2（Delete 需 `_meta.db`）+ T6（UE 基础设施）。
-- T10 依赖 T7 + T8 + T9 同时就位。
+- T2 + T03-5 + T6 全部就绪后才启 T7（UE 端 dispatcher 需要 brain 派出真实事件）。
+- T10 依赖 T7 + T9 同时就位。
 
 **并行波次建议**（人类调度）：
 
-- **波 1（T1 完成后）**：T2、T6 并行起步；T9 的"5.1 规则 spec"也可写文档（不依赖任何 brain 代码）。**T3 不进波 1**——T3 依赖 T2 的 schema/事件枚举/EventStore，必须等 T2 完成。
-- **波 2（T2 完成后）**：启 T3。T6 也可在此波继续推进（T6 不依赖 T2，从波 1 继续即可）。
-- **波 3（T3 完成后）**：T4 / T5 并行；T9 的"5.2 Brain 端机制"在此波启动。
-- **波 4（T6 完成 + T3/T4/T5 全部 ✅）**：启 T7；T8 与 T7 可并行（T8 依赖 T2 + T6，不依赖 T7）。
-- **波 5（T7 + T8 + T9 全部 ✅）**：启 T10 联调。
+- **波 1（T1 完成后）**：T2、T6 并行起步；T9 的"4.1 规则 spec"也可写文档（不依赖任何 brain 代码）。**T03-5 不进波 1**——它依赖 T2 的 schema/事件枚举/EventStore。
+- **波 2（T2 完成后）**：启 T03-5。T6 也可在此波继续推进（T6 不依赖 T2，从波 1 继续即可）。
+- **波 3（T03-5 完成后）**：T9 的"4.2 Brain 端机制"在此波启动。
+- **波 4（T6 完成 + T03-5 ✅）**：启 T7。
+- **波 5（T7 + T9 全部 ✅）**：启 T10 联调。
 
 ---
 
@@ -122,7 +115,6 @@ T1 (协议骨架)
 - 传输 = HTTP polling（`FHttpModule`），不引入 SSE / WebSockets。
 - MVP 游戏 = 02 病毒游戏。
 - ontology v1 = `move_to / sit / wait`（3 个 intent）；`speak` 走 `speech.public` 独立通道，不进 ontology。
-- ontology v2 = 在 T8 阶段引入 `pickup / use_item / inspect / follow / flee_from`。
 - actor_id 命名 = `NPC01..NPC10`，与 `BP_NPC_MH_Character_1..10` 1:1 映射；viewer 封闭集合 `{public, audience, orchestrator, system, NPC<NN>, Faction<X>}`。
 - 协议真相源 = `BrainService/protocol/`（protocol.md + JSON Schema + examples）。UE 仓 `Docs/protocol_pointer.md` 记 commit hash。
 - UE 永远只 POST 上报，事件流写入由 brain 协议层完成。

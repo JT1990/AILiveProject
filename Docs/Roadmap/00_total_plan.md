@@ -21,8 +21,8 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 
 | 归属                                                       | 内容                                                                                                                                                                                                                                                   |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Brain Service（仓库 `BrainService/`，gitignored 嵌套）** | LLM provider 路由、Reasoner 四通道 schema、Validator、EventStore、视角隔离、投影、召回工具、Bid + floor control、Listener-as-filter、三级反思（含 phase-level 裁判摘要 worker）、commitments、Delete 协议、`_meta.db` lifecycle events、所有事件流写入 |
-| **UE C++ glue（本仓库 `Source/AILiveProject/`）**          | HTTP polling 客户端、Roster 注册、世界状态采集、动作意图落地、动作完成结果回传（含 wrapper / state polling）、轻量白名单校验、TTS/A2F 触发、感知数据导出、SmartObject claim、Delete 视觉/输入挂钩                                                      |
+| **Brain Service（仓库 `BrainService/`，gitignored 嵌套）** | LLM provider 路由、Reasoner 四通道 schema、Validator、EventStore、视角隔离、投影、召回工具、Bid + floor control、Listener-as-filter、三级反思（含 phase-level 裁判摘要 worker）、commitments、`_meta.db` lifecycle events、所有事件流写入 |
+| **UE C++ glue（本仓库 `Source/AILiveProject/`）**          | HTTP polling 客户端、Roster 注册、世界状态采集、动作意图落地、动作完成结果回传（含 wrapper / state polling）、轻量白名单校验、TTS/A2F 触发、感知数据导出、SmartObject claim                                                                                  |
 | **UE 蓝图侧**                                              | 关卡资产配置、AnimBP / Face AnimBP、视觉身体 BP、SandboxCharacter_Mover 既有移动函数、AC_VisualOverrideManager。**测试按键链路按子任务节奏逐步退役**                                                                                                   |
 | **明确不做**                                               | UE 侧重新长出 LLM 调用、prompt 拼装、长期 memory、agent decision；vector 召回作主路径；payload 内 `@hidden` 字段；agent 自评 importance                                                                                                                |
 
@@ -57,14 +57,12 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 | 动作执行结果回传                  | move / sit **自然结束**（成功 / 失败两种 outcome）→ POST `actions/result` → brain 写入 `action.resolved`。**被新 intent 覆盖时不上报**——按 memory_principles §5.4.2，cancel 由 brain 派生新 intent **同一事务**自动写入 `action.cancelled`，与 `action.resolved` 互斥终态（每个 in-progress action 一生只一条终态），UE 仅负责物理停止旧动作 | UE `ActionResultReporter`（**仅承载 succeeded / failed 两种 resolved 终态；不存在 interrupted**） |
 | Speech 播放结果回传               | speech 播放完成 / 失败 → POST `speech/result` → brain 写入新事件类型 `speech.playback_resolved`（**与 action 通道完全独立，不复用 action.resolved**——speech.public 没有对应 action.intent，没有 action 因果链）                                                                                                                              | UE `SpeechResultReporter`（与 ActionResultReporter 平行）                                         |
 | 轻量白名单校验                    | actor_id ∈ roster、sentence 长度、audience ⊂ visibility、intent ∈ ontology                                                                                                                                                                                                                                                                   | UE `IngressValidator`（与 brain Validator 正交，UE 这层防伪）                                     |
-| 物品 / 道具                       | DevLog 仅有 baseline 形态，无 pickup/give/use                                                                                                                                                                                                                                                                                                | UE 新增 Inventory + 道具基类                                                                      |
-| Delete 视觉表现                   | `system.delete_executed` 时如何让 NPC "消失"                                                                                                                                                                                                                                                                                                 | UE `DeleteHook`（隐藏 ChildActor、disable AIC、墓碑 marker）                                      |
 | 配置位                            | Brain URL / API key / 超时 / 重试                                                                                                                                                                                                                                                                                                            | UE `UDeveloperSettings`                                                                           |
 | 时间 / 拍                         | UE wall-clock 与 brain `seq` 的对应                                                                                                                                                                                                                                                                                                          | brain 主导，UE 提供时间戳                                                                         |
 
 ---
 
-## 总路线图（六大阶段，按 memory_principles 实施顺序）
+## 总路线图（五大阶段，按 memory_principles 实施顺序）
 
 > 每个阶段下的子任务是**独立可拆分单位**，每个会单独立项做详设。下面只标出 (a) 范围一句话、(b) 关键交付、(c) 进入下一阶段的硬验收。
 
@@ -94,7 +92,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
   - `sit(target_smartobject)` → `ClaimFirstSlotInActor + UseSmartObjectWithGameplayInteraction`
   - `wait(reason?)` → 不动
 
-  **`speak` 明确不进 ontology**——见 0.4。`pickup / use_item / inspect / follow / flee_from` 推迟到 **ontology v2**（与第 4 阶段 Inventory 一并启动）。`action_ontology_version = "1"`。
+  **`speak` 明确不进 ontology**——见 0.4。MVP 不预留物品、跟随、逃离等扩展 intent；后续确有需求时再按协议升版新增。`action_ontology_version = "1"`。
 
 - **0.4 speech 通道与 action 通道严格分离**：memory_principles §5.4 硬约束"动作通道独立于发言权"。UE 落地遵守同一硬边界：
   - **Speech 路由**：brain 派生 `speech.public` 事件 → UE 通过独立 endpoint 拉到 → `SpeakDispatcher`（与 ActionDispatcher 平行的独立组件）→ `TriggerMinimaxSpeechFromPawnWithNoise`。
@@ -114,9 +112,9 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 - **1.3 视角隔离 / viewer 封闭集合**：事件行粒度过滤；持久层禁 `self`；payload 内禁 `@hidden`。
 - **1.4 投影代码（纯函数）**：commitments / vote_history / claims / accusations / alliance_state / pending_actions / pending_intended / game_state。
 - **1.5 召回工具实现**：§4.4 表内全部工具（`quote` / `quote_by_round` / `search_history` / `list_my_commitments` / `list_votes` / `my_recent_notes` / `my_recent_reflections` / `list_alliance_state` / `list_pending_actions` / `list_my_pending_intended`）。
-- **1.6 跨局 `_meta.db` 最小骨架**（仅为支撑 MVP 内 Delete 协议引用合法 lifecycle event_id 而前置）：维护 `agent_lifecycle_events` 表，MVP 仅实现两条事件类型 `created` / `delete_executed`（其余 `delete_proposed` / `delete_vetoed` / `revived` / `archived` 写为 schema 占位但 MVP 不发）。每条记录含触发 `game_id` + `seq` + 决策 payload + `affects_persona_continuity` 字段（默认 true，actor_id 永久不可复用）。**这一项是必须前置**：阶段 4.3 的局内 `system.delete_executed` payload 必须引用合法的 `agent_lifecycle_events.event_id`，否则 Delete 决策上下文缺失（memory_principles §7.3）。
+- **1.6 跨局 `_meta.db` 最小骨架**：维护 `agent_lifecycle_events` 表，数据层实现 `created` / `delete_executed` 两类 lifecycle 记录与 actor_id 不可复用检查。它是 memory_principles §7.3 的底层能力，不作为 MVP 游戏主线的阶段依赖；MVP 机制是否触发 Delete 由 02 病毒游戏规则另行定义。
 
-**硬验收**：以一段手写 JSON 事件流灌入 EventStore → 投影计算无差异 → 召回工具在所有 viewer 视角下严格视角隔离 → 哈希链验证通过；`_meta.db` 写入 `created` / `delete_executed` 两条 lifecycle event 后可被局内 `system.delete_executed` 正确引用。
+**硬验收**：以一段手写 JSON 事件流灌入 EventStore → 投影计算无差异 → 召回工具在所有 viewer 视角下严格视角隔离 → 哈希链验证通过；`_meta.db` lifecycle 自测通过但不阻塞 MVP 主线。
 
 ---
 
@@ -146,7 +144,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 - **3.1 配置位**：新增 `UAILiveProjectSettings : UDeveloperSettings`（Brain URL / port / 超时 / 重试 / API token / polling 间隔）。**`game_id` 不进 settings**——按 T1 协议，`game_id` 唯一来源是 UE 启动时调 `POST /v1/games` 握手返回，运行时持有在 GameInstanceSubsystem 内存中，不持久化。`GetMinimaxApiKeyFromProjectEnv` 留作 fallback，但生产路径走 settings。
 - **3.2 HTTP polling 客户端**：纯 `FHttpModule` 周期 GET / POST，按 endpoint 分类全部 10 类（健康检查 / session 握手 `POST /v1/games` / roster register / world state push / action pull / action result post / speech pull / speech result post / ingress reject post / event query）。封装：错误重试（指数退避）、认证 token 注入、连接断线重连、polling 间隔配置（建议 200ms 起，可配）、cursor-based pull（`?since_seq=N` + UE 端 `last_processed_seq` 高水位线 + seq 幂等去重）、写操作 `Idempotency-Key` 头。**不引入 SSE / WebSockets 模块依赖**。
 - **3.3 RosterSubsystem**：`UGameInstanceSubsystem`，BeginPlay 时枚举关卡内所有 `IAILiveAgent` Pawn，按 `actor_id` (`NPC01..NPC10`) 注册到 brain，建立 `actor_id ↔ TWeakObjectPtr<APawn>` 双向 map。
-- **3.4 WorldStateCollector**：周期采集（按 brain 拉式 endpoint or push）每个 NPC 的：sight 列表（`GatherSightPerception` 重塑 JSON）、hearing 列表、当前位置 / 朝向、当前动作（idle / moving / sitting / speaking）、最近一次 ENTER/EXIT 事件（来自 `USightMemoryComponent`）、inventory 摘要。
+- **3.4 WorldStateCollector**：周期采集（按 brain 拉式 endpoint or push）每个 NPC 的：sight 列表（`GatherSightPerception` 重塑 JSON）、hearing 列表、当前位置 / 朝向、当前动作（idle / moving / sitting / speaking）、最近一次 ENTER/EXIT 事件（来自 `USightMemoryComponent`）。
 - **3.5 ActionDispatcher**：接收 brain 的 `action.intent`（仅 ontology v1：`move_to / sit / wait`，**不含 speak**），按 `action_ontology_version` 路由到现有 BP 原语。新 intent 进入时**物理停止**同 actor 的旧 in-progress 动作；**`action.cancelled` 事件已由 brain 在派生新 intent 同事务内写入**（memory_principles §5.4.2），UE 端**不上报旧 intent 的任何 result**——`action.cancelled` 与 `action.resolved` 是互斥终态，每个 in-progress action 一生只能有一条终态事件。旧动作 wrapper 收到的"被打断"信号仅作为内部状态机驱动（停止动画 / 释放 SmartObject claim 等），不外发到 brain。**严格不做 LLM 决策、不挑选目标、不重写 prompt、不写入事件流**——仅查表 + 调既有函数 + 在 action 自然完成时上报 resolved（`succeeded` / `failed`）。
 - **3.6 ActionCompletionWrapper + ActionResultReporter + SpeechResultReporter**（关键交付，因为现有原语缺统一完成回调；**Action 与 Speech 两条平行的完成信号路由**）：
   - **move 完成**（属 Action 通道）：`MoveAndLookAt` / `MoveAndLookAtLocation` 后用 `AIController::GetMoveStatus` 轮询（沿用既有 `PollAndAlignLook` 模式），`Idle` 即视为完成；失败靠 `MoveResult` byte + `OnMoveCompleted` delegate（`UAITask_MoveTo::OnMoveTaskFinished`）。
@@ -167,33 +165,19 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 
 ---
 
-### 阶段 4 · 物品 / 道具 / Delete 协议挂钩 / 配置完善
-
-**目标**：补齐 PRD 任务里 memory_principles 已经写好协议的"非感知/非移动"功能。
-
-- **4.1 Inventory 系统 + ontology v2 启用**：DataAsset 定义道具（`UItemDefinition`）；NPC `UInventoryComponent`（GameplayTags 标记容量 / 类型）；BP/C++ pickup / drop / give / use 入口。**这一阶段同时把 ontology 升到 v2**：在 brain 协议层注册 `pickup / use_item / inspect / follow / flee_from`，UE ActionDispatcher 与 Validator 同步认知 v2，`action_ontology_version = "2"` 写入相应 `action.intent` 事件。v1 时 brain 不得派出这些 intent；v2 启用后两者按事件 `action_ontology_version` 字段共存。
-- **4.2 道具世界 Actor**：`AItemPickup`（继承 Actor + StaticMesh + interactable trigger），关卡放置 + 中心化注册到 brain（每 item 给 `item_id`）。
-- **4.3 Delete 协议局内挂钩**：依赖阶段 1.6 已建好的 `_meta.db.agent_lifecycle_events`。完整链路：brain orchestrator 决定 Delete 某 agent → 在 `_meta.db` 写 `delete_executed` lifecycle event 拿到 `event_id` → 同事务在该局事件流写 `system.delete_executed`（payload 引用该 `event_id`，`visibility=["public"]`）→ UE 拉到 `system.delete_executed` → UE 侧隐藏 NPC ChildActor 视觉、disable AIController、放置墓碑 marker、AISystem 可见性集移除该 actor。事件流不删，被 deleted 的 `actor_id` 永久不可复用（来自 `affects_persona_continuity=true`）。视觉/音效与节目剪辑配合（PRD §核心决策 + memory_principles §7.3）。
-- **4.4 Faction 占位**：`Faction<X>` viewer 封闭集合留位，UE 关卡里暂不显式设阵营（PRD §游戏候选池里的"团队 / 多方阵营"卡才需要）；`UAILiveAgent` 接口加可选 `GetFactionTags()` 返回当前空 array 的接口方法。
-- **4.5 配置整理**：把临时的 `.env` `minimax=` 读取迁出，统一走 `UAILiveProjectSettings`；Brain URL / token / 超时 / polling 间隔形成单一来源。**`game_id` 不在此列**——它是运行时由 `POST /v1/games` 握手取得的 session 数据，不属于配置（见阶段 3.1）。
-
-**硬验收**：brain 发 `pickup(NPC03, item_42)` → NPC03 走过去拾取 → inventory 增项 → `action.resolved` 回传 → 触发 `system.delete_executed(NPC05)` 时 NPC05 视觉消失但事件流不删。
-
----
-
-### 阶段 5 · MVP 游戏机制接入（02 病毒游戏）
+### 阶段 4 · MVP 游戏机制接入（02 病毒游戏）
 
 **目标**：用 PRD 卡 02「病毒游戏」跑通"真正的"博弈循环。memory_principles 协议层是机制无关的；这一阶段在 brain 端配 phase / round / win condition，UE 端补该游戏专属触发器 / 感染状态 / 视觉反馈。**复用既有 L_prison 关卡 + 既有移动/感知/TTS 链路，无需新增大量道具**。
 
-- **5.1 病毒游戏规则 spec**：`Docs/games/02_virus.md` 包含初始病毒携带者抽取、触碰传染规则（碰撞 overlap 触发感染）、感染态如何隐藏 / 公开发言 / 投票淘汰 / win condition、phase 定义（`day_discuss` / `vote` / `night_infection` 是否要走齐发 schema 或仍用 bid 自由对话）。
-- **5.2 Brain 端机制实现**：phase 状态机、感染状态投影（不写入 `speech.public`，仅 orchestrator/system + 该 agent 自己可见——这是 viewer 封闭集合的典型用例）、touch 事件如何从 UE collision overlap 进入事件流（专属 event_type 还是复用 `action.resolved`）、win/lose 判定、commitments 注入规则（"我没碰过 X" 类承诺）。
-- **5.3 UE 端触发器**：
+- **4.1 病毒游戏规则 spec**：`Docs/games/02_virus.md` 包含初始病毒携带者抽取、触碰传染规则（碰撞 overlap 触发感染）、感染态如何隐藏 / 公开发言 / 投票淘汰 / win condition、phase 定义（`day_discuss` / `vote` / `night_infection` 是否要走齐发 schema 或仍用 bid 自由对话）。
+- **4.2 Brain 端机制实现**：phase 状态机、感染状态投影（不写入 `speech.public`，仅 orchestrator/system + 该 agent 自己可见——这是 viewer 封闭集合的典型用例）、touch 事件如何从 UE collision overlap 进入事件流（专属 event_type 还是复用 `action.resolved`）、win/lose 判定、commitments 注入规则（"我没碰过 X" 类承诺）。投票淘汰是否映射为 `system.delete_executed` 由本规则 spec 决定，不再由独立阶段提前设计。
+- **4.3 UE 端触发器**：
   - 在 `BP_NPC_MH_Character` 上加 `UCapsuleComponent`-based touch 检测组件，overlap 时 collector 上报 `touch(actor_a, actor_b, time)` 进事件流（仅 brain 可见 + 涉事双方可见，其他 NPC 不可见）。
   - 感染状态视觉化（可选）：感染 NPC 头顶 widget marker（仅 orchestrator/audience 可见，公屏可关）。
   - 投票阶段 UI（可选）：可继续走 LLM 文本投票（写 `vote` 事件），UE 不需要投票箱 actor。
-- **5.4 一局完整 PIE 验证**：10 个 NPC（开发期都用 DeepSeek 不同 system prompt）完整玩完一局，事件流可审计，至少出现 1 次 Listener-as-filter 阻断 / 1 次 cold_threshold / 1 次 `system.delete_executed`。
+- **4.4 一局完整 PIE 验证**：10 个 NPC（开发期都用 DeepSeek 不同 system prompt）完整玩完一局，事件流可审计，至少出现 1 次 Listener-as-filter 阻断 / 1 次 cold_threshold，并按病毒游戏规则出现至少 1 次明确的出局或胜负推进事件。
 
-**硬验收**：单局从 `created` → `delete_executed/win` 全程事件流哈希链不断；prompt 在每个 agent 的「自我发言全量 + 近场窗口 + 未说出口的话」三段都返回原文级召回；至少 1 次 Listener-as-filter 阻断 + 至少 1 次 cold_threshold 触发场景推进。
+**硬验收**：单局从 `created` → `win` 全程事件流哈希链不断；prompt 在每个 agent 的「自我发言全量 + 近场窗口 + 未说出口的话」三段都返回原文级召回；至少 1 次 Listener-as-filter 阻断 + 至少 1 次 cold_threshold 触发场景推进。
 
 ---
 
@@ -202,18 +186,15 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 ```
 0 (协议骨架)
   ├─→ 1 (数据层 + 1.6 _meta.db lifecycle 最小骨架)
-  │       └─→ 2 (协议层) ──→ 3 (UE 接入) ──→ 5 (MVP 游戏：02 病毒)
-  │                                  └─→ 4 (物品/Delete/配置 + ontology v2)
+  │       └─→ 2 (协议层) ──→ 3 (UE 接入) ──→ 4 (MVP 游戏：02 病毒)
   └─→ 0.3 (action ontology v1) ─┘
 ```
 
 硬约束：
 
 - **1 必须先于 2**（数据层是真相源）；
-- **1.6 必须先于 4.3**（Delete 协议要引用合法 `agent_lifecycle_events.event_id`）；
 - **2 必须先于 3**（UE 不能比 brain 提前调 schema 不存在的 action）；
-- **3 与 4 可并行**（不互锁）；
-- **5 依赖 3 + 4 同时就位**。
+- **4 依赖 3 就位**（MVP 游戏需要 UE 接入链路可跑）。
 
 ---
 
@@ -248,7 +229,7 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 
 - 数据层：DB engine 禁 UPDATE/DELETE、append-only / 哈希链 / 召回结构化字段过滤 / payload 无 @hidden / 持久层禁 self / 写入串行化。
 - 协议层：四通道 schema 强制 / Validator 拒非法输出 / `speech.public` 由 orchestrator 派生 / Listener-as-filter 拆 annotation 不混 public payload / 未抢中 `speech.intended` 永久留存 / 动作通道独立于发言权 / `speech_act_type` 旁路标注不 UPDATE 原事件 / per-tick checkpoint 失败入流 / commitments 投影覆盖三类来源。
-- UE 接入：每条 brain action 都能在 UE 找到对应原语 / 每条 UE 状态事件都能在 brain EventStore 视角隔离 / IngressValidator 拒所有非法 actor_id+intent 组合 / Delete 视觉同步 / SettingsClass 单一来源。
+- UE 接入：每条 brain action 都能在 UE 找到对应原语 / 每条 UE 状态事件都能在 brain EventStore 视角隔离 / IngressValidator 拒所有非法 actor_id+intent 组合 / SettingsClass 单一来源。
 
 ---
 
@@ -273,13 +254,12 @@ UE 5.7 工程当前已经把"身体侧"（关卡、10 个 MetaHuman NPC、移动
 2. **HTTP polling 频率**：UE 拉 `action.intent` / `speech.public` 的间隔（建议 200ms 起，按 brain 拍速 + LLM 出结果速率调）。
 3. **裁判 LLM 厂商选择**：phase-level 摘要 / annotation.speech_act 标注用哪家（不能与参赛 agent 同厂商）。开发期可统一用 DeepSeek 但不同 system prompt 区分。
 4. **病毒游戏 touch 事件落点**：作为新 `event_type`（如 `world.touch`）写入事件流，还是包成 `action.resolved` 的 payload？影响 brain 数据层 schema。
-5. **Faction<X> 视角集合的早期占位形态**：02 病毒游戏不需要阵营，但 viewer 封闭集合在 0.2 必须固定；建议 v1 写死 `Faction` 占位但不分配，给后续游戏（如 11 腐败警察）留位。
 
 ---
 
 ## 路标摘要（一页纸记忆点）
 
-- **顺序**：数据层（含 1.6 `_meta.db` 最小骨架）→ 协议层 → UE 接入 → 物品/Delete/ontology v2 → MVP 游戏（02 病毒）
+- **顺序**：数据层（含 1.6 `_meta.db` 最小骨架）→ 协议层 → UE 接入 → MVP 游戏（02 病毒）
 - **形态**：脑层 Python 仓 `BrainService/`（gitignored，独立仓库嵌套在 UE 工程根目录）；UE 仅做薄 glue + 既有原语复用 + HTTP polling
 - **硬边界**：`speech.public` 与 `action.intent` 在 schema 层 / UE Dispatcher 层全程分离；UE 永不写入 brain 事件流（只 POST 上报，由 brain 写入）；Speak 不进 ontology
 - **铁律**：append-only 哈希链 / 视角隔离行粒度 / Reasoner 强制四通道 / floor 由 bid 裁决 / 未抢中 intended 永久留存 / 摘要者≠行动者
