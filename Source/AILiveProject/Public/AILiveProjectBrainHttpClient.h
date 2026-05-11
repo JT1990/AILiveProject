@@ -68,4 +68,11 @@ private:
 	float   BackoffBaseSec;
 
 	TArray<TWeakPtr<IHttpRequest, ESPMode::ThreadSafe>> InFlight;
+
+	// Lifeguard sentinel: lambdas posted to HTTP completion / retry timers /
+	// AsyncTask capture a TWeakPtr<uint8> aliased to this and bail out when it
+	// expires. Without this, Subsystem::Deinitialize -> Client.Reset() leaves
+	// async OnProcessRequestComplete callbacks and pending retry timers with a
+	// dangling raw `this`, crashing with 0xffffffffffffffff in DispatchWithRetry.
+	TSharedPtr<uint8, ESPMode::ThreadSafe> LifeGuard;
 };

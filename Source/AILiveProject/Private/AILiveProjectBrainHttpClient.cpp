@@ -61,6 +61,7 @@ FAILiveProjectBrainHttpClient::FAILiveProjectBrainHttpClient(
 	, TimeoutMs(InTimeoutMs)
 	, MaxRetries(InMaxRetries)
 	, BackoffBaseSec(InBackoffBaseSec)
+	, LifeGuard(MakeShared<uint8, ESPMode::ThreadSafe>(0))
 {
 	while (BaseUrl.EndsWith(TEXT("/"))) { BaseUrl.LeftChopInline(1); }
 	UE_LOG(LogAILiveBrain, Log, TEXT("HTTP client base_url=%s"), *BaseUrl);
@@ -119,10 +120,18 @@ void FAILiveProjectBrainHttpClient::DispatchWithRetry(
 	InFlight.Add(Req);
 
 	TWeakPtr<IHttpRequest, ESPMode::ThreadSafe> WeakReq = Req;
+	TWeakPtr<uint8, ESPMode::ThreadSafe> WeakLife = LifeGuard;
 	Req->OnProcessRequestComplete().BindLambda(
-		[this, Ctx, OnDone, WeakReq]
+		[this, Ctx, OnDone, WeakReq, WeakLife]
 		(FHttpRequestPtr R, FHttpResponsePtr Resp, bool bSucceeded) mutable
 	{
+		// HttpClient may have been destroyed (Subsystem::Deinitialize ->
+		// Client.Reset()) between CancelRequest and this delegate firing.
+		if (!WeakLife.Pin().IsValid())
+		{
+			return;
+		}
+
 		// Drop weak pointer entry.
 		InFlight.RemoveAll([&](const TWeakPtr<IHttpRequest, ESPMode::ThreadSafe>& W)
 		{
@@ -150,16 +159,18 @@ void FAILiveProjectBrainHttpClient::DispatchWithRetry(
 			{
 				FTimerHandle Handle;
 				World->GetTimerManager().SetTimer(Handle,
-					FTimerDelegate::CreateLambda([this, Ctx, OnDone]() mutable
+					FTimerDelegate::CreateLambda([this, Ctx, OnDone, WeakLife]() mutable
 					{
+						if (!WeakLife.Pin().IsValid()) { return; }
 						DispatchWithRetry(MoveTemp(Ctx), OnDone);
 					}), Delay, false);
 			}
 			else
 			{
 				AsyncTask(ENamedThreads::GameThread,
-					[this, Ctx = MoveTemp(Ctx), OnDone]() mutable
+					[this, Ctx = MoveTemp(Ctx), OnDone, WeakLife]() mutable
 				{
+					if (!WeakLife.Pin().IsValid()) { return; }
 					DispatchWithRetry(MoveTemp(Ctx), OnDone);
 				});
 			}
