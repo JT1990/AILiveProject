@@ -1,31 +1,5 @@
 # 2026-04-24 · MiniMax speech-2.8-turbo → Audio2Face-3D → MetaHuman
 
-## Prompt
-
-```
-这是一个 minimax speech-2.8-hd 测试任务。 你的任务是基于 minimax docs 写一个同步语音合成的功能，
-模型选择：speech-2.8-turbo
-语种：1. 中文（Chinese）
-音色 ID：male-qn-qingse
-测试语句：今天是不是很开心呀(laughs)，当然了！
-编程语言：C++
-项目工程：unreal engine 5.7
-minimax api key：@.env/ , minimax
-测试metahuman： @Content\MetaHumans\MH_Character_1\BP_MH_Character_1.uasset
-查看UE的资产的方法：使用 Monolith MCP, @.claude/skills/ 文件夹下是我准备的skill，包含：如何使用Monolith MCP的skill，以`unreal-`开头；如何使用UE5的skill，以 `unreal5-`开头。
-
-补充信息：
-我本地根据Nivdia audio2face-3d 官方教程我制作使用 wav 文件的蓝图如图 @Temp/1.png，但是经过调研发现官方文档原话:"If your application needs to feed audio generated at runtime into the ACE Unreal plugin, then providing a Sound Wave asset or WAV file ... may not be an option. For these cases, the plugin exposes a C++ API." **所以，我制作的蓝图仅供你参考，可以完全使用C++/蓝图&C++，选择最优方案。**
-
-建议工作流：
-1. 调研学习 minimax speech-2.8-turbo 的最佳实践案例和使用方法，可以增加一个单独的测试脚本，独立测试  minimax speech-2.8-turbo 的功能，（mpv 播放器已经安装）
-2. 调研学习 Nvidia Audio2Face-3D unreal engine Plugins 的最佳实践案例和使用方法，并且深入了解 Nvidia Audio2Face-3D 的底层原理
-3. 调研学习如何使用 Monolith MCP，如有必要可以查看UE资产（可选项）
-4. 在有足够的信息之后，再思考规划解决方案。
-
-UE是你不擅长的领域，不要凭感觉猜测，先学习，后思考规划方案。
-```
-
 ## 功能描述
 
 把一段中文文本（例："今天是不是很开心呀(laughs)，当然了！"）经 MiniMax 同步 TTS 合成为 PCM16 16 kHz mono 音频，运行时通过 NVIDIA ACE 本地 TRT 引擎（`LocalA2F-James`）推理成 blendshape 权重，驱动 `BP_MH_Character_1` MetaHuman 的面部动画，同时自动播放合成音频。按 `T` 键即刻出声 + 口型同步，`(laughs)` 处语音自带笑声、面部由 A2F 根据音频特征推理出相应表情。

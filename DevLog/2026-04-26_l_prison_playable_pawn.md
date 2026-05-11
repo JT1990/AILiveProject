@@ -1,13 +1,5 @@
 # 2026-04-26 · L_prison 关卡接入 GASP Mover 第三人称可控角色
 
-## Prompt
-
-```
-我希望在 Content/MyAssets/Levels/L_prison.umap 关卡中使用
-Content/Levels/DefaultLevel.umap 关卡中的 PlayerStart，
-我希望可以有一个具有 GASP Mover2 功能的第三人称可控制的角色，
-目的是用于跑图。
-```
 
 ## 功能描述
 

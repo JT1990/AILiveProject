@@ -1,17 +1,5 @@
 # 2026-04-25 · 场景 NPC 固定视觉 VisualOverride + 玩家回退 DefaultPawn
 
-## Prompt
-
-```
-当前场景中有两个 MH_Character_1， 左侧 T Pose 的是原来的，我们称之为NPC，右侧Idle 站立的是你刚创建的metahuman。
-- 左侧NPC不支持动作和TTS Audio2face;
-- 右侧的支持移动和TTS audio2face；
-
-我现在需要让左侧NPC 支持移动和TTS audio2face，
-而右侧PlayerStart 还原到原来看不到状态
-```
-
-后来澄清："无需考虑如何控制，后期由代码驱动，只要有GASP Mover的功能+audio2face+tts 的功能，也就是说把 当前右侧metahuman的功能除了控制之外的功能都迁移到左侧的metahuman上"
 
 ## 功能描述
 

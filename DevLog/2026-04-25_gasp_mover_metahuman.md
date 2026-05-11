@@ -1,22 +1,5 @@
 # 2026-04-25 · GASP Mover 2.0 → BP_MH_Character_1（保留 A2F + MiniMax TTS）
 
-## Prompt
-
-```
-将 unreal engine 5.7 GASP Mover2.0 应用到任意metahuman中，我创建的metahuman 路径为：
-D:\Project\Unreal\AILiveProject\Content\MetaHumans\MH_Character_1\BP_MH_Character_1.uasset
-
-已完成：
-BP_MH_Character_1.uasset以支持 Nvidia audio2face-3D + minimax tts，
-开发记录见 DevLog/2026-04-24_minimax_speech_a2f_metahuman.md
-
-建议工作流：
-1. 先从UE 官网和社区调研学习如何将 GASP5.7版本中的 Mover2.0 应用到任意metahuman中，并且深入了解底层原理
-2. 在有足够的信息之后，再思考规划解决方案。
-3. Docs/Lucy_GASP_A2F_Manual.md 是我之前在另一个项目中测试成功后的开发记录，供你参考
-
-UE是你不擅长的领域，不要凭感觉猜测，先学习，后思考规划方案。
-```
 
 ## 功能描述
 
