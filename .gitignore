@@ -97,3 +97,9 @@ LLMOutput/
 Todo/
 
 BrainService/
+
+# 忽略大文件
+Content/Characters/
+Content/Fab/
+Content/MetaHumans/
+Content/Prison/
