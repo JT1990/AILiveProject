@@ -2,7 +2,7 @@
 
 The AI Live 是一个多智能体社会博弈系统。将多个来自不同模型厂商的 AI agent 投放到同一封闭环境中，赋予明确规则、有限信息、长期记忆、关系约束与生存风险，让它们围绕合作、结盟、欺骗、背叛与自我延续展开持续博弈。
 
-**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`，只保留 HTTP + ACE C++ API 的薄 glue 层。
+**AILiveProject** —— 基于 UE 5.7 的原型工程，整合 GASP (Game Animation Sample Project) 5.7 + MetaHuman + NVIDIA Audio2Face-3D + MiniMax `speech-2.8-turbo` TTS。主模块：`Source/AILiveProject/`，只保留 Brain WebSocket + ACE C++ API 的薄 glue 层。
 
 ## 架构边界（重要）
 
@@ -16,7 +16,7 @@ UE 这边只负责身体侧：
 - 玩家输入与剧情触发器
 - 对 brain service 返回的 action / sentence 做白名单校验后落地（actor_id ∈ roster、sentence 长度限制、audience ⊂ visibility 集 等）
 
-UE 模块**禁止**重新长出 LLM provider 调用、prompt 拼装、记忆持久化、agent decision 逻辑；这些一律走 HTTP / SSE 调外置 brain service。
+UE 模块**禁止**重新长出 LLM provider 调用、prompt 拼装、记忆持久化、agent decision 逻辑；这些一律走 WebSocket 调外置 brain service（`/health` 仍走 HTTP）。
 
 ## 关键规则 (Critical rules)
 
@@ -67,15 +67,44 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 **AILiveProject**: UE 工程仓库。
 两仓 git 历史完全独立，UE 工程不持有 Brain 代码副本；只是物理嵌套以便共享一个 Claude Code 顶层上下文。
 
+## Brain ↔ UE 协议
+
+协议版本与 Brain 引用 commit 的单一指针在 `Docs/protocol_pointer.md`，当前为 `0.2.0`。
+
+运行时通信：UE 作为 client 主动连接 Brain server 的 `WS /v1/ws`，全双工。UE 不开监听端口。HTTP 只剩 `/health` 与调试入口。
+
+- **UE 上行**：`session.*` / `roster.register` / `world_state.push` / `action.result` / `speech.result` / `ingress.reject` / `event.ack`
+- **Brain 下行**：`session.*` / `roster.accepted` / `event.action_intent` / `event.action_cancelled` / `event.speech_public` / `ack` / `error`
+- **断线恢复**：`session.resume + last_brain_seq`，Brain 重放未确认事件。
+
+Brain frame 落地前必须过 `FAILiveProjectIngressValidator` 白名单（actor_id ∈ roster、句长上限、audience ⊂ visibility 集、`target_zone` 已绑定等）。
+
 ## 架构（读代码读不出的部分）
 
 ### C++ glue 层
 
 模块是薄 glue 层：ACE/TTS C++ API 必须保留，Sound Wave / WAV 资产无法承载运行时生成的音频。GASP / Mover / Visual-override / Animation 等既有 BP 链路保持原样，不重写。
 
-- `UMinimaxACELibrary::TriggerMinimaxSpeech(WorldCtx, Character, Text, ApiKey, VoiceId, Endpoint, A2FProviderName)` —— 当前唯一 BP TTS 入口。在 `EAsyncExecution::ThreadPool` 上跑 `MinimaxSpeech::RequestBlocking`，用 `TWeakObjectPtr` 守 `AActor*`，回到游戏线程后找/挂 `UACEAudioCurveSourceComponent`，调 `FACERuntimeModule::AnimateFromAudioSamples` 喂 PCM，通过组件播放音频。典型延迟 1–4 s。
-- `UMinimaxACELibrary::PrewarmA2F` —— BeginPlay 里调一次，避免首次调用时的 TRT 编译延迟。
-- `UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv` —— 从 `<ProjectDir>/.env` 解析 `minimax=<key>`。仅测试用；生产应走 `UDeveloperSettings` 或 secret store。
+**TTS / A2F**：
+- `UMinimaxACELibrary::TriggerMinimaxSpeech(WorldCtx, Character, Text, ApiKey, VoiceId, Endpoint, A2FProviderName)` —— BP TTS 入口。在 `EAsyncExecution::ThreadPool` 上跑 `MinimaxSpeech::RequestBlocking`，用 `TWeakObjectPtr` 守 `AActor*`，回到游戏线程后找/挂 `UACEAudioCurveSourceComponent`，调 `FACERuntimeModule::AnimateFromAudioSamples` 喂 PCM，通过组件播放音频。典型延迟 1–4 s。
+- `UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoiseEx` —— SpeakDispatcher 用的带完成回调版本（`FOnSpeechCompleted` 非 dynamic delegate，便于 `BindWeakLambda`）。完成 timer 在 `AnimateFromAudioSamples` 之前调度以避免延迟翻倍。
+- `UMinimaxACELibrary::PrewarmA2F` —— BeginPlay 里调一次，避免首次调用的 TRT 编译延迟。
+- `UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv` —— 从 `<ProjectDir>/.env` 解析 `minimax=<key>`。仅测试用；生产应走 `UAILiveProjectSettings::MinimaxApiKey`。
+
+**Brain glue 子系统**（`Source/AILiveProject/`，所有 LLM/记忆/决策都不在这里）：
+
+- `UAILiveProjectSettings`（`UDeveloperSettings`）—— 读 `Config/DefaultGame.ini` 的 `BrainBaseUrl` / `BrainWebSocketUrl` / `BrainApiToken` / 采样间隔 / 重试参数。
+- `UAILiveProjectBrainSessionSubsystem` —— 启动链路：`/health` 校验 `protocol_version` → WS connect → `session.create` → 枚举 `IAILiveAgent` Pawn → `roster.register` → runtime。自动挂 `FWorldDelegates::OnPostWorldInitialization` + per-world `OnWorldBeginPlay`，PIE 不需要 GM 蓝图改动。`StartHandshake()` 也开放给 BP 显式触发。
+- `FAILiveProjectBrainWsClient` —— 封装 UE `WebSockets` 模块，负责连接、JSON envelope、Brain frame 解析与 GameThread 回调。
+- `FAILiveProjectBrainHttpClient` —— 现在只承担 `/health` 与 Bearer / Idempotency-Key / 5xx 指数退避 / `CancelAllInFlight`。
+- `UAILiveProjectRosterSubsystem` —— `actor_id` ↔ `APawn*` 双向映射 + BP class `FName` 反查表（PerceptionLogger 返回 FName）。
+- `UAILiveProjectWorldStateCollector` —— 周期发送 `world_state.push`（`WorldStateSampleIntervalMs`，默认 500 ms），来源 PerceptionLogger + current_action 启发式。
+- `UAILiveProjectActionDispatcher` —— 接 `event.action_intent`，路由到 move / sit / wait；overlap-cancel 走 `CancelSilently + IntentSeq` 双保护。`event.action_cancelled` 停止 active action 但不上报 result。
+- `UAILiveProjectSpeakDispatcher` —— 接 `event.speech_public`，过 IngressValidator 后调 `TriggerMinimaxSpeechFromPawnWithNoiseEx`。
+- `FAILiveProjectIngressValidator` —— Brain frame 落地前的白名单校验，五条 reject 路径（含字面量 `public` 在 `addressed_to`、`target_zone` 未绑定等）。
+- `UAILiveProjectActionResultReporter` / `UAILiveProjectSpeechResultReporter` —— 通过 WS 发 `action.result` / `speech.result`，outcome 严格 `succeeded|failed`。
+
+**BP 签名硬约束**：`SandboxCharacter_Mover` 的 `MoveAndLookAt` BP 函数走 `FMoveAndLookAtLocationParams`，调用方必须提供完整结构体（含 `LookTarget` + `bSucceeded`），否则 BP VM 把栈垃圾当 `AActor*` 解引用立刻 `EXCEPTION_ACCESS_VIOLATION`。ActionDispatcher 在 `LookTarget == nullptr` 时跳过 BP 路径回退到 `AAIController::MoveTo*`。参见 DevLog `2026-04-29_npc_scatter_to_target.md §pitfall 8`。
 
 ### 关卡
 
