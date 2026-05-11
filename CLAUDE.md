@@ -39,7 +39,7 @@ UBT 构建 Editor target：
 
 ### UE 编辑器进程管理
 
-需要重启编辑器时自己用 PowerShell 操作，不让用户手点；强杀前先确认改动已保存，启动后等 `monolith_status` 返回 online 再继续（加载约 30 s）。
+需要重启编辑器时自己用 PowerShell 操作，不让用户手点；强杀前先确认改动已保存，启动后等 `monolith_status` 返回 online 再继续（加载约 30 s），无需询问。
 
 ```
 # 关
@@ -85,6 +85,7 @@ Brain frame 落地前必须过 `FAILiveProjectIngressValidator` 白名单（acto
 模块是薄 glue 层：ACE/TTS C++ API 必须保留，Sound Wave / WAV 资产无法承载运行时生成的音频。GASP / Mover / Visual-override / Animation 等既有 BP 链路保持原样，不重写。
 
 **TTS / A2F**（Sound Wave / WAV 无法承载运行时生成的音频，所以必须 C++ 喂 PCM 直驱 ACE）：
+
 - `UMinimaxACELibrary::TriggerMinimaxSpeech(WorldCtx, Character, Text, ApiKey, VoiceId, Endpoint, A2FProviderName)` —— BP TTS 入口，典型延迟 1–4 s。
 - `UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoiseEx` —— SpeakDispatcher 用的带完成回调版本（`FOnSpeechCompleted` 非 dynamic delegate，便于 `BindWeakLambda`）。完成 timer 在 `AnimateFromAudioSamples` 之前调度以避免延迟翻倍。
 - `UMinimaxACELibrary::PrewarmA2F` —— BeginPlay 里调一次，避免首次调用的 TRT 编译延迟。
@@ -116,3 +117,4 @@ Brain frame 落地前必须过 `FAILiveProjectIngressValidator` 白名单（acto
 - NPC 外观符号约束：在 UE 这边为 NPC 分配名字 / 昵称 / 性别 / 声线 / 类人虚拟形象时，**严禁**带人类职业、教育、地域、年龄、姓名格式、家乡 等背景叙事；背景人格属于 brain service 范畴。
 - 当 DevLog / 手册与实际资产状态冲突时，**以资产状态为准**并更新 DevLog。不要为了贴合过时文档去改动资产。
 - 文档要扁平化，只写当前确定的结论。**不保留** v1/v2/v3 / 原版 vs 修订 / 修复历史 等迭代痕迹。审查/讨论的过程产物，结论合并进正文后即删。
+- 完成任务后 git commit 无需询问。
