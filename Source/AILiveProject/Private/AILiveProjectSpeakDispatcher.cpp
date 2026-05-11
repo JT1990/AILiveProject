@@ -16,7 +16,7 @@
 #include "GameFramework/Pawn.h"
 #include "TimerManager.h"
 
-namespace
+namespace AILiveSpeakDispatcherImpl
 {
 	UAILiveProjectBrainSessionSubsystem* GetSession(UWorld* World)
 	{
@@ -37,6 +37,7 @@ namespace
 		return UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv();
 	}
 }
+using namespace AILiveSpeakDispatcherImpl;
 
 void UAILiveProjectSpeakDispatcher::Initialize(FSubsystemCollectionBase& Collection)
 {

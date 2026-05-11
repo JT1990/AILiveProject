@@ -9,7 +9,7 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogAILiveScatter, Log, All);
 
-namespace
+namespace AILiveScatterMoverImpl
 {
 	// 必须匹配 BP 函数 MoveAndLookAtLocation 的参数布局：
 	// 输入 MoveLocation (FVector)、LookTarget (AActor*)，输出 bSucceeded (bool)。
@@ -20,6 +20,7 @@ namespace
 		bool bSucceeded = false;
 	};
 }
+using namespace AILiveScatterMoverImpl;
 
 void UAILiveProjectScatterMover::ScatterNPCsAroundTarget(
 	UEnvQuery* QueryAsset,

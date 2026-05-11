@@ -17,6 +17,7 @@ UE 模块**禁止**重新长出 LLM provider 调用、prompt 拼装、记忆持�
 - DevLog 里的大多数步骤在本仓库里**已经就位**，机械地照搬会造成重复组件、断裂图。
 - **不要把 `bTickPhysicsAsync` 翻成 True**（在 `DefaultEngine.ini`），会破坏 Animation Warping。
 - **不要修改 `Source/*.Target.cs` 里的 `DefaultBuildSettings = V6`**，降级会破坏 Installed-Engine + Live Coding 的兼容性。
+- **.cpp 里禁用匿名 `namespace { ... }` 装 helper**：Unity Build 会把多个 .cpp 拼到同一 TU，匿名命名空间合并后导致 `GetSession` / `GetRoster` / `FMoveAndLookAtLocationParams` 这类常见名字 C2011 / C2084 重定义。改用文件唯一的具名 namespace（如 `AILive<File>Impl`）+ 紧跟一行 `using namespace ...;` 保持调用点不变。
 
 ## 命令 (Commands)
 

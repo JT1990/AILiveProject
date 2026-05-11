@@ -20,7 +20,7 @@
 #include "TimerManager.h"
 #include "UObject/UnrealType.h"
 
-namespace
+namespace AILiveActionDispatcherImpl
 {
 	UAILiveProjectBrainSessionSubsystem* GetSession(UWorld* World)
 	{
@@ -121,6 +121,7 @@ namespace
 		return nullptr;
 	}
 }
+using namespace AILiveActionDispatcherImpl;
 
 void UAILiveProjectActionDispatcher::Initialize(FSubsystemCollectionBase& Collection)
 {
