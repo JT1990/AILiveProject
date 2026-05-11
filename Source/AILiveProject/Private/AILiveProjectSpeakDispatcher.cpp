@@ -37,7 +37,9 @@ namespace AILiveSpeakDispatcherImpl
 		return UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv();
 	}
 }
-using namespace AILiveSpeakDispatcherImpl;
+// Intentionally no file-scope `using namespace`: Unity Build merges multiple .cpp
+// into one TU and would pull AILiveActionDispatcherImpl::GetSession into ambiguity
+// with the same name from AILiveSpeakDispatcherImpl. Call sites use full qualification.
 
 void UAILiveProjectSpeakDispatcher::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -70,7 +72,7 @@ void UAILiveProjectSpeakDispatcher::StopPolling()
 void UAILiveProjectSpeakDispatcher::HandleBrainSpeechPublic(const FAIL_SpeechPublicEvent& Ev)
 {
 	DispatchOne(Ev);
-	if (UAILiveProjectBrainSessionSubsystem* Session = GetSession(GetWorld()))
+	if (UAILiveProjectBrainSessionSubsystem* Session = AILiveSpeakDispatcherImpl::GetSession(GetWorld()))
 	{
 		Session->AckBrainEvent(Ev.Seq);
 	}
@@ -88,7 +90,7 @@ bool UAILiveProjectSpeakDispatcher::HasSpeechForPawn(APawn* Pawn) const
 void UAILiveProjectSpeakDispatcher::TickPull()
 {
 	UWorld* World = GetWorld();
-	UAILiveProjectBrainSessionSubsystem* Session = GetSession(World);
+	UAILiveProjectBrainSessionSubsystem* Session = AILiveSpeakDispatcherImpl::GetSession(World);
 	if (!Session || !Session->IsReady() || !Session->GetClient()) { return; }
 	if (bPullInFlight) { return; }
 	bPullInFlight = true;
@@ -116,8 +118,8 @@ void UAILiveProjectSpeakDispatcher::TickPull()
 void UAILiveProjectSpeakDispatcher::DispatchOne(const FAIL_SpeechPublicEvent& Ev)
 {
 	UWorld* World = GetWorld();
-	UAILiveProjectBrainSessionSubsystem* Session = GetSession(World);
-	UAILiveProjectRosterSubsystem* Roster = GetRoster(World);
+	UAILiveProjectBrainSessionSubsystem* Session = AILiveSpeakDispatcherImpl::GetSession(World);
+	UAILiveProjectRosterSubsystem* Roster = AILiveSpeakDispatcherImpl::GetRoster(World);
 	UAILiveProjectSpeechResultReporter* Reporter = World ? World->GetSubsystem<UAILiveProjectSpeechResultReporter>() : nullptr;
 	if (!Session || !Roster) { return; }
 
@@ -143,7 +145,7 @@ void UAILiveProjectSpeakDispatcher::DispatchOne(const FAIL_SpeechPublicEvent& Ev
 		return;
 	}
 
-	const FString ApiKey = ResolveMinimaxApiKey();
+	const FString ApiKey = AILiveSpeakDispatcherImpl::ResolveMinimaxApiKey();
 	if (ApiKey.IsEmpty())
 	{
 		if (Reporter)

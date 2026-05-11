@@ -121,7 +121,10 @@ namespace AILiveActionDispatcherImpl
 		return nullptr;
 	}
 }
-using namespace AILiveActionDispatcherImpl;
+// Intentionally no file-scope `using namespace`: Unity Build merges multiple .cpp
+// into one TU and would pull this namespace's GetSession / GetRoster /
+// FMoveAndLookAt* into ambiguity with the same names from sibling dispatchers.
+// Call sites use full qualification.
 
 void UAILiveProjectActionDispatcher::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -153,7 +156,7 @@ void UAILiveProjectActionDispatcher::StopPolling()
 void UAILiveProjectActionDispatcher::HandleBrainActionIntent(const FAIL_ActionIntentEvent& Ev)
 {
 	DispatchOne(Ev);
-	if (UAILiveProjectBrainSessionSubsystem* Session = GetSession(GetWorld()))
+	if (UAILiveProjectBrainSessionSubsystem* Session = AILiveActionDispatcherImpl::GetSession(GetWorld()))
 	{
 		Session->AckBrainEvent(Ev.Seq);
 	}
@@ -183,7 +186,7 @@ void UAILiveProjectActionDispatcher::HandleBrainActionCancelled(
 		StopActiveAction(ActorId);
 	}
 
-	if (UAILiveProjectBrainSessionSubsystem* Session = GetSession(GetWorld()))
+	if (UAILiveProjectBrainSessionSubsystem* Session = AILiveActionDispatcherImpl::GetSession(GetWorld()))
 	{
 		Session->AckBrainEvent(CancelSeq);
 	}
@@ -210,7 +213,7 @@ FName UAILiveProjectActionDispatcher::GetActionNameForPawn(APawn* Pawn) const
 void UAILiveProjectActionDispatcher::TickPull()
 {
 	UWorld* World = GetWorld();
-	UAILiveProjectBrainSessionSubsystem* Session = GetSession(World);
+	UAILiveProjectBrainSessionSubsystem* Session = AILiveActionDispatcherImpl::GetSession(World);
 	if (!Session || !Session->IsReady() || !Session->GetClient()) { return; }
 	if (bPullInFlight) { return; }
 	bPullInFlight = true;
@@ -238,8 +241,8 @@ void UAILiveProjectActionDispatcher::TickPull()
 void UAILiveProjectActionDispatcher::DispatchOne(const FAIL_ActionIntentEvent& Ev)
 {
 	UWorld* World = GetWorld();
-	UAILiveProjectBrainSessionSubsystem* Session = GetSession(World);
-	UAILiveProjectRosterSubsystem* Roster = GetRoster(World);
+	UAILiveProjectBrainSessionSubsystem* Session = AILiveActionDispatcherImpl::GetSession(World);
+	UAILiveProjectRosterSubsystem* Roster = AILiveActionDispatcherImpl::GetRoster(World);
 	if (!Session || !Roster) { return; }
 
 	FAIL_IngressRejectRequest Reject;
@@ -295,7 +298,7 @@ void UAILiveProjectActionDispatcher::StopActiveAction(const FString& ActorId)
 
 void UAILiveProjectActionDispatcher::StopMovementForActor(const FString& ActorId)
 {
-	UAILiveProjectRosterSubsystem* Roster = GetRoster(GetWorld());
+	UAILiveProjectRosterSubsystem* Roster = AILiveActionDispatcherImpl::GetRoster(GetWorld());
 	APawn* Pawn = Roster ? Roster->FindPawnByActorId(ActorId) : nullptr;
 	if (!Pawn) { return; }
 	if (AAIController* AIC = Pawn->GetController<AAIController>())
@@ -339,7 +342,7 @@ void UAILiveProjectActionDispatcher::OnActionTerminated(
 void UAILiveProjectActionDispatcher::RouteMoveTo(APawn* Pawn, const FAIL_ActionIntentEvent& Ev)
 {
 	UWorld* World = GetWorld();
-	UAILiveProjectRosterSubsystem* Roster = GetRoster(World);
+	UAILiveProjectRosterSubsystem* Roster = AILiveActionDispatcherImpl::GetRoster(World);
 	UAILiveProjectActionResultReporter* Reporter = World ? World->GetSubsystem<UAILiveProjectActionResultReporter>() : nullptr;
 	if (!Roster) { return; }
 
@@ -348,12 +351,12 @@ void UAILiveProjectActionDispatcher::RouteMoveTo(APawn* Pawn, const FAIL_ActionI
 	if (Mt.bHasCoords)
 	{
 		const FVector Dest(Mt.Coords.X, Mt.Coords.Y, Mt.Coords.Z);
-		bDispatched = CallBPMoveToLocation(Pawn, Dest, /*LookTarget=*/ nullptr);
+		bDispatched = AILiveActionDispatcherImpl::CallBPMoveToLocation(Pawn, Dest, /*LookTarget=*/ nullptr);
 	}
 	else if (Mt.bHasTargetNpc)
 	{
 		AActor* TargetPawn = Roster->FindPawnByActorId(Mt.TargetNpc);
-		bDispatched = CallBPMoveToActor(Pawn, TargetPawn, /*LookTarget=*/ nullptr);
+		bDispatched = AILiveActionDispatcherImpl::CallBPMoveToActor(Pawn, TargetPawn, /*LookTarget=*/ nullptr);
 	}
 	if (!bDispatched)
 	{
@@ -382,7 +385,7 @@ void UAILiveProjectActionDispatcher::RouteSit(APawn* Pawn, const FAIL_ActionInte
 	UWorld* World = GetWorld();
 	UAILiveProjectActionResultReporter* Reporter = World ? World->GetSubsystem<UAILiveProjectActionResultReporter>() : nullptr;
 
-	AActor* SmartObject = FindSmartObjectByLabelOrName(World, Ev.Intent.SitParams.TargetSmartObject);
+	AActor* SmartObject = AILiveActionDispatcherImpl::FindSmartObjectByLabelOrName(World, Ev.Intent.SitParams.TargetSmartObject);
 	if (!SmartObject)
 	{
 		UE_LOG(LogAILiveBrain, Warning, TEXT("sit: target_smartobject '%s' not found in level"),

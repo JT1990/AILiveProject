@@ -20,7 +20,10 @@ namespace AILiveScatterMoverImpl
 		bool bSucceeded = false;
 	};
 }
-using namespace AILiveScatterMoverImpl;
+// Intentionally no file-scope `using namespace`: Unity Build merges multiple .cpp
+// into one TU and would pull this namespace's FMoveAndLookAtLocationParams into
+// ambiguity with the same type from AILiveActionDispatcherImpl. Call sites use
+// full qualification.
 
 void UAILiveProjectScatterMover::ScatterNPCsAroundTarget(
 	UEnvQuery* QueryAsset,
@@ -190,7 +193,7 @@ void UAILiveProjectScatterMover::ScatterNPCsAroundTarget(
 						LocIdx, Target.X, Target.Y, Target.Z,
 						DistCm);
 
-					FMoveAndLookAtLocationParams Params;
+					AILiveScatterMoverImpl::FMoveAndLookAtLocationParams Params;
 					Params.MoveLocation = Target;
 					Params.LookTarget = LookTargetActor;
 					NPC->ProcessEvent(Fn, &Params);
