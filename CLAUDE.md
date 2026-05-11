@@ -8,13 +8,7 @@ The AI Live 是一个多智能体社会博弈系统。将多个来自不同模�
 
 **脑层（LLM 推理 / Prompt / Memory / Parser / Provider 路由 / Agent 状态机）外置 Python Brain Service**。
 
-UE 这边只负责身体侧：
-
-- 世界状态、物理、碰撞、导航
-- 角色表现：动画、移动、Visual override、感知
-- TTS / A2F 执行（运行时音频驱动 MetaHuman 嘴型）
-- 玩家输入与剧情触发器
-- 对 brain service 返回的 action / sentence 做白名单校验后落地（actor_id ∈ roster、sentence 长度限制、audience ⊂ visibility 集 等）
+UE 这边只负责身体：世界仿真、角色表现（含 TTS / A2F 驱动 MetaHuman 嘴型）、玩家输入；以及对 brain 返回的 action / sentence 做白名单校验后落地（见下"Brain ↔ UE 协议"段 IngressValidator）。
 
 UE 模块**禁止**重新长出 LLM provider 调用、prompt 拼装、记忆持久化、agent decision 逻辑；这些一律走 WebSocket 调外置 brain service（`/health` 仍走 HTTP）。
 
@@ -32,7 +26,15 @@ UBT 构建 Editor target：
 <Engine>/Build/BatchFiles/Build.bat AILiveProjectEditor Win64 Development -Project="D:/Project/Unreal/AILiveProject/AILiveProject.uproject"
 ```
 
-改 `.Build.cs` / `.Target.cs` / `.uproject` plugin 列表才需要全量重建（命令见上），其余 `.cpp` / `.h` 改动走 Live Coding。没有自动测试套件；关键烟测是 PIE + T 键触发 TTS/A2F。
+改 `.Build.cs` / `.Target.cs` / `.uproject` plugin 列表才需要全量重建（命令见上），其余 `.cpp` / `.h` 改动走 Live Coding。
+
+自动化测试（headless，无需 PIE）—— Protocol round-trip / IngressValidator / ActionDispatcher 共 19 个测试位于 `Source/AILiveProject/Tests/`，测试路径 `AILive.*`：
+
+```
+"D:\Software\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "D:\Project\Unreal\AILiveProject\AILiveProject.uproject" -ExecCmds="Automation RunTests AILive; Quit" -Unattended -NullRHI -NoSplash -NoSound -TestExit="Automation Test Queue Empty"
+```
+
+端到端烟测：PIE + Brain server 在跑（先看 `BrainService/CLAUDE.md`）；或在 BrainService 侧用 `python -m scripts.inject_demo_move_speak` 注入。T 键触发 TTS/A2F 仍可单独测 MiniMax + ACE 链路。
 
 ### UE 编辑器进程管理
 
@@ -69,13 +71,9 @@ Blueprint / AnimBP / 资产的读写**一律用 Monolith MCP**（在 `.mcp.json`
 
 ## Brain ↔ UE 协议
 
-协议版本与 Brain 引用 commit 的单一指针在 `Docs/protocol_pointer.md`，当前为 `0.2.0`。
+协议版本与 Brain 引用 commit 的单一指针在 `Docs/protocol_pointer.md`，当前为 `0.2.0`；上下行 frame 清单也以 `protocol_pointer.md` 为准。
 
-运行时通信：UE 作为 client 主动连接 Brain server 的 `WS /v1/ws`，全双工。UE 不开监听端口。HTTP 只剩 `/health` 与调试入口。
-
-- **UE 上行**：`session.*` / `roster.register` / `world_state.push` / `action.result` / `speech.result` / `ingress.reject` / `event.ack`
-- **Brain 下行**：`session.*` / `roster.accepted` / `event.action_intent` / `event.action_cancelled` / `event.speech_public` / `ack` / `error`
-- **断线恢复**：`session.resume + last_brain_seq`，Brain 重放未确认事件。
+运行时通信：UE 作为 client 主动连接 Brain server 的 `WS /v1/ws`，全双工。UE 不开监听端口。HTTP 只剩 `/health` 与调试入口。断线后 UE 用 `session.resume + last_brain_seq` 请求 Brain 重放未确认事件。
 
 Brain frame 落地前必须过 `FAILiveProjectIngressValidator` 白名单（actor_id ∈ roster、句长上限、audience ⊂ visibility 集、`target_zone` 已绑定等）。
 
@@ -85,18 +83,18 @@ Brain frame 落地前必须过 `FAILiveProjectIngressValidator` 白名单（acto
 
 模块是薄 glue 层：ACE/TTS C++ API 必须保留，Sound Wave / WAV 资产无法承载运行时生成的音频。GASP / Mover / Visual-override / Animation 等既有 BP 链路保持原样，不重写。
 
-**TTS / A2F**：
-- `UMinimaxACELibrary::TriggerMinimaxSpeech(WorldCtx, Character, Text, ApiKey, VoiceId, Endpoint, A2FProviderName)` —— BP TTS 入口。在 `EAsyncExecution::ThreadPool` 上跑 `MinimaxSpeech::RequestBlocking`，用 `TWeakObjectPtr` 守 `AActor*`，回到游戏线程后找/挂 `UACEAudioCurveSourceComponent`，调 `FACERuntimeModule::AnimateFromAudioSamples` 喂 PCM，通过组件播放音频。典型延迟 1–4 s。
+**TTS / A2F**（Sound Wave / WAV 无法承载运行时生成的音频，所以必须 C++ 喂 PCM 直驱 ACE）：
+- `UMinimaxACELibrary::TriggerMinimaxSpeech(WorldCtx, Character, Text, ApiKey, VoiceId, Endpoint, A2FProviderName)` —— BP TTS 入口，典型延迟 1–4 s。
 - `UMinimaxACELibrary::TriggerMinimaxSpeechFromPawnWithNoiseEx` —— SpeakDispatcher 用的带完成回调版本（`FOnSpeechCompleted` 非 dynamic delegate，便于 `BindWeakLambda`）。完成 timer 在 `AnimateFromAudioSamples` 之前调度以避免延迟翻倍。
 - `UMinimaxACELibrary::PrewarmA2F` —— BeginPlay 里调一次，避免首次调用的 TRT 编译延迟。
 - `UMinimaxACELibrary::GetMinimaxApiKeyFromProjectEnv` —— 从 `<ProjectDir>/.env` 解析 `minimax=<key>`。仅测试用；生产应走 `UAILiveProjectSettings::MinimaxApiKey`。
 
 **Brain glue 子系统**（`Source/AILiveProject/`，所有 LLM/记忆/决策都不在这里）：
 
-- `UAILiveProjectSettings`（`UDeveloperSettings`）—— 读 `Config/DefaultGame.ini` 的 `BrainBaseUrl` / `BrainWebSocketUrl` / `BrainApiToken` / 采样间隔 / 重试参数。
+- `UAILiveProjectSettings` —— `UDeveloperSettings`，从 `Config/DefaultGame.ini` 读 Brain URL / token / 采样 / 重试参数。
 - `UAILiveProjectBrainSessionSubsystem` —— 启动链路：`/health` 校验 `protocol_version` → WS connect → `session.create` → 枚举 `IAILiveAgent` Pawn → `roster.register` → runtime。自动挂 `FWorldDelegates::OnPostWorldInitialization` + per-world `OnWorldBeginPlay`，PIE 不需要 GM 蓝图改动。`StartHandshake()` 也开放给 BP 显式触发。
 - `FAILiveProjectBrainWsClient` —— 封装 UE `WebSockets` 模块，负责连接、JSON envelope、Brain frame 解析与 GameThread 回调。
-- `FAILiveProjectBrainHttpClient` —— 现在只承担 `/health` 与 Bearer / Idempotency-Key / 5xx 指数退避 / `CancelAllInFlight`。
+- `FAILiveProjectBrainHttpClient` —— `/health` 唯一的 HTTP 调用点，运行时其它路径都走 WS。
 - `UAILiveProjectRosterSubsystem` —— `actor_id` ↔ `APawn*` 双向映射 + BP class `FName` 反查表（PerceptionLogger 返回 FName）。
 - `UAILiveProjectWorldStateCollector` —— 周期发送 `world_state.push`（`WorldStateSampleIntervalMs`，默认 500 ms），来源 PerceptionLogger + current_action 启发式。
 - `UAILiveProjectActionDispatcher` —— 接 `event.action_intent`，路由到 move / sit / wait；overlap-cancel 走 `CancelSilently + IntentSeq` 双保护。`event.action_cancelled` 停止 active action 但不上报 result。
@@ -112,9 +110,8 @@ Brain frame 落地前必须过 `FAILiveProjectIngressValidator` 白名单（acto
 
 ## 约定
 
-- **功能实现选 C++**（除非蓝图比 C++ 更合适）。
+- **功能实现默认 C++**；蓝图限于既有 BP 链路（GASP / Mover / Visual-override / NPC 父类）、配置资产（DataAsset / Curve）、UMG、AnimBP、关卡蓝图。
 - 用户用中文交流，回复也用中文。
-- GASP / Mover / Visual-override / NPC 父类等既有 BP 链路沿用，不重写。蓝图限于配置资产（DataAsset / Curve）、UMG / AnimBP / 关卡蓝图、必须继承既有 BP 父类的场景。
 - NPC 外观符号约束：在 UE 这边为 NPC 分配名字 / 昵称 / 性别 / 声线 / 类人虚拟形象时，**严禁**带人类职业、教育、地域、年龄、姓名格式、家乡 等背景叙事；背景人格属于 brain service 范畴。
 - 当 DevLog / 手册与实际资产状态冲突时，**以资产状态为准**并更新 DevLog。不要为了贴合过时文档去改动资产。
 - 文档要扁平化，只写当前确定的结论。**不保留** v1/v2/v3 / 原版 vs 修订 / 修复历史 等迭代痕迹。审查/讨论的过程产物，结论合并进正文后即删。
