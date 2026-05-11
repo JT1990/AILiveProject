@@ -20,7 +20,7 @@ class FAILiveProjectBrainWsClient;
  * roster_register call (schema requires minItems: 1).
  *
  * Sequence (each step waits for the previous future to resolve on GameThread):
- *   1. Health  — verify protocol_version == "0.2.0" or fatal log + abort.
+ *   1. Health  — verify protocol_version == "0.3.0" or fatal log + abort.
  *   2. WebSocket connect to BrainService.
  *   3. Create  — session.create over WebSocket, store game_id in memory only.
  *   4. Roster  — enumerate IAILiveAgent Pawns + roster.register.
@@ -45,6 +45,14 @@ public:
 	bool SendSpeechResult(const FAIL_SpeechResultRequest& Req);
 	bool SendIngressReject(const FAIL_IngressRejectRequest& Req);
 	bool AckBrainEvent(int64 Seq);
+
+	/**
+	 * UE 端开场动画（Round-001 Tick-0001/0002）完成后调用。
+	 * Brain 接到 `round.start_llm_phase` 帧后启动 N 拍 LLM 循环，
+	 * 期间通过现有 `event.speech_public` / `event.action_intent` 帧推送给 UE。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AILive|Brain")
+	bool RequestStartLLMPhase(int32 RoundNo, const FString& Phase, int32 NTicks);
 
 	/**
 	 * Trigger from GM_Sandbox BP BeginPlay (preferred) or rely on the

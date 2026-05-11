@@ -1,6 +1,7 @@
 #include "Rounds/Round01RuleIntroDirector.h"
 
 #include "AIController.h"
+#include "AILiveProjectBrainSessionSubsystem.h"
 #include "AILiveProjectScatterMover.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -641,6 +642,22 @@ void ARound01RuleIntroDirector::UnbindVideoDelegate()
 void ARound01RuleIntroDirector::CompleteRound01()
 {
 	UnbindVideoDelegate();
+
+	// 开场动画收尾后让 Brain 启动 Round-001 的 3 拍 LLM 自由发言（day_discuss）。
+	// 失败仅 log，不阻塞场景推进；UE 端开场动画的播放成功不应被 Brain 后台
+	// 状态打断。
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UAILiveProjectBrainSessionSubsystem* Brain =
+				GI->GetSubsystem<UAILiveProjectBrainSessionSubsystem>())
+		{
+			const bool bSent = Brain->RequestStartLLMPhase(/*RoundNo=*/1, TEXT("day_discuss"), /*NTicks=*/3);
+			UE_LOG(LogRound01, Log,
+				TEXT("[Round01] requested LLM phase start: success=%d"),
+				bSent ? 1 : 0);
+		}
+	}
+
 	OnRound01Completed.Broadcast();
 	DebugMessage(TEXT("[Round01] complete"), FLinearColor::Green);
 	SceneState = ERound01State::Idle;

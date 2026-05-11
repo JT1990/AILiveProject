@@ -251,6 +251,15 @@ bool FAILiveProjectBrainWsClient::AckEvent(const FString& GameId, int64 Seq)
 	return SendEnvelope(TEXT("event.ack"), GameId, SerializeObject(Payload));
 }
 
+bool FAILiveProjectBrainWsClient::SendRoundStartLLMPhase(const FString& GameId, int32 RoundNo, const FString& Phase, int32 NTicks)
+{
+	TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetNumberField(TEXT("round_no"), static_cast<double>(RoundNo));
+	Payload->SetStringField(TEXT("phase"), Phase);
+	Payload->SetNumberField(TEXT("n_ticks"), static_cast<double>(NTicks));
+	return SendEnvelope(TEXT("round.start_llm_phase"), GameId, SerializeObject(Payload));
+}
+
 int64 FAILiveProjectBrainWsClient::GetLastBrainSeq() const
 {
 	return State->LastBrainSeq;

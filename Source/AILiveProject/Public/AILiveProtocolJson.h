@@ -7,7 +7,7 @@ class FJsonValue;
 class FJsonObject;
 
 /**
- * JSON serialization helpers for the AILive Brain <-> UE protocol v0.2.0.
+ * JSON serialization helpers for the AILive Brain <-> UE protocol v0.3.0.
  *
  * Per-type ToJson / FromJson functions instead of templates with explicit
  * specializations: half the structs need bespoke handling (oneOf discriminant,

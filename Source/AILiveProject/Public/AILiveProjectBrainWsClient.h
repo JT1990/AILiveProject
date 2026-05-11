@@ -7,7 +7,7 @@
 class IWebSocket;
 
 /**
- * Runtime WebSocket client for the BrainService v0.2 transport.
+ * Runtime WebSocket client for the BrainService v0.3 transport.
  *
  * UE is the WebSocket client. BrainService remains the server and can push
  * action/speech events back over the same connection after UE connects.
@@ -47,6 +47,7 @@ public:
 	bool SendSpeechResult(const FString& GameId, const FAIL_SpeechResultRequest& Req);
 	bool SendIngressReject(const FString& GameId, const FAIL_IngressRejectRequest& Req);
 	bool AckEvent(const FString& GameId, int64 Seq);
+	bool SendRoundStartLLMPhase(const FString& GameId, int32 RoundNo, const FString& Phase, int32 NTicks);
 
 	int64 GetLastBrainSeq() const;
 

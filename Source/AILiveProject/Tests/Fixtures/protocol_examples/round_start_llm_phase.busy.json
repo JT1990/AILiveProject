@@ -1,0 +1,8 @@
+{
+  "details": {
+    "hint": "An LLM phase is already running for this game_id. Wait for the in-flight ticks to finish (Brain will emit orchestrator.tick_resolved events) before sending another round.start_llm_phase frame."
+  },
+  "error_code": "ROUND_RUN_BUSY",
+  "message": "An LLM phase is already in progress for this game_id; only one phase may run at a time.",
+  "retryable": false
+}

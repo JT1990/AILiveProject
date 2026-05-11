@@ -130,10 +130,10 @@ void UAILiveProjectBrainSessionSubsystem::Phase1_HealthCheck()
 				This->bHandshakeInFlight = false;
 				return;
 			}
-			if (Resp->ProtocolVersion != TEXT("0.2.0"))
+			if (Resp->ProtocolVersion != TEXT("0.3.0"))
 			{
 				UE_LOG(LogAILiveBrain, Fatal,
-					TEXT("Brain protocol_version mismatch: got '%s' expected '0.2.0'"),
+					TEXT("Brain protocol_version mismatch: got '%s' expected '0.3.0'"),
 					*Resp->ProtocolVersion);
 				This->bHandshakeInFlight = false;
 				return;
@@ -356,4 +356,19 @@ bool UAILiveProjectBrainSessionSubsystem::SendIngressReject(const FAIL_IngressRe
 bool UAILiveProjectBrainSessionSubsystem::AckBrainEvent(int64 Seq)
 {
 	return WsClient && !GameId.IsEmpty() && WsClient->AckEvent(GameId, Seq);
+}
+
+bool UAILiveProjectBrainSessionSubsystem::RequestStartLLMPhase(int32 RoundNo, const FString& Phase, int32 NTicks)
+{
+	if (!WsClient || !bReady)
+	{
+		UE_LOG(LogAILiveBrain, Warning,
+			TEXT("RequestStartLLMPhase dropped: client=%d ready=%d"),
+			WsClient ? 1 : 0, bReady ? 1 : 0);
+		return false;
+	}
+	UE_LOG(LogAILiveBrain, Log,
+		TEXT("Requesting LLM phase: round_no=%d phase=%s n_ticks=%d"),
+		RoundNo, *Phase, NTicks);
+	return WsClient->SendRoundStartLLMPhase(GameId, RoundNo, Phase, NTicks);
 }
