@@ -413,7 +413,7 @@ orchestrator 按 per-agent terminal outcome 推进本拍，不得因单个 agent
 
 #### 5.2.3 失败处理
 
-- Validation failed → reject sample 重试 Reasoner 最多 3 次。
+- Validation failed → reject sample 重试 Reasoner 最多 3 次（含首次）。
 - 3 次仍失败 → 写 `system.validation_failed` 事件，保留 `raw_llm_output` 与失败原因；该拍该 agent 视为 abstain（bid 视为 `pass`），不得派生四通道事件。
 - agent LLM 调用超时 → 按 §6.3 重试；仍失败写 `system.agent_timeout`，该拍该 agent 视为 abstain。
 - 失败本身**必须**写入 append-only 事件流。
@@ -509,8 +509,7 @@ agent 的私有推理（`scratchpad`）可与公开话术（最终 `speech.publi
 
 **动作**：
 
-- 综合分 > `filter_threshold`（建议 0.4） → reject sample 重试 Reasoner 最多 2 次。
-- 2 次仍失败 → 由 filter 改写或接受原 intended，必须写违规标记。
+- 综合分 > `filter_threshold`（建议 0.4） → filter LLM 尝试改写（`rewrite`）；若无法改写或 filter provider 失败，接受原 intended 并写违规标记（`accept_with_violation`）。
 - 改写后文本作为 `speech.public` 落地，源 `speech.intended` 原文**不变**（违反 §2.1 append-only 即视为实现错误）。
 
 **公开事件载荷**：`speech.public.payload` 只包含对 public viewer 可见的公开发言文本及公开必要元数据；不得包含仅 orchestrator / system 可见的内部字段。
@@ -607,9 +606,9 @@ agent 数较多时可拆「焦点 N 人 + 其他摘要」以控 token。
 
 | 故障类型                     | 处理                                                                                                                                             |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| agent LLM 调用超时           | 重试 N 次（指数退避）；仍失败写 `system.agent_timeout`；该拍该 agent 视为 abstain（bid=`pass`）；**绝不**让超时导致 seq 跳号或乱序               |
-| Structured output 校验失败   | Validator 记录失败原因并 reject sample 重试 Reasoner 最多 3 次；3 次后写 `system.validation_failed`，保留 `raw_llm_output`；该拍该 agent abstain |
-| Listener-as-filter 判定泄露  | 重试 Reasoner 最多 2 次；2 次后由 filter 改写或接受 intended 但写违规标记；改写文本作为 `speech.public` 落地，源 intended 原文**不变**           |
+| agent LLM 调用超时           | 重试最多 2 次（含首次）；仍失败写 `system.agent_timeout`；该拍该 agent 视为 abstain（bid=`pass`）；**绝不**让超时导致 seq 跳号或乱序               |
+| Structured output 校验失败   | Validator 记录失败原因并 reject sample 重试 Reasoner 最多 3 次（含首次）；3 次后写 `system.validation_failed`，保留 `raw_llm_output`；该拍该 agent abstain |
+| Listener-as-filter 判定泄露  | filter LLM 改写（`rewrite`）或接受原 intended 并写违规标记（`accept_with_violation`）；改写文本作为 `speech.public` 落地，源 intended 原文**不变** |
 | 所有 agent 都 abstain 或超时 | 写 `tick_resolved` 且 `winner_actor = null`；orchestrator 触发场景推进（直接提问、阶段切换、引入环境事件），避免冷场死锁                         |
 
 **关键约束**：所有失败也**必须**写入 append-only 事件流。失败本身是博弈历史的一部分，必须可审计。
