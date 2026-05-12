@@ -215,7 +215,10 @@ void UAILiveProjectBrainSessionSubsystem::Phase5_StartRuntime()
 	UE_LOG(LogAILiveBrain, Log, TEXT("Handshake phase 5: StartRuntime"));
 	UWorld* World = GetWorld();
 	if (!World) { return; }
-	if (auto* C = World->GetSubsystem<class UAILiveProjectWorldStateCollector>()) { C->StartPolling(); }
+	// WorldStateCollector intentionally disabled: Brain prompts do not currently
+	// consume world.* events (section 7 whitelist excludes them). Re-enable only
+	// after a near-field perception summary projection is designed.
+	// if (auto* C = World->GetSubsystem<class UAILiveProjectWorldStateCollector>()) { C->StartPolling(); }
 }
 
 void UAILiveProjectBrainSessionSubsystem::InstallWebSocketHandlers()

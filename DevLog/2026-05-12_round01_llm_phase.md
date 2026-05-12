@@ -95,8 +95,44 @@ UE 端 vendored fixture 由 `BrainService/scripts/sync-protocol-examples.ps1` �
 
 **端到端**：BrainService 跑 `python -m brain.server`（自动加载 `.env`）→ PIE 启动自动 handshake → 按 `1` 键 → 视频播完 → UE 自动发 `round.start_llm_phase` → Brain 跑 3 拍 → `BrainService/LLMOutput/{YYYYMMDDHHmm}/` 产出 30 个 md（`Tick000{3,4,5}-NPC{01..10}.md`）。期间 UE 端依次收到 ≤3 条 `event.speech_public`（每拍 floor winner），SpeakDispatcher 触发 TTS/A2F。
 
+## 2026-05-12 续：WorldStateCollector 暂关 + 对接 Brain prompt 加固
+
+跑通的首个 Round-001 端到端暴露了 prompt / validator 一批问题（详见 `BrainService/DevLog/2026-05-12_round_runner_zombie_round01.md` 末尾的「prompt + provider 加固」节）。本节只记 UE 侧改动。
+
+### 改动：暂关 WorldStateCollector 轮询
+
+`Source/AILiveProject/Private/AILiveProjectBrainSessionSubsystem.cpp:Phase5_StartRuntime()` 注释掉 `C->StartPolling()` 一行。子系统类 `UAILiveProjectWorldStateCollector` 仍在仓里，只是不再每 500ms 推 `world_state.push`。
+
+**为什么暂关**：
+
+- Brain 端 prompt 段 7（公开发言近场窗口）默认 `quote_by_round` 拉 viewer 全量可见事件，会把 `world.actor_state` / `world.perception.sight` / `world.client_sample` 一起拉进去——payload 没 text 字段，渲染为空，300 行 `seq=X [world.actor_state] system:` 噪声彻底淹没真信号。
+- 当前 agent 决策链路（reasoner / floor / listener）并不消费 world.* 事件；推它们到 Brain 只是空跑事件流（SQLite 表过去一晚累计 23 万行 `world.perception.sight`、5 万行 `world.actor_state`）。
+- memory_principles §3.1 反模式表明确「滚动窗口硬存储为唯一手段」违反全量追溯——500ms 高频感知噪声把段 7 当滚动窗口写满，是触发这条反模式的典型路径。
+
+**重启前置条件**：要让 agent 真正消费近场感知前，必须先在 Brain 端做「近场感知摘要」投影（去重 + 时间桶聚合：状态变化才出条，非每帧一条），再 prompt 拉投影而非原始事件。届时把 `BrainSessionSubsystem.cpp:218` 那行 `C->StartPolling()` 注释撤掉即可，UE 侧无其他配套改动。
+
+Brain 端配套（已落地，本次 UE 侧不需要改）：
+
+- `brain/orchestration/prompt_assembly.py` 段 7 加 `_SEG7_EVENT_TYPES` 白名单（即便 collector 重启，prompt 也只收叙事性事件，需要感知时显式接入新投影段）。
+- seg_1 + seg_2 合并为单条 system 消息（治 minimax）。
+- 完整 4 通道 schema 例子内嵌 system message。
+- `reasoner_v1.schema.json` 的 `enum` 字段补 `"type": "string"`（治 kimi/moonshot strict）。
+- provider 三档模式 + per-provider timeout + retry 预算重排。
+
+### 验证
+
+- UE Automation `AILive.*` 19 项不受影响（不依赖 WorldStateCollector）。
+- 完整 Round-001 端到端（`BrainService/LLMOutput/202605121826/`）→ 10/10 NPC `pass: True`，单拍 5-72s（kimi 思考最慢），整轮约 3 分钟，相比修复前的 10+ 分钟 + 大面积 validation_failed 已稳定。
+
+### 下游接手点
+
+1. **可以开始做的**：投票/触碰/感染状态机/解药等僵尸核心机制；Tick-0001/0002 协议化把开门/视频/广播 TTS 也搬到 Brain 驱动。
+2. **复用 WorldStateCollector**：先在 Brain 仓做投影，再撤注释。注释行号 `AILiveProjectBrainSessionSubsystem.cpp:218`（`Phase5_StartRuntime`）。
+3. **`UAILiveProjectWorldStateCollector` 不要删**：UE 端基础设施（PerceptionLogger + Roster 反查 + transport schema）仍有效，只是上游消费者还没准备好。
+
 ## 当前不在范围
 
 - Tick-0001/0002 协议化（开门/视频/无角色广播 TTS 仍走 UE 端 `round01.start` 自驱动）。
 - Reflection 9 问、phase summary、judge worker。
 - 投票 phase / 触碰 phase / 感染状态机 / 解药机制——僵尸游戏的核心博弈机制本轮仅靠"自由发言"占位，下阶段补。
+- 「近场感知摘要」投影（重启 WorldStateCollector 的前置条件）。
